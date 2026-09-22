@@ -10,6 +10,7 @@
  */
 import type { Engine, Executor, OrderRequest, OrderResult } from "../../core/engine.js";
 import type { Logger } from "../../core/util.js";
+import { TOKEN_2022_PROGRAM, TOKEN_PROGRAM, buildCloseAccountsTx } from "./rent.js";
 import { measureFill, parseWalletSecret, signTransaction, SolanaRpc, type Wallet } from "./solana.js";
 
 export interface LiveOptions {
@@ -38,6 +39,8 @@ export class LiveExecutor implements Executor {
   private dayKey = "";
   private dayLoss = 0;
   private timer: NodeJS.Timeout | null = null;
+  private rentTimer: NodeJS.Timeout | null = null;
+  reclaimed = 0;
 
   constructor(private o: LiveOptions) {
     this.rpc = new SolanaRpc(o.rpcHttp);
@@ -61,10 +64,39 @@ export class LiveExecutor implements Executor {
     };
     void refresh();
     this.timer = setInterval(() => void refresh(), 30_000);
+    this.rentTimer = setInterval(() => void this.reclaimRent(), 15 * 60_000);
+    this.rentTimer.unref?.();
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    if (this.rentTimer) clearInterval(this.rentTimer);
+  }
+
+  /** Close empty token accounts (not belonging to open positions) to get their rent back. */
+  async reclaimRent(): Promise<number> {
+    const w = this.wallet;
+    if (!w) return 0;
+    try {
+      const held = new Set([...this.o.engine().positions.values()].map((p) => p.mint));
+      const targets: { account: string; program: string }[] = [];
+      for (const program of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
+        for (const a of await this.rpc.tokenAccounts(w.address, program)) {
+          if (a.amount === 0 && !held.has(a.mint) && !this.inflight.has(`buy:${a.mint}`) && !this.inflight.has(`sell:${a.mint}`)) targets.push({ account: a.pubkey, program });
+        }
+      }
+      if (targets.length === 0) return 0;
+      const batch = targets.slice(0, 12);
+      const tx = buildCloseAccountsTx(w.address, batch, await this.rpc.latestBlockhash());
+      const { signed, signature } = signTransaction(tx, w);
+      await this.rpc.sendTransaction(signed);
+      this.reclaimed += batch.length;
+      this.o.log.info("rent reclaim sent", { accounts: batch.length, approxSol: +(batch.length * 0.00203928).toFixed(5), signature });
+      return batch.length;
+    } catch (e) {
+      this.o.log.warn("rent reclaim failed", { err: String(e) });
+      return 0;
+    }
   }
 
   status() {
@@ -192,7 +224,14 @@ export class LiveExecutor implements Executor {
         }
         if (status && (status.confirmed || status.err)) break;
       }
-      if (!status || (!status.confirmed && !status.err)) return this.noteError(order, order.side === "buy" ? "live_timeout" : "live_error");
+      if (!status || (!status.confirmed && !status.err)) {
+        // one last look with full history before declaring the order lost
+        await new Promise((r) => setTimeout(r, Math.min(20_000, (this.o.confirmTimeoutMs ?? 75_000) / 4)));
+        status = await this.rpc.call<{ value: ({ confirmationStatus?: string; err?: unknown } | null)[] }>("getSignatureStatuses", [[signature], { searchTransactionHistory: true }])
+          .then((r) => (r?.value?.[0] ? { confirmed: ["confirmed", "finalized"].includes(r.value[0].confirmationStatus ?? ""), err: r.value[0].err ?? null } : null))
+          .catch(() => null);
+        if (!status || (!status.confirmed && !status.err)) return this.noteError(order, order.side === "buy" ? "live_timeout" : "live_error");
+      }
       if (status.err) {
         const errText = JSON.stringify(status.err);
         const slip = /6002|6003|6004|TooMuch|TooLittle|Slippage|0x1772|0x1773/i.test(errText);

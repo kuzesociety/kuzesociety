@@ -987,7 +987,7 @@ function poolSellQuote(p, tokensIn) {
 }
 
 // src/core/positions.ts
-var DEFAULT_COSTS = { priorityFeeSol: 5e-4, platformFeePct: 0.5, ataRentSol: 203928e-8 };
+var DEFAULT_COSTS = { priorityFeeSol: 5e-4, platformFeePct: 0.5, ataRentSol: 203928e-8, refundRent: true };
 function venueOf(t) {
   if (t.stage === "curve") return t.vTok > 0 && t.realTok > 0 ? "curve" : "none";
   if (t.stage === "migrating") return "none";
@@ -1033,7 +1033,7 @@ function quoteSell(t, tokens, costs, solUsd = 0, closesAccount = false) {
   else if (venue === "amm") q = poolSellQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, tokens);
   else q = poolSellQuote(approxPool(t, solUsd), tokens);
   const platform = q.solOut * (costs.platformFeePct / 100);
-  const refund = closesAccount ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
+  const refund = closesAccount && costs.refundRent ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
   const lamports = Math.max(0, q.solOut - platform - costs.priorityFeeSol * LAMPORTS_PER_SOL + refund);
   return {
     ok: true,
@@ -1150,7 +1150,7 @@ var OutcomeTracker = class {
     const tokensUi = q.tokens / 1e6;
     const pricePerMcap = 1e6 / t.supply;
     h.a = tokensUi * pricePerMcap * (1 - sellFee) / this.opts.sizeSol;
-    h.b = (this.opts.costs.priorityFeeSol - this.opts.costs.ataRentSol) / this.opts.sizeSol;
+    h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
     h.ts = now;
   }
   mult(h, mcap) {
@@ -1384,8 +1384,42 @@ function buildReport(samples, settings, model, closed, now) {
       detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade over ${signalStats.n} signals; 95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%. Past results in this market can still stop working \u2014 start small.`
     };
   }
+  let suggestion = null;
+  const zBound = (xs, z) => {
+    const m = meanCI(xs);
+    return Number.isFinite(m.lo) ? m.mean - (m.mean - m.lo) / 1.96 * z : -Infinity;
+  };
+  const cur = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)].map(retOf);
+  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
+  const mid = t0 + (t1 - t0) / 2;
+  for (let min = 50; min <= 95; min += 5) {
+    const rows = checkpoints.filter((s) => s.score >= min);
+    if (rows.length < 150) continue;
+    GRID.forEach((g, i) => {
+      const val = (s) => s.grid?.[i];
+      const all = rows.map(val).filter((x) => Number.isFinite(x));
+      if (all.length < 150) return;
+      const lo = zBound(all, 3.5);
+      if (!(lo > 0) || lo <= bestLo + 5e-3) return;
+      const older = rows.filter((s) => s.ts < mid).map(val).filter((x) => Number.isFinite(x));
+      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x) => Number.isFinite(x));
+      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
+      const m = meanCI(all);
+      bestLo = lo;
+      suggestion = {
+        minScore: min,
+        tpPct: g.tp,
+        slPct: g.sl,
+        avgRet: m.mean,
+        retLo: lo,
+        n: all.length,
+        why: `score \u2265 ${min} with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
+      };
+    });
+  }
   return {
     generatedAt: now,
+    suggestion,
     samples: samples.length,
     checkpoints: checkpoints.length,
     signals: signals.length,
@@ -1430,6 +1464,7 @@ var DEFAULT_SETTINGS = {
   retryWindowSec: 20,
   reentry: false,
   paperLatencyMs: 1500,
+  autoTune: false,
   filters: {
     minMcapSol: 0,
     maxMcapSol: 0,
@@ -1489,6 +1524,7 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     retryWindowSec: clamp(num(i.retryWindowSec, b.retryWindowSec), 0, 600),
     reentry: bool(i.reentry, b.reentry),
     paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
+    autoTune: bool(i.autoTune, b.autoTune),
     filters: {
       minMcapSol: clamp(num(f.minMcapSol, bf.minMcapSol), 0, 1e7),
       maxMcapSol: clamp(num(f.maxMcapSol, bf.maxMcapSol), 0, 1e7),
@@ -1658,7 +1694,7 @@ function poisson(r, lambda) {
 var MarketSim = class {
   opts;
   r;
-  tokens = [];
+  launchedCount = 0;
   active = [];
   retail = [];
   smart = [];
@@ -1695,7 +1731,10 @@ var MarketSim = class {
       let n = poisson(this.r, launchP);
       while (n-- > 0) this.launch(ts + Math.floor(this.r() * step), batch);
       for (const t of this.active) if (!t.dead) this.stepToken(t, ts, step, batch);
-      if (this.active.length > 400 || ts % 1e4 < step) this.active = this.active.filter((t) => !t.dead);
+      if (this.active.length > 400 || ts % 1e4 < step) {
+        for (const t of this.active) if (t.dead) t.bags.clear();
+        this.active = this.active.filter((t) => !t.dead);
+      }
       batch.sort((a, b) => a.ts - b.ts);
       for (const ev of batch) yield ev;
     }
@@ -1742,7 +1781,7 @@ var MarketSim = class {
       smartChecked: false,
       lastTradeAt: ts
     };
-    this.tokens.push(t);
+    this.launchedCount++;
     this.active.push(t);
     this.recentNames.push({ ts, name, symbol });
     this.truth.set(t.mint, { mint: t.mint, q, qEarly, devType, graduated: false, peakMcapSol: 28 });
@@ -1995,7 +2034,7 @@ var MarketSim = class {
     t.poolOpenAt = ts + 3;
   }
   get launched() {
-    return this.tokens.length;
+    return this.launchedCount;
   }
 };
 
@@ -2286,27 +2325,40 @@ var REASON_TEXT = {
   "filter:dev_sold": "Dev already sold more than your limit"
 };
 var HOUR = 36e5;
-var Funnel = class {
+var Funnel = class _Funnel {
   recent = new Ring(500);
   byId = /* @__PURE__ */ new Map();
-  /** per-hour counters: [hourStart, counts] */
   hours = [];
   hour(now) {
     const t = Math.floor(now / HOUR) * HOUR;
     let h = this.hours[this.hours.length - 1];
     if (!h || h.t !== t) {
-      h = { t, scored: 0, signals: 0, entered: 0, failed: 0, blocked: /* @__PURE__ */ new Map(), hist: new Array(10).fill(0), maxScore: 0 };
+      if (h) this.finalize(h);
+      h = { t, passes: 0, signals: 0, entered: 0, failed: 0, blocked: /* @__PURE__ */ new Map(), tokMax: /* @__PURE__ */ new Map(), hist100: null, coins: 0, maxScore: 0 };
       this.hours.push(h);
       if (this.hours.length > 48) this.hours.shift();
     }
     return h;
   }
-  /** Called for every scoring pass of a token (first score per token per minute). */
-  noteScored(now, score) {
+  finalize(h) {
+    if (!h.tokMax) return;
+    h.hist100 = _Funnel.toHist(h.tokMax);
+    h.coins = h.tokMax.size;
+    h.tokMax = null;
+  }
+  static toHist(m) {
+    const hist = new Array(101).fill(0);
+    for (const v of m.values()) hist[Math.max(0, Math.min(100, Math.floor(v)))]++;
+    return hist;
+  }
+  /** Every scoring pass: tracks each coin's best score of the hour. */
+  noteScored(now, mint, score) {
     const h = this.hour(now);
-    h.scored++;
-    h.hist[Math.min(9, Math.floor(score / 10))]++;
+    h.passes++;
     if (score > h.maxScore) h.maxScore = score;
+    const m = h.tokMax;
+    const prev = m.get(mint);
+    if (prev === void 0 || score > prev) m.set(mint, score);
   }
   add(rec) {
     this.recent.push(rec);
@@ -2317,6 +2369,7 @@ var Funnel = class {
     }
     const h = this.hour(rec.ts);
     h.signals++;
+    if (rec.score > h.maxScore) h.maxScore = rec.score;
     this.count(h, rec.decision, rec.reason);
   }
   count(h, decision, reason) {
@@ -2335,27 +2388,43 @@ var Funnel = class {
   get(id) {
     return this.byId.get(id);
   }
+  /**
+   * Summary over the trailing window. `hist` has 10 bins of per-coin best scores;
+   * `coinsAbove[t]` = coins whose best score reached ≥ t (t = 0…100) in the window.
+   */
   summary(now, windowHours = 1) {
+    this.hour(now);
     const from = now - windowHours * HOUR;
     let scored = 0;
     let signals = 0;
     let entered = 0;
     let failed = 0;
     let maxScore = 0;
-    const hist = new Array(10).fill(0);
+    let hours = 0;
+    const hist100 = new Array(101).fill(0);
     const blocked = /* @__PURE__ */ new Map();
     for (const h of this.hours) {
       if (h.t + HOUR <= from) continue;
-      scored += h.scored;
+      hours++;
+      const hh = h.tokMax ? _Funnel.toHist(h.tokMax) : h.hist100 ?? [];
+      hh.forEach((v, i) => hist100[i] += v);
+      scored += h.tokMax ? h.tokMax.size : h.coins;
       signals += h.signals;
       entered += h.entered;
       failed += h.failed;
       if (h.maxScore > maxScore) maxScore = h.maxScore;
-      h.hist.forEach((v, i) => hist[i] += v);
       for (const [k, v] of h.blocked) blocked.set(k, (blocked.get(k) ?? 0) + v);
     }
+    const hist = new Array(10).fill(0);
+    hist100.forEach((v, i) => hist[Math.min(9, Math.floor(i / 10))] += v);
+    const coinsAbove = new Array(101).fill(0);
+    let acc = 0;
+    for (let i = 100; i >= 0; i--) {
+      acc += hist100[i];
+      coinsAbove[i] = acc;
+    }
     const reasons = [...blocked.entries()].sort((a, b) => b[1] - a[1]).map(([reason, n]) => ({ reason, n, text: REASON_TEXT[reason] ?? reason }));
-    return { windowHours, scored, signals, entered, failed, maxScore, hist, reasons };
+    return { windowHours, hours: Math.max(1, hours), scored, signals, entered, failed, maxScore, hist, coinsAbove, reasons };
   }
 };
 
@@ -3395,9 +3464,9 @@ var Engine = class {
       e.x = x;
       e.at = now;
     }
+    this.funnel.noteScored(now, t.mint, res.score);
     if (now - e.lastFunnelAt >= 6e4) {
       e.lastFunnelAt = now;
-      this.funnel.noteScored(now, res.score);
       this.xRes[res.stage].push(x);
     }
     this.checkpoints(t, e, now);
@@ -3692,8 +3761,11 @@ var Engine = class {
     this.stats.entries++;
     this.stats.fees += r.fees ?? 0;
     if (rec) this.funnel.update(rec.id, "entered", void 0, pos.id);
-    if (t) this.evaluatePosition(pos, t, r.ts);
     this.hooks.onPosition?.(pos, "fill");
+    if (this.killed && t) {
+      pos.notes.push("filled after the kill switch \u2014 selling");
+      this.sell(pos, t, 1, "kill", r.ts);
+    } else if (t) this.evaluatePosition(pos, t, r.ts);
     this.journal({ type: "entry_filled", pos: pos.id, mint: pos.mint, lamports: r.lamports, tokens: r.tokens, mcap: pos.entryMcapSol, sig: r.sig });
   }
   onSellResult(pos, o, r, t) {
@@ -3862,7 +3934,11 @@ var Engine = class {
     const p = this.positions.get(positionId);
     if (!p) return;
     if (tokensInWallet <= 0) {
-      p.notes.push("not found in wallet after restart \u2014 closed without proceeds (sold elsewhere?)");
+      if (p.status === "open" || p.status === "closing") {
+        p.proceeds += Math.max(0, p.value);
+        p.notes.push("not in wallet after restart \u2014 booked at last marked value (estimate)");
+      } else p.notes.push("entry never landed");
+      p.tokensLeft = 0;
       this.closePosition(p, "external", this.now);
       return;
     }

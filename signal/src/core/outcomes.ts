@@ -173,7 +173,7 @@ export class OutcomeTracker {
     const tokensUi = q.tokens / 1e6;
     const pricePerMcap = 1e6 / t.supply; // SOL per whole token per 1 SOL of mcap
     h.a = (tokensUi * pricePerMcap * (1 - sellFee)) / this.opts.sizeSol;
-    h.b = (this.opts.costs.priorityFeeSol - this.opts.costs.ataRentSol) / this.opts.sizeSol;
+    h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
     h.ts = now;
   }
 

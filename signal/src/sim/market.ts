@@ -135,7 +135,7 @@ function poisson(r: () => number, lambda: number): number {
 export class MarketSim {
   readonly opts: SimOptions;
   private r: () => number;
-  private tokens: SimToken[] = [];
+  private launchedCount = 0;
   private active: SimToken[] = [];
   private retail: string[] = [];
   private smart: string[] = [];
@@ -176,7 +176,10 @@ export class MarketSim {
       let n = poisson(this.r, launchP);
       while (n-- > 0) this.launch(ts + Math.floor(this.r() * step), batch);
       for (const t of this.active) if (!t.dead) this.stepToken(t, ts, step, batch);
-      if (this.active.length > 400 || ts % 10_000 < step) this.active = this.active.filter((t) => !t.dead);
+      if (this.active.length > 400 || ts % 10_000 < step) {
+        for (const t of this.active) if (t.dead) t.bags.clear();
+        this.active = this.active.filter((t) => !t.dead);
+      }
       batch.sort((a, b) => a.ts - b.ts);
       for (const ev of batch) yield ev;
     }
@@ -226,7 +229,7 @@ export class MarketSim {
       smartChecked: false,
       lastTradeAt: ts,
     };
-    this.tokens.push(t);
+    this.launchedCount++;
     this.active.push(t);
     this.recentNames.push({ ts, name, symbol });
     this.truth.set(t.mint, { mint: t.mint, q, qEarly, devType, graduated: false, peakMcapSol: 28 });
@@ -496,6 +499,6 @@ export class MarketSim {
   }
 
   get launched() {
-    return this.tokens.length;
+    return this.launchedCount;
   }
 }

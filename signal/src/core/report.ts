@@ -46,6 +46,8 @@ export interface LearnReport {
   grid: GridCell[];
   best: GridCell | null;
   gate: { pass: boolean; verdict: string; detail: string };
+  /** robustly better settings than the current ones, when the evidence supports it */
+  suggestion: { minScore: number; tpPct: number; slPct: number; avgRet: number; retLo: number; n: number; why: string } | null;
   paper: { trades: number; wins: number; winRate: number; pnlSol: number; avgPct: number; profitFactor: number; maxDrawdownSol: number };
   model: { version: string; source: string; training: ModelSpec["training"] | null };
 }
@@ -165,8 +167,47 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     };
   }
 
+  // Suggestion: search 10 thresholds × 20 exit combos (200 hypotheses) for settings that beat
+  // the current ones. To avoid crowning a lucky winner: a multiple-comparison-corrected bound
+  // (z = 3.5 instead of 1.96) must be positive, and the result must hold separately in the
+  // older and the newer half of the data (walk-forward stability).
+  let suggestion: LearnReport["suggestion"] = null;
+  const zBound = (xs: number[], z: number) => {
+    const m = meanCI(xs);
+    return Number.isFinite(m.lo) ? m.mean - ((m.mean - m.lo) / 1.96) * z : -Infinity;
+  };
+  const cur = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)].map(retOf);
+  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
+  const mid = t0 + (t1 - t0) / 2;
+  for (let min = 50; min <= 95; min += 5) {
+    const rows = checkpoints.filter((s) => s.score >= min);
+    if (rows.length < 150) continue;
+    GRID.forEach((g, i) => {
+      const val = (s: Sample) => s.grid?.[i];
+      const all = rows.map(val).filter((x): x is number => Number.isFinite(x));
+      if (all.length < 150) return;
+      const lo = zBound(all, 3.5);
+      if (!(lo > 0) || lo <= bestLo + 0.005) return;
+      const older = rows.filter((s) => s.ts < mid).map(val).filter((x): x is number => Number.isFinite(x));
+      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x): x is number => Number.isFinite(x));
+      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
+      const m = meanCI(all);
+      bestLo = lo;
+      suggestion = {
+        minScore: min,
+        tpPct: g.tp,
+        slPct: g.sl,
+        avgRet: m.mean,
+        retLo: lo,
+        n: all.length,
+        why: `score ≥ ${min} with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`,
+      };
+    });
+  }
+
   return {
     generatedAt: now,
+    suggestion,
     samples: samples.length,
     checkpoints: checkpoints.length,
     signals: signals.length,

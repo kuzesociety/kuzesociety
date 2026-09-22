@@ -26,6 +26,8 @@ export type Account = {
 
 export type FunnelSummary = {
   windowHours: number;
+  hours: number;
+  coinsAbove: number[];
   scored: number;
   signals: number;
   entered: number;

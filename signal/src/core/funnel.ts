@@ -59,29 +59,60 @@ export const REASON_TEXT: Record<string, string> = {
 
 const HOUR = 3_600_000;
 
+interface HourStats {
+  t: number;
+  /** scoring passes */
+  passes: number;
+  signals: number;
+  entered: number;
+  failed: number;
+  blocked: Map<string, number>;
+  /** best score per coin this hour (live hour only) */
+  tokMax: Map<string, number> | null;
+  /** 101-bin histogram of per-coin best scores (finalized hours) */
+  hist100: number[] | null;
+  coins: number;
+  maxScore: number;
+}
+
 export class Funnel {
   recent = new Ring<SignalRecord>(500);
   private byId = new Map<string, SignalRecord>();
-  /** per-hour counters: [hourStart, counts] */
-  private hours: { t: number; scored: number; signals: number; entered: number; failed: number; blocked: Map<string, number>; hist: number[]; maxScore: number }[] = [];
+  private hours: HourStats[] = [];
 
-  private hour(now: number) {
+  private hour(now: number): HourStats {
     const t = Math.floor(now / HOUR) * HOUR;
     let h = this.hours[this.hours.length - 1];
     if (!h || h.t !== t) {
-      h = { t, scored: 0, signals: 0, entered: 0, failed: 0, blocked: new Map(), hist: new Array(10).fill(0), maxScore: 0 };
+      if (h) this.finalize(h);
+      h = { t, passes: 0, signals: 0, entered: 0, failed: 0, blocked: new Map(), tokMax: new Map(), hist100: null, coins: 0, maxScore: 0 };
       this.hours.push(h);
       if (this.hours.length > 48) this.hours.shift();
     }
     return h;
   }
 
-  /** Called for every scoring pass of a token (first score per token per minute). */
-  noteScored(now: number, score: number) {
+  private finalize(h: HourStats) {
+    if (!h.tokMax) return;
+    h.hist100 = Funnel.toHist(h.tokMax);
+    h.coins = h.tokMax.size;
+    h.tokMax = null;
+  }
+
+  private static toHist(m: Map<string, number>): number[] {
+    const hist = new Array<number>(101).fill(0);
+    for (const v of m.values()) hist[Math.max(0, Math.min(100, Math.floor(v)))]!++;
+    return hist;
+  }
+
+  /** Every scoring pass: tracks each coin's best score of the hour. */
+  noteScored(now: number, mint: string, score: number) {
     const h = this.hour(now);
-    h.scored++;
-    h.hist[Math.min(9, Math.floor(score / 10))]++;
+    h.passes++;
     if (score > h.maxScore) h.maxScore = score;
+    const m = h.tokMax!;
+    const prev = m.get(mint);
+    if (prev === undefined || score > prev) m.set(mint, score);
   }
 
   add(rec: SignalRecord) {
@@ -93,10 +124,11 @@ export class Funnel {
     }
     const h = this.hour(rec.ts);
     h.signals++;
+    if (rec.score > h.maxScore) h.maxScore = rec.score;
     this.count(h, rec.decision, rec.reason);
   }
 
-  private count(h: ReturnType<Funnel["hour"]>, decision: Decision, reason?: string) {
+  private count(h: HourStats, decision: Decision, reason?: string) {
     if (decision === "entered") h.entered++;
     else if (decision === "failed") h.failed++;
     else if (decision === "blocked" && reason) h.blocked.set(reason, (h.blocked.get(reason) ?? 0) + 1);
@@ -115,26 +147,42 @@ export class Funnel {
     return this.byId.get(id);
   }
 
+  /**
+   * Summary over the trailing window. `hist` has 10 bins of per-coin best scores;
+   * `coinsAbove[t]` = coins whose best score reached ≥ t (t = 0…100) in the window.
+   */
   summary(now: number, windowHours = 1) {
+    this.hour(now);
     const from = now - windowHours * HOUR;
     let scored = 0;
     let signals = 0;
     let entered = 0;
     let failed = 0;
     let maxScore = 0;
-    const hist = new Array(10).fill(0);
+    let hours = 0;
+    const hist100 = new Array<number>(101).fill(0);
     const blocked = new Map<string, number>();
     for (const h of this.hours) {
       if (h.t + HOUR <= from) continue;
-      scored += h.scored;
+      hours++;
+      const hh = h.tokMax ? Funnel.toHist(h.tokMax) : (h.hist100 ?? []);
+      hh.forEach((v, i) => (hist100[i] += v));
+      scored += h.tokMax ? h.tokMax.size : h.coins;
       signals += h.signals;
       entered += h.entered;
       failed += h.failed;
       if (h.maxScore > maxScore) maxScore = h.maxScore;
-      h.hist.forEach((v, i) => (hist[i] += v));
       for (const [k, v] of h.blocked) blocked.set(k, (blocked.get(k) ?? 0) + v);
     }
+    const hist = new Array<number>(10).fill(0);
+    hist100.forEach((v, i) => (hist[Math.min(9, Math.floor(i / 10))] += v));
+    const coinsAbove = new Array<number>(101).fill(0);
+    let acc = 0;
+    for (let i = 100; i >= 0; i--) {
+      acc += hist100[i]!;
+      coinsAbove[i] = acc;
+    }
     const reasons = [...blocked.entries()].sort((a, b) => b[1] - a[1]).map(([reason, n]) => ({ reason, n, text: REASON_TEXT[reason] ?? reason }));
-    return { windowHours, scored, signals, entered, failed, maxScore, hist, reasons };
+    return { windowHours, hours: Math.max(1, hours), scored, signals, entered, failed, maxScore, hist, coinsAbove, reasons };
   }
 }

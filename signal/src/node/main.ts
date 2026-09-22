@@ -198,6 +198,7 @@ export async function main() {
     everyHours: config.learnEveryHours,
     sampleDays: config.sampleDays,
     onAdopt: (v) => telegram?.send(`🧠 New scoring model adopted: ${v}`),
+    onTune: (m) => telegram?.send(m),
   });
   learner.start();
 

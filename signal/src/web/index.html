@@ -73,12 +73,14 @@ a{color:var(--info);text-decoration:none}
   .tab[aria-current="page"]{background:var(--flare-soft)}
   .main{padding-bottom:40px}
 }
-.banner{max-width:1180px;margin:10px auto 0;padding:10px 14px;border-radius:var(--r-sm);font-weight:600;font-size:13px;display:flex;gap:10px;align-items:center}
+.banner{max-width:1180px;width:calc(100% - 32px);margin:10px auto 0;padding:10px 14px;border-radius:var(--r-sm);font-weight:600;font-size:13px;display:flex;gap:10px;align-items:center}
 .banner.sim{background:var(--warn-soft);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent)}
 .banner.bad{background:var(--bad-soft);color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 30%,transparent)}
 
 /* building blocks */
 .grid{display:grid;gap:12px}
+.grid > *{min-width:0}
+.main{overflow-x:clip}
 @media (min-width:760px){.grid.two{grid-template-columns:1fr 1fr}.grid.three{grid-template-columns:repeat(3,1fr)}}
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:14px;box-shadow:var(--shadow)}
 .card.flat{box-shadow:none}

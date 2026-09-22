@@ -66,11 +66,17 @@ export interface Position {
 export interface CostModel {
   priorityFeeSol: number;
   platformFeePct: number;
-  /** rent for the token account on first buy (refunded when closed after exit) */
+  /** rent for the token account created on first buy */
   ataRentSol: number;
+  /** count the rent as refunded on a full exit (only if accounts are really closed) */
+  refundRent: boolean;
 }
 
-export const DEFAULT_COSTS: CostModel = { priorityFeeSol: 0.0005, platformFeePct: 0.5, ataRentSol: 0.00203928 };
+/**
+ * Token-account rent is paid on the first buy and recovered after a full exit (the live
+ * executor closes empty accounts). Set `refundRent: false` to model it as lost.
+ */
+export const DEFAULT_COSTS: CostModel = { priorityFeeSol: 0.0005, platformFeePct: 0.5, ataRentSol: 0.00203928, refundRent: true };
 
 export interface Quote {
   ok: boolean;
@@ -134,7 +140,7 @@ export function quoteSell(t: TokenState, tokens: number, costs: CostModel, solUs
   else if (venue === "amm") q = poolSellQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, tokens);
   else q = poolSellQuote(approxPool(t, solUsd), tokens);
   const platform = q.solOut * (costs.platformFeePct / 100);
-  const refund = closesAccount ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
+  const refund = closesAccount && costs.refundRent ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
   const lamports = Math.max(0, q.solOut - platform - costs.priorityFeeSol * LAMPORTS_PER_SOL + refund);
   return {
     ok: true,

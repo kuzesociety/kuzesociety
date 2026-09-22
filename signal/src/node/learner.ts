@@ -4,6 +4,7 @@
  */
 import type { Engine } from "../core/engine.js";
 import { type TrainReport, trainAndSelect } from "../core/learn.js";
+import { buildReport } from "../core/report.js";
 import type { Logger } from "../core/util.js";
 import type { DataStore } from "./store.js";
 
@@ -15,7 +16,7 @@ export class Learner {
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private o: { store: DataStore; engine: () => Engine; log: Logger; everyHours: number; sampleDays: number; onAdopt?: (version: string) => void },
+    private o: { store: DataStore; engine: () => Engine; log: Logger; everyHours: number; sampleDays: number; onAdopt?: (version: string) => void; onTune?: (msg: string) => void },
   ) {}
 
   start() {
@@ -28,6 +29,22 @@ export class Learner {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+  }
+
+  /** Paper mode + autoTune: adopt a robustly better TP/SL/score combination. */
+  autoTune(samples: ReturnType<DataStore["loadSamples"]>) {
+    const engine = this.o.engine();
+    const s = engine.settings;
+    if (!s.autoTune || s.mode !== "paper") return;
+    const r = buildReport(samples, s, engine.model, engine.closed.toArray(), Date.now());
+    if (!r.suggestion) return;
+    const g = r.suggestion;
+    if (g.minScore === s.minScore && g.tpPct === s.tpPct && g.slPct === s.slPct) return;
+    engine.updateSettings({ minScore: g.minScore, tpPct: g.tpPct, slPct: g.slPct });
+    engine.persistNow();
+    const msg = `🎯 Auto-tune (paper): now score ≥ ${g.minScore}, TP ${g.tpPct}%, SL ${g.slPct}% — ${g.why}`;
+    this.o.log.info(msg);
+    this.o.onTune?.(msg);
   }
 
   async run(): Promise<TrainReport[]> {
@@ -49,6 +66,7 @@ export class Learner {
         this.o.log.info("new scoring model adopted", { version: model.version, reports: reports.map((r) => ({ stage: r.stage, auc: r.candidate.auc, was: r.current.auc })) });
         this.o.onAdopt?.(model.version);
       } else this.o.log.info("model kept", { reasons: reports.map((r) => `${r.stage}: ${r.reason}`) });
+      this.autoTune(samples);
       return reports;
     } catch (e) {
       this.lastError = String(e);

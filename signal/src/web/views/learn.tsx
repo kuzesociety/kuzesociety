@@ -47,6 +47,35 @@ export function Learn() {
         </p>
       </div>
 
+      {r.suggestion && (
+        <div class="card" style="margin-top:12px;border-color:var(--flare)">
+          <h2>Better settings found</h2>
+          <p style="margin:0 0 10px">
+            <b>
+              Score ≥ {r.suggestion.minScore} · TP {r.suggestion.tpPct}% · SL {r.suggestion.slPct}%
+            </b>{" "}
+            — {r.suggestion.why}.
+          </p>
+          <div class="row wrap">
+            <button
+              class="btn primary"
+              onClick={async () => {
+                try {
+                  await api("/api/settings", { minScore: r.suggestion!.minScore, tpPct: r.suggestion!.tpPct, slPct: r.suggestion!.slPct });
+                  toast("Applied — new trades use these settings");
+                  void load();
+                } catch (e) {
+                  toast(String((e as Error).message));
+                }
+              }}
+            >
+              Apply
+            </button>
+            <span class="faint" style="font-size:12.5px">Past results can stop working. Auto-tune can do this for you in paper mode (Bot → Advanced).</span>
+          </div>
+        </div>
+      )}
+
       <div class="grid two" style="margin-top:12px">
         <div class="card">
           <h2>Score buckets → outcome</h2>

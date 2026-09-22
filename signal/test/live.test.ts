@@ -201,3 +201,51 @@ describe("live executor (mock trade API + mock RPC)", () => {
     expect(sell.error).not.toBe("live_disabled");
   });
 });
+
+describe("rent reclaim transaction", () => {
+  it("builds the same CloseAccount transaction as web3.js (Token + Token-2022)", async () => {
+    const { TransactionInstruction } = await import("@solana/web3.js");
+    const { buildCloseAccountsTx, TOKEN_PROGRAM, TOKEN_2022_PROGRAM } = await import("../src/node/live/rent.js");
+    const kp = Keypair.generate();
+    const owner = kp.publicKey;
+    const targets = [
+      { account: Keypair.generate().publicKey.toBase58(), program: TOKEN_PROGRAM },
+      { account: Keypair.generate().publicKey.toBase58(), program: TOKEN_2022_PROGRAM },
+      { account: Keypair.generate().publicKey.toBase58(), program: TOKEN_PROGRAM },
+    ];
+    const mine = buildCloseAccountsTx(owner.toBase58(), targets, BLOCKHASH);
+    const tx = new Transaction({ feePayer: owner, recentBlockhash: BLOCKHASH });
+    for (const t of targets) {
+      tx.add(
+        new TransactionInstruction({
+          programId: new PublicKey(t.program),
+          keys: [
+            { pubkey: new PublicKey(t.account), isSigner: false, isWritable: true },
+            { pubkey: owner, isSigner: false, isWritable: true },
+            { pubkey: owner, isSigner: true, isWritable: false },
+          ],
+          data: Buffer.from([9]),
+        }),
+      );
+    }
+    const theirs = tx.serialize({ requireAllSignatures: false, verifySignatures: false });
+    // same meaning (web3.js orders keys alphabetically inside each group; both are valid)
+    const decode = (bytes: Uint8Array) => {
+      const m = Transaction.from(Buffer.from(bytes)).compileMessage();
+      const header = m.header;
+      const keys = m.accountKeys.map((k) => k.toBase58());
+      return {
+        header,
+        signers: keys.slice(0, header.numRequiredSignatures),
+        blockhash: m.recentBlockhash,
+        ixs: m.instructions.map((ix) => ({ program: keys[ix.programIdIndex], accounts: ix.accounts.map((a) => keys[a]), data: ix.data })),
+      };
+    };
+    expect(decode(mine)).toEqual(decode(new Uint8Array(theirs)));
+    const w = parseWalletSecret(base58Encode(kp.secretKey));
+    const signed = signTransaction(mine, w);
+    const p = parseTransaction(signed.signed);
+    expect(verifySignature(w.publicKey, signed.signed.subarray(p.messageOffset), signed.signed.subarray(p.sigOffset, p.sigOffset + 64))).toBe(true);
+    expect(Transaction.from(Buffer.from(signed.signed)).verifySignatures()).toBe(true);
+  });
+});

@@ -152,6 +152,21 @@ export class SolanaRpc {
     return r.value;
   }
 
+  async latestBlockhash(): Promise<string> {
+    const r = await this.call<{ value: { blockhash: string } }>("getLatestBlockhash", [{ commitment: "confirmed" }]);
+    return r.value.blockhash;
+  }
+
+  /** Token accounts of `owner` under a token program, with mint and raw amount. */
+  async tokenAccounts(owner: string, programId: string): Promise<{ pubkey: string; mint: string; amount: number }[]> {
+    const r = await this.call<{ value: { pubkey: string; account: { data: { parsed: { info: { mint: string; tokenAmount: { amount: string } } } } } }[] }>(
+      "getTokenAccountsByOwner",
+      [owner, { programId }, { encoding: "jsonParsed", commitment: "confirmed" }],
+      15_000,
+    );
+    return (r.value ?? []).map((a) => ({ pubkey: a.pubkey, mint: a.account.data.parsed.info.mint, amount: Number(a.account.data.parsed.info.tokenAmount.amount) }));
+  }
+
   async tokenBalance(owner: string, mint: string): Promise<number> {
     const r = await this.call<{ value: { account: { data: { parsed: { info: { tokenAmount: { amount: string } } } } } }[] }>("getTokenAccountsByOwner", [
       owner,

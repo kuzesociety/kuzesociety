@@ -78,6 +78,8 @@ export interface Settings {
   reentry: boolean;
   /** simulated time between decision and on-chain landing (paper), ms */
   paperLatencyMs: number;
+  /** paper mode: let the learner switch TP/SL/score to the best-proven combination */
+  autoTune: boolean;
   filters: Filters;
 }
 
@@ -106,6 +108,7 @@ export const DEFAULT_SETTINGS: Settings = {
   retryWindowSec: 20,
   reentry: false,
   paperLatencyMs: 1500,
+  autoTune: false,
   filters: {
     minMcapSol: 0,
     maxMcapSol: 0,
@@ -170,6 +173,7 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     retryWindowSec: clamp(num(i.retryWindowSec, b.retryWindowSec), 0, 600),
     reentry: bool(i.reentry, b.reentry),
     paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
+    autoTune: bool(i.autoTune, b.autoTune),
     filters: {
       minMcapSol: clamp(num(f.minMcapSol, bf.minMcapSol), 0, 1e7),
       maxMcapSol: clamp(num(f.maxMcapSol, bf.maxMcapSol), 0, 1e7),

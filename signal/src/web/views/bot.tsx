@@ -43,21 +43,12 @@ export function Bot() {
   };
 
   const liveAllowed = !!health?.live && !health.live.halted;
-  // how often coins reach a threshold, from the last 24h score histogram
-  const hist = day?.hist ?? new Array(10).fill(0);
-  const total = hist.reduce((a, b) => a + b, 0);
-  const aboveShare = (t: number) => {
-    let n = 0;
-    hist.forEach((b, i) => {
-      const lo = i * 10;
-      if (lo >= t) n += b;
-      else if (lo + 10 > t) n += (b * (lo + 10 - t)) / 10;
-    });
-    return total > 0 ? n / total : NaN;
-  };
-  const share = aboveShare(draft.minScore);
-  const hours = Math.max(1, Math.min(24, (health?.uptimeSec ?? 3600) / 3600));
-  const perHour = total > 0 ? (share * total) / hours : NaN;
+  // how many distinct coins reached a threshold, from the last 24h of per-coin best scores
+  const coins = day?.scored ?? 0;
+  const above = day?.coinsAbove?.[Math.round(draft.minScore)] ?? 0;
+  const share = coins > 0 ? above / coins : NaN;
+  const hours = Math.max(1 / 6, Math.min(day?.hours ?? 1, (health?.uptimeSec ?? 3600) / 3600));
+  const perHour = coins > 0 ? above / hours : NaN;
 
   return (
     <div>
@@ -84,7 +75,7 @@ export function Bot() {
               <>
                 {Number.isFinite(share) ? (
                   <>
-                    Over the last day ~<b>{(share * 100).toFixed(1)}%</b> of scored coins reached this · about <b>{perHour.toFixed(1)}</b> scoring passes/hour above it.
+                    Recently <b>{perHour.toFixed(1)}</b> coins/hour reached this ({(share * 100).toFixed(1)}% of scored coins) — that is roughly how many chances to buy you get.
                   </>
                 ) : (
                   "Collecting data on how often coins reach each score…"
@@ -226,6 +217,9 @@ export function Bot() {
           <Field label="Buy the same coin again" htmlFor="reentry">
             <Switch id="reentry" checked={draft.reentry} label="Re-entry" onChange={(v) => set("reentry", v)} />
           </Field>
+          <Field label="Auto-tune (paper only)" htmlFor="autotune" help="After each learning run, switch score/TP/SL to the combination with the best proven results (95% worst case must beat the current one). Never touches live settings.">
+            <Switch id="autotune" checked={draft.autoTune} label="Auto-tune" onChange={(v) => set("autoTune", v)} />
+          </Field>
           <Field label="Paper delay" htmlFor="lat" help="Simulated time from decision to landing on-chain. Honest paper results need a realistic delay.">
             <NumInput id="lat" value={draft.paperLatencyMs} onChange={(v) => set("paperLatencyMs", v)} step={100} suffix="ms" />
           </Field>
@@ -303,6 +297,8 @@ function WhyNot({ funnel, threshold, scoreOnly, enabled, open, maxOpen }: { funn
       ? "No coins scored yet — check that the data feeds are green (More → Health)."
       : funnel.maxScore < threshold
         ? `No coin reached ${threshold} this hour (best was ${Math.round(funnel.maxScore)}). Lower the score to trade more often.`
+        : funnel.signals === 0
+          ? `Coins reached ${threshold}, but none crossed it since the bot was switched on or the threshold changed.`
         : open >= maxOpen
           ? `All ${maxOpen} position slots are in use.`
           : funnel.entered > 0
@@ -314,12 +310,12 @@ function WhyNot({ funnel, threshold, scoreOnly, enabled, open, maxOpen }: { funn
       <p style="margin:0 0 10px;font-weight:650">{quietReason}</p>
       <div class="stats" style="grid-template-columns:repeat(4,1fr)">
         <div class="stat">
-          <div class="k">Scored</div>
+          <div class="k">Coins scored</div>
           <div class="v num">{funnel.scored}</div>
         </div>
         <div class="stat">
-          <div class="k">≥ {threshold}</div>
-          <div class="v num">{funnel.signals}</div>
+          <div class="k">Reached {threshold}</div>
+          <div class="v num">{funnel.coinsAbove?.[Math.round(threshold)] ?? funnel.signals}</div>
         </div>
         <div class="stat">
           <div class="k">Bought</div>
@@ -331,7 +327,7 @@ function WhyNot({ funnel, threshold, scoreOnly, enabled, open, maxOpen }: { funn
         </div>
       </div>
       <div style="margin:12px 0 4px" class="faint">
-        Scores this hour (highest {Math.round(funnel.maxScore)}):
+        Best score of each coin this hour (highest {Math.round(funnel.maxScore)}):
       </div>
       <Hist bins={funnel.hist} threshold={threshold} />
       {funnel.reasons.length > 0 && (

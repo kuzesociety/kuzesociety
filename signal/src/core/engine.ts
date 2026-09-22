@@ -593,9 +593,9 @@ export class Engine {
       e.x = x;
       e.at = now;
     }
+    this.funnel.noteScored(now, t.mint, res.score);
     if (now - e.lastFunnelAt >= 60_000) {
       e.lastFunnelAt = now;
-      this.funnel.noteScored(now, res.score);
       this.xRes[res.stage].push(x);
     }
     this.checkpoints(t, e, now);
@@ -907,8 +907,12 @@ export class Engine {
     this.stats.entries++;
     this.stats.fees += r.fees ?? 0;
     if (rec) this.funnel.update(rec.id, "entered", undefined, pos.id);
-    if (t) this.evaluatePosition(pos, t, r.ts);
     this.hooks.onPosition?.(pos, "fill");
+    if (this.killed && t) {
+      // the kill switch was hit while this buy was in flight: get out right away
+      pos.notes.push("filled after the kill switch — selling");
+      this.sell(pos, t, 1, "kill", r.ts);
+    } else if (t) this.evaluatePosition(pos, t, r.ts);
     this.journal({ type: "entry_filled", pos: pos.id, mint: pos.mint, lamports: r.lamports, tokens: r.tokens, mcap: pos.entryMcapSol, sig: r.sig });
   }
 
@@ -1090,7 +1094,13 @@ export class Engine {
     const p = this.positions.get(positionId);
     if (!p) return;
     if (tokensInWallet <= 0) {
-      p.notes.push("not found in wallet after restart — closed without proceeds (sold elsewhere?)");
+      // most likely an exit that landed while the server was down: book the last
+      // marked value as an estimate rather than a total loss
+      if (p.status === "open" || p.status === "closing") {
+        p.proceeds += Math.max(0, p.value);
+        p.notes.push("not in wallet after restart — booked at last marked value (estimate)");
+      } else p.notes.push("entry never landed");
+      p.tokensLeft = 0;
       this.closePosition(p, "external", this.now);
       return;
     }
