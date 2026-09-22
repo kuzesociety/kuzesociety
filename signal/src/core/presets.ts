@@ -1,0 +1,51 @@
+/**
+ * Ready-made strategies the user can switch to with one tap. Each is a full set of the
+ * settings that define the rule (entry score, which coins, exits, time limit), so switching
+ * never leaves a mix of the old and the new strategy behind.
+ */
+import type { Settings } from "./settings.js";
+
+export interface Preset {
+  key: string;
+  name: string;
+  note: string;
+  /** "unproven": found in the simulator or untested — shown with a warning */
+  proof: "yours" | "unproven" | "data";
+  settings: Partial<Settings>;
+}
+
+/** Settings every strategy sets, so a switch replaces the whole rule. */
+const BASE: Partial<Settings> = { trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+
+export const PRESETS: Preset[] = [
+  {
+    key: "plan",
+    name: "Your plan",
+    note: "Buy when a coin reaches 75 · sell at 2× or −50% · time limit 4 hours. Score only.",
+    proof: "yours",
+    settings: { ...BASE, minScore: 75, tpPct: 100, slPct: 50, maxHoldMin: 240 },
+  },
+  {
+    key: "sim-momentum",
+    name: "Simulator finding: fast momentum",
+    note: "Buy when a coin reaches 95 · sell at +500% or −20%, or after 10 minutes. It won in the simulator, which has more momentum than pump.fun — paper-test it before trusting it.",
+    proof: "unproven",
+    settings: { ...BASE, minScore: 95, tpPct: 500, slPct: 20, maxHoldMin: 10 },
+  },
+];
+
+/** Whether the current settings already follow a strategy. */
+export function followsPreset(s: Settings, p: Partial<Settings>): boolean {
+  for (const [k, v] of Object.entries(p)) {
+    if (k === "filters") {
+      for (const [fk, fv] of Object.entries(v as Settings["filters"])) if (s.filters[fk as keyof Settings["filters"]] !== fv) return false;
+    } else if (s[k as keyof Settings] !== v) return false;
+  }
+  return true;
+}
+
+/** "score ≥ 95 · +500% / −20% · 10 min" */
+export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin">): string {
+  const time = s.maxHoldMin > 0 ? (s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min`) : "no time limit";
+  return `score ≥ ${s.minScore} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
+}

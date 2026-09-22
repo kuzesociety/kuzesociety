@@ -8,7 +8,7 @@ RUN npm run build
 
 FROM node:22-alpine
 WORKDIR /app
-ENV NODE_ENV=production DATA_DIR=/data PORT=8787
+ENV NODE_ENV=production DATA_DIR=/data PORT=8787 SIGNAL_SUPERVISED=1
 COPY --from=build /app/dist ./dist
 RUN mkdir -p /data && chown -R node:node /data /app
 USER node

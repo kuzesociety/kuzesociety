@@ -19,18 +19,32 @@ export class Telegram {
   private lastSendAt = 0;
 
   constructor(
-    private o: { token: string; chatId: string; log: Logger; engine: () => Engine; publicUrl?: string },
+    private o: {
+      token: string;
+      chatId: string;
+      log: Logger;
+      engine: () => Engine;
+      publicUrl?: string;
+      /** no chat yet: whoever sends this code to the bot becomes the owner chat */
+      linkCode?: string;
+      onLinked?: (chatId: string) => void;
+    },
   ) {}
 
   get enabled() {
-    return !!(this.o.token && this.o.chatId);
+    return !!(this.o.token && this.o.token !== "off" && this.o.chatId);
+  }
+
+  /** Waiting for the owner to send the link code shown in the dashboard. */
+  get linking() {
+    return !!(this.o.token && this.o.token !== "off" && !this.o.chatId && this.o.linkCode);
   }
 
   start() {
-    if (!this.enabled) return;
+    if (!this.enabled && !this.linking) return;
     this.stopped = false;
     void this.poll();
-    this.send("🟢 <b>SIGNAL started</b>\nSend /help for commands.");
+    if (this.enabled) this.send("🟢 <b>SIGNAL started</b>\nSend /help for commands.");
   }
 
   stop() {
@@ -80,7 +94,12 @@ export class Telegram {
         this.offset = Math.max(this.offset, u.update_id + 1);
         const chat = String(u.message?.chat?.id ?? "");
         const text = (u.message?.text ?? "").trim();
-        if (!text || chat !== String(this.o.chatId)) continue;
+        if (!text || !chat) continue;
+        if (!this.o.chatId) {
+          this.link(chat, text);
+          continue;
+        }
+        if (chat !== String(this.o.chatId)) continue;
         try {
           this.send(this.command(text));
         } catch (e) {
@@ -88,6 +107,20 @@ export class Telegram {
         }
       }
     }
+  }
+
+  /** Link mode: the first chat that sends the dashboard's code becomes the owner. */
+  link(chat: string, text: string) {
+    if (this.o.linkCode && text.includes(this.o.linkCode)) {
+      this.o.chatId = chat;
+      this.o.onLinked?.(chat);
+      this.send("✅ <b>Linked.</b> SIGNAL will message you here about every trade.\nSend /help for commands.");
+      return;
+    }
+    void postJson(`https://api.telegram.org/bot${this.o.token}/sendMessage`, {
+      chat_id: chat,
+      text: "To link this chat, send the 6-digit code shown in the SIGNAL dashboard (More → Setup).",
+    });
   }
 
   /** Execute a chat command and return the reply (exported behaviour is tested). */
@@ -105,6 +138,7 @@ export class Telegram {
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
           "/tp 100 · /sl 50 — take profit / stop loss %",
+          "/hold 10 — sell after N minutes (0 = no limit)",
           "/size 0.1 — SOL per trade",
           "/scoreonly on|off — trade on score alone",
           "/kill — stop entries and sell everything · /unkill",
@@ -116,7 +150,7 @@ export class Telegram {
         const feeds = h.feeds.map((f) => `${f.status === "open" ? "🟢" : "🔴"} ${f.name}`).join("  ");
         return [
           `<b>${s.enabled ? "▶️ Trading" : "⏸ Paused"}</b> · ${s.mode.toUpperCase()}${e.killed ? " · KILL SWITCH" : ""}`,
-          `Score ≥ ${s.minScore}${s.scoreOnly ? " (score only)" : ""} · TP ${s.tpPct}% · SL ${s.slPct}% · ${s.positionSol} SOL`,
+          `Score ≥ ${s.minScore}${s.scoreOnly ? " (score only)" : ""} · TP ${s.tpPct}% · SL ${s.slPct}% · ${s.maxHoldMin > 0 ? `sell after ${s.maxHoldMin} min` : "no time limit"} · ${s.positionSol} SOL`,
           `Today ${sol(a.dayPnl)} SOL · total ${sol(a.realized)} SOL · ${a.wins}W/${a.losses}L`,
           `Open ${a.open.length}/${s.maxOpen}`,
           feeds,
@@ -145,6 +179,10 @@ export class Telegram {
         if (!Number.isFinite(n)) return "Usage: /sl 50";
         e.updateSettings({ slPct: n });
         return `Stop loss ${e.settings.slPct}% (new positions).`;
+      case "/hold":
+        if (!Number.isFinite(n)) return "Usage: /hold 10 (minutes, 0 = no limit)";
+        e.updateSettings({ maxHoldMin: n });
+        return e.settings.maxHoldMin > 0 ? `New positions sell after ${e.settings.maxHoldMin} min if neither TP nor SL was hit.` : "No time limit for new positions.";
       case "/size":
         if (!Number.isFinite(n)) return "Usage: /size 0.1";
         e.updateSettings({ positionSol: n });

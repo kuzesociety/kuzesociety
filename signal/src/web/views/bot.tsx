@@ -1,7 +1,10 @@
 import { useEffect, useState } from "preact/hooks";
+import type { EdgeFound, EdgeReport } from "../../core/edges";
+import { PRESETS, type Preset, followsPreset, ruleSummary } from "../../core/presets";
 import type { Settings } from "../../core/settings";
-import { api, refreshState, toast, useApp } from "../store";
 import { ext } from "../ext";
+import { pct } from "../format";
+import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
 
 export function Bot() {
@@ -59,12 +62,14 @@ export function Bot() {
           <div style="font-weight:760;font-size:16px">{settings.enabled ? "Auto-trading is ON" : "Auto-trading is paused"}</div>
           <div class="muted" style="font-size:13px">
             {settings.enabled
-              ? `Buying coins that score ${settings.minScore}+${settings.scoreOnly ? " (score only)" : ""} · ${settings.mode === "live" ? "LIVE money" : "paper"} · ${ext.demo ? "demo: runs while this page is open (the real bot runs on a server 24/7)" : "runs on the server even with this page closed"}`
+              ? `${ruleSummary(settings)}${settings.scoreOnly ? " · score only" : " · with filters"} · ${settings.mode === "live" ? "LIVE money" : "paper"} · ${ext.demo ? "demo: runs while this page is open (the real bot runs on a server 24/7)" : "runs on the server even with this page closed"}`
               : "The radar keeps scoring; no new trades. Open positions are still managed."}
           </div>
         </div>
         <Tag tone={settings.mode === "live" ? "bad" : "flare"}>{settings.mode === "live" ? "LIVE" : "PAPER"}</Tag>
       </div>
+
+      <Strategies settings={settings} onApplied={() => void refreshState()} />
 
       <div class="grid two" style="margin-top:12px">
         <div class="card">
@@ -106,6 +111,9 @@ export function Bot() {
           </Field>
           <Field label="Stop loss" htmlFor="sl" help="From your entry cost, fixed (not trailing). In a crash the fill can land below this — the bot always sells.">
             <NumInput id="sl" value={draft.slPct} onChange={(v) => set("slPct", v)} min={1} max={99} suffix="%" />
+          </Field>
+          <Field label="Sell after" htmlFor="hold" help="Time limit for each trade: sells at market if neither the target nor the stop was hit by then. 0 = no limit.">
+            <NumInput id="hold" value={draft.maxHoldMin} onChange={(v) => set("maxHoldMin", v)} min={0} suffix="min" />
           </Field>
           <Field label="Size per trade" htmlFor="size" help={settings.mode === "live" && health?.live ? `Server cap: ${health.live.maxPositionSol} SOL per live trade.` : "Fees included."}>
             <NumInput id="size" value={draft.positionSol} onChange={(v) => set("positionSol", v)} step={0.01} min={0.001} suffix="SOL" />
@@ -200,9 +208,6 @@ export function Bot() {
           </Field>
           <Field label="Sell a coin that went quiet after" htmlFor="stale" help="No trades for this long frees the slot (0 = never).">
             <NumInput id="stale" value={draft.staleExitMin} onChange={(v) => set("staleExitMin", v)} suffix="min" />
-          </Field>
-          <Field label="Max hold time" htmlFor="hold" help="0 = no limit">
-            <NumInput id="hold" value={draft.maxHoldMin} onChange={(v) => set("maxHoldMin", v)} suffix="min" />
           </Field>
           <Field label="Trailing stop after target" htmlFor="trail" help="When TP is reached, keep riding and sell if the value drops this much from its peak (0 = sell at TP).">
             <NumInput id="trail" value={draft.trailPct} onChange={(v) => set("trailPct", v)} suffix="%" />
@@ -356,6 +361,91 @@ function WhyNot({ funnel, threshold, scoreOnly, enabled, open, maxOpen }: { funn
           </table>
         </div>
       )}
+    </div>
+  );
+}
+
+/** One tap switches the whole rule: your plan, a simulator finding, or a rule proven on your data. */
+function Strategies({ settings, onApplied }: { settings: Settings; onApplied: () => void }) {
+  const [found, setFound] = useState<EdgeFound[]>([]);
+  const [confirm, setConfirm] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  useEffect(() => {
+    api<{ report: EdgeReport | null }>("/api/edges")
+      .then((r) => setFound(r.report?.survivors?.slice(0, 3) ?? []))
+      .catch(() => {});
+  }, []);
+  const rows: Preset[] = [
+    ...PRESETS,
+    ...found.map((e) => ({
+      key: `edge:${e.text}`,
+      name: "Found in your data",
+      note: `${e.text}. ${pct(e.holdout.mean, 1, true)} per trade on ${e.holdout.n} trades the search never saw.`,
+      proof: "data" as const,
+      settings: e.settings,
+    })),
+  ];
+  const live = settings.mode === "live";
+  const use = async (p: Preset) => {
+    if (live && confirm !== p.key) {
+      setConfirm(p.key);
+      return;
+    }
+    setBusy(p.key);
+    try {
+      await api("/api/settings", p.settings);
+      toast(settings.enabled ? `Now trading: ${p.name}` : `Strategy set: ${p.name}. Switch Auto-trading on to start.`);
+      setConfirm(null);
+      onApplied();
+    } catch (e) {
+      toast(String((e as Error).message));
+    } finally {
+      setBusy(null);
+    }
+  };
+  const custom = !rows.some((p) => followsPreset(settings, p.settings));
+  return (
+    <div class="card" style="margin-top:12px">
+      <h2>Strategy</h2>
+      <p class="faint" style="margin:0 0 4px;font-size:12.5px">
+        One tap sets the whole rule — entry score, which coins, take profit, stop loss and time limit. Fine-tune it below afterwards.
+      </p>
+      {custom && (
+        <div class="strat active">
+          <div style="flex:1;min-width:0">
+            <div class="row wrap" style="gap:6px">
+              <b>Custom</b>
+              <Tag tone="flare">active</Tag>
+            </div>
+            <div class="num" style="font-size:13px">
+              {ruleSummary(settings)} · {settings.scoreOnly ? "score only" : "with filters"}
+            </div>
+          </div>
+        </div>
+      )}
+      {rows.map((p) => {
+        const on = followsPreset(settings, p.settings);
+        return (
+          <div class={`strat ${on ? "active" : ""}`} key={p.key}>
+            <div style="flex:1;min-width:0">
+              <div class="row wrap" style="gap:6px">
+                <b>{p.name}</b>
+                {p.proof === "unproven" && <Tag tone="warn">unproven</Tag>}
+                {p.proof === "data" && <Tag tone="good">held up on unseen data</Tag>}
+                {on && <Tag tone="flare">active</Tag>}
+              </div>
+              <div class="num" style="font-size:13px">{ruleSummary(p.settings as Settings)}</div>
+              <div class="faint" style="font-size:12.5px">{p.note}</div>
+            </div>
+            {!on && (
+              <button class={`btn sm ${confirm === p.key ? "danger" : "primary"}`} disabled={!!busy} onClick={() => use(p)}>
+                {busy === p.key ? "…" : confirm === p.key ? "Tap again — real money" : "Use this"}
+              </button>
+            )}
+          </div>
+        );
+      })}
+      {live && <p class="faint note">You are live: switching asks for a second tap. Open positions keep the rule they were bought with.</p>}
     </div>
   );
 }

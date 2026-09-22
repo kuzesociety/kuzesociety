@@ -289,10 +289,16 @@ function EdgeFinder({ mode }: { mode: string }) {
       setBusy(false);
     }
   };
+  const [confirm, setConfirm] = useState<string | null>(null);
   const apply = async (s: EdgeFound) => {
+    if (mode === "live" && confirm !== s.text) {
+      setConfirm(s.text);
+      return;
+    }
     try {
       await api("/api/settings", s.settings);
-      toast("Paper-trading this rule — your score, exits and filters were replaced");
+      setConfirm(null);
+      toast("Now trading this rule — score, exits, time limit and filters were replaced");
     } catch (e) {
       toast(String((e as Error).message));
     }
@@ -322,13 +328,13 @@ function EdgeFinder({ mode }: { mode: string }) {
             run — that is its rate of fooling itself.
           </p>
           {r.survivors.slice(0, 5).map((s) => (
-            <EdgeRow key={s.text} s={s} mode={mode} apply={apply} />
+            <EdgeRow key={s.text} s={s} confirming={confirm === s.text} apply={apply} />
           ))}
           {r.survivors.length > 5 && (
             <details class="more">
               <summary>{r.survivors.length - 5} more variations</summary>
               {r.survivors.slice(5).map((s) => (
-                <EdgeRow key={s.text} s={s} mode={mode} apply={apply} />
+                <EdgeRow key={s.text} s={s} confirming={confirm === s.text} apply={apply} />
               ))}
             </details>
           )}
@@ -353,7 +359,7 @@ function EdgeFinder({ mode }: { mode: string }) {
   );
 }
 
-function EdgeRow({ s, mode, apply }: { s: EdgeFound; mode: string; apply: (s: EdgeFound) => void }) {
+function EdgeRow({ s, confirming, apply }: { s: EdgeFound; confirming: boolean; apply: (s: EdgeFound) => void }) {
   return (
     <div class="edge">
       <div class="edge-rule">{s.text}</div>
@@ -364,11 +370,9 @@ function EdgeRow({ s, mode, apply }: { s: EdgeFound; mode: string; apply: (s: Ed
       <div class="faint num" style="font-size:12.5px">
         In the search data {pct(s.discovery.mean, 1, true)} · every coin reaching {s.level}, same exit: {pct(s.baseline, 1, true)}
       </div>
-      {mode === "paper" && (
-        <button class="btn sm primary" style="justify-self:start;margin-top:4px" onClick={() => apply(s)}>
-          Paper-trade this rule
-        </button>
-      )}
+      <button class={`btn sm ${confirming ? "danger" : "primary"}`} style="justify-self:start;margin-top:4px" onClick={() => apply(s)}>
+        {confirming ? "Tap again — real money" : "Use this rule"}
+      </button>
     </div>
   );
 }

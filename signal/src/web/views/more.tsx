@@ -4,6 +4,7 @@ import { ago, clock, mcap, pct, short } from "../format";
 import { ext } from "../ext";
 import { api, useApp } from "../store";
 import { Empty, Tag } from "../ui";
+import { SetupView } from "./setup";
 
 type Sub = "signals" | "narratives" | "wallets" | "health" | "setup";
 
@@ -12,7 +13,7 @@ const BASE: [Sub, string][] = [
   ["narratives", "Narratives"],
   ["wallets", "Smart wallets"],
   ["health", "Health"],
-  ["setup", "Setup & help"],
+  ["setup", "Setup"],
 ];
 
 export function More({ open }: { open: (mint: string) => void }) {
@@ -36,7 +37,12 @@ export function More({ open }: { open: (mint: string) => void }) {
       {sub === "narratives" && <Narratives open={open} />}
       {sub === "wallets" && <Wallets />}
       {sub === "health" && <HealthView />}
-      {sub === "setup" && <Setup />}
+      {sub === "setup" && (
+        <>
+          <SetupView />
+          <Setup />
+        </>
+      )}
     </div>
   );
 }
@@ -310,41 +316,17 @@ function HealthView() {
 
 function Setup() {
   return (
-    <div class="grid two">
-      <div class="card">
-        <h2>How SIGNAL runs</h2>
-        <p>
-          The bot lives on a <b>server</b> (your PC, a VPS or a cloud container), not in this page. Closing the browser or locking your phone does not stop it. This dashboard is a remote control;
-          Telegram keeps you posted when you are away.
-        </p>
-        <ol style="padding-left:18px">
-          <li>
-            <b>Trade stream</b> — set <code>RPC_URL</code> / <code>RPC_WS_URL</code> to a Solana RPC (free Helius key works). Without it the bot only sees launches.
-          </li>
-          <li>
-            <b>Telegram</b> — create a bot with @BotFather, set <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code>. Commands: /status /pause /resume /score 75 /tp 100 /sl 50 /scoreonly on /kill.
-          </li>
-          <li>
-            <b>Paper first</b> — leave it in paper mode until the Learn tab's go-live check passes at your settings.
-          </li>
-        </ol>
-      </div>
-      <div class="card">
-        <h2>Going live (real SOL)</h2>
-        <ol style="padding-left:18px">
-          <li>Create a NEW wallet in Phantom used only for the bot. Fund it with money you can lose.</li>
-          <li>
-            Export its private key and put it in the server's <code>.env</code> as <code>WALLET_PRIVATE_KEY</code> — never in this page, never in chat.
-          </li>
-          <li>
-            Set <code>LIVE_TRADING=I_UNDERSTAND_THE_RISK</code>, <code>LIVE_MAX_POSITION_SOL</code> (e.g. 0.05) and <code>LIVE_MAX_DAILY_LOSS_SOL</code>, restart, then switch Mode → Live.
-          </li>
-        </ol>
-        <p class="muted" style="font-size:13px">
-          Orders are built by PumpPortal's local API (0.5% fee), signed on your server, sent through your RPC and confirmed; the real fill is read back from the chain. Four errors in a row or the daily
-          cap halts live entries; exits always go through. A stop-loss is a market sell, not a guarantee: in a rug the fill can be far below the stop.
-        </p>
-      </div>
+    <div class="card" style="margin-top:12px">
+      <h2>How it works</h2>
+      <p style="margin-top:0">
+        The bot runs on a computer that stays on — yours, a VPS or a cloud container — not in this page. Closing the browser or locking your phone does not stop it; Telegram keeps
+        you posted when you are away.
+      </p>
+      <p class="muted" style="font-size:13px;margin-bottom:0">
+        Live orders are built by PumpPortal's local API (0.5% fee), signed on your computer (the key never leaves it), sent through your RPC and confirmed; the real fill is read
+        back from the chain. Four errors in a row or the daily limit pause live entries; exits always go through. A stop loss is a market sell, not a guarantee: in a rug the fill
+        can land far below it.
+      </p>
     </div>
   );
 }

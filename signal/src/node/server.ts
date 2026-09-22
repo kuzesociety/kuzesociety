@@ -15,8 +15,21 @@ import { type ApiContext, accountSummary, handleApi } from "../core/api.js";
 import type { Logger } from "../core/util.js";
 import { type Config, describeConfig } from "./config.js";
 import type { Learner } from "./learner.js";
+import { getJson, postJson } from "./http.js";
 import type { LiveExecutor } from "./live/executor.js";
+import { parseWalletSecret } from "./live/solana.js";
 import type { ServerLog } from "./log.js";
+import {
+  LIVE_PHRASE,
+  type SetupKey,
+  type SetupStore,
+  isLocalRequest,
+  isPrivateChannel,
+  lanAddress,
+  newLinkCode,
+  rpcFromInput,
+  telegramTokenLooksValid,
+} from "./setup.js";
 import type { DataStore } from "./store.js";
 
 export interface AppContext {
@@ -27,6 +40,13 @@ export interface AppContext {
   learner: Learner;
   live: () => LiveExecutor | null;
   token: string;
+  /** settings saved from the dashboard's Setup page */
+  setup: SetupStore;
+  effective: (k: SetupKey) => string;
+  /** restarts the bot to apply feed or wallet changes; false when nothing would start it again */
+  restart: () => boolean;
+  reloadTelegram: () => void;
+  port: number;
   dashboardHtml: () => string;
   extraHealth: () => Record<string, unknown>;
 }
@@ -176,6 +196,7 @@ export class DashboardServer {
   // -------------------------------------------------------------------------------
 
   private authed(req: IncomingMessage): boolean {
+    if (isLocalRequest(req)) return true; // the computer running the bot: no token needed
     const auth = req.headers.authorization;
     if (auth?.startsWith("Bearer ") && safeEq(auth.slice(7).trim(), this.ctx.token)) return true;
     const cookie = req.headers.cookie ?? "";
@@ -300,9 +321,152 @@ export class DashboardServer {
       if (path === "/api/export/samples") return this.exportFiles(res, "samples", "signal-samples.jsonl");
       if (path === "/api/export/journal") return this.exportFiles(res, "journal", "signal-journal.jsonl");
     }
-    const body = method === "POST" ? ((await this.body(req)) as Record<string, unknown>) : {};
-    const r = await handleApi(this.api, method, path, url.searchParams, body && typeof body === "object" ? body : {});
+    const raw = method === "POST" ? await this.body(req) : {};
+    const body = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+    if (path === "/api/setup" && method === "GET") return this.json(res, 200, this.setupStatus(req));
+    if (path.startsWith("/api/setup/") || path === "/api/restart") {
+      if (method !== "POST") return this.json(res, 405, { error: "method not allowed" });
+      const r = await this.setupAction(req, path, body);
+      return this.json(res, r.status, r.json);
+    }
+    const r = await handleApi(this.api, method, path, url.searchParams, body);
     return this.json(res, r.status, r.json);
+  }
+
+  // ---- setup from the dashboard ----------------------------------------------------
+
+  private setupStatus(req: IncomingMessage) {
+    const eff = this.ctx.effective;
+    const rpcUrl = eff("RPC_URL") || this.ctx.config.rpcHttp;
+    let host = "";
+    try {
+      host = new URL(rpcUrl).host;
+    } catch {
+      host = "invalid";
+    }
+    const feed = this.ctx.engine().health().feeds.find((f) => f.name === "solana-rpc");
+    const up = Math.max(120, process.uptime());
+    const mbPerDay = feed?.bytes ? (feed.bytes / 1e6) * (86_400 / up) : null;
+    const tgToken = eff("TELEGRAM_BOT_TOKEN");
+    const tgChat = eff("TELEGRAM_CHAT_ID");
+    let address: string | null = null;
+    const key = eff("WALLET_PRIVATE_KEY");
+    if (key) {
+      try {
+        address = parseWalletSecret(key).address;
+      } catch {
+        address = null;
+      }
+    }
+    const lan = lanAddress();
+    const num = (k: SetupKey, d: number) => (Number.isFinite(Number(eff(k))) && eff(k) !== "" ? Number(eff(k)) : d);
+    return {
+      supervised: process.env.SIGNAL_SUPERVISED === "1",
+      local: isLocalRequest(req),
+      privateChannel: isPrivateChannel(req),
+      rpc: {
+        host,
+        isPublic: /api\.mainnet-beta\.solana\.com/.test(host),
+        feed: feed ? { status: feed.status, msgs: feed.msgs, mbPerDay } : null,
+      },
+      telegram: {
+        tokenSet: !!tgToken && tgToken !== "off",
+        linked: !!tgChat && tgChat !== "none",
+        code: !tgChat || tgChat === "none" ? (this.ctx.setup.read().TELEGRAM_LINK_CODE ?? null) : null,
+      },
+      live: {
+        enabled: this.ctx.config.liveTrading,
+        pendingRestart: (eff("LIVE_TRADING") === LIVE_PHRASE) !== this.ctx.config.liveTrading,
+        walletSet: !!address,
+        address,
+        maxPositionSol: num("LIVE_MAX_POSITION_SOL", 0.05),
+        maxDailyLossSol: num("LIVE_MAX_DAILY_LOSS_SOL", 0.25),
+        ready: !!this.ctx.live()?.ready(),
+      },
+      phoneUrl: lan ? `http://${lan}:${this.ctx.port}/?token=${this.ctx.token}` : null,
+    };
+  }
+
+  private async setupAction(req: IncomingMessage, path: string, body: Record<string, unknown>): Promise<{ status: number; json: unknown }> {
+    const fail = (status: number, error: string) => ({ status, json: { error } });
+    const done = (extra: Record<string, unknown> = {}) => ({ status: 200, json: { ok: true, ...extra } });
+    const restartNote = (restarting: boolean) => (restarting ? {} : { note: "Saved. Close the bot window and start it again to apply." });
+    switch (path) {
+      case "/api/setup/rpc": {
+        const r = rpcFromInput(String(body.key ?? ""));
+        if (!r) return fail(400, "Paste your Helius API key (it looks like 1a2b3c4d-5e6f-…) or a full RPC address.");
+        const test = await postJson<{ result?: number }>(r.http, { jsonrpc: "2.0", id: 1, method: "getSlot" }, { timeoutMs: 10_000 });
+        if (!test.ok || typeof test.json?.result !== "number") {
+          return fail(400, `That key did not work (${test.status ? `error ${test.status}` : "no answer"}). Copy it again from your Helius dashboard.`);
+        }
+        this.ctx.setup.write({ RPC_URL: r.http, RPC_WS_URL: r.ws });
+        this.ctx.log.info("data feed changed from the dashboard", { host: new URL(r.http).host });
+        const restarting = this.ctx.restart();
+        return done({ slot: test.json.result, restarting, ...restartNote(restarting) });
+      }
+      case "/api/setup/telegram": {
+        const token = String(body.token ?? "").trim();
+        if (!telegramTokenLooksValid(token)) return fail(400, "Paste the token @BotFather gave you (it looks like 123456789:AAH…).");
+        const me = await getJson<{ ok: boolean; result?: { username?: string } }>(`https://api.telegram.org/bot${token}/getMe`, { timeoutMs: 10_000 });
+        if (!me?.ok) return fail(400, "Telegram did not accept that token. Copy it again from @BotFather.");
+        const code = newLinkCode();
+        this.ctx.setup.write({ TELEGRAM_BOT_TOKEN: token, TELEGRAM_CHAT_ID: "none", TELEGRAM_LINK_CODE: code });
+        this.ctx.reloadTelegram();
+        return done({ bot: me.result?.username ?? null, code });
+      }
+      case "/api/setup/telegram-off":
+        this.ctx.setup.write({ TELEGRAM_BOT_TOKEN: "off", TELEGRAM_CHAT_ID: "none", TELEGRAM_LINK_CODE: "" });
+        this.ctx.reloadTelegram();
+        return done();
+      case "/api/setup/live": {
+        if (!isPrivateChannel(req)) return fail(403, `For safety, add the wallet on the computer running the bot: open http://localhost:${this.ctx.port} there.`);
+        if (String(body.confirm ?? "").trim().toUpperCase().replace(/\s+/g, "_") !== LIVE_PHRASE) return fail(400, 'Type "I understand the risk" to confirm.');
+        const maxPos = Number(body.maxPositionSol);
+        const maxLoss = Number(body.maxDailyLossSol);
+        if (!(maxPos > 0 && maxPos <= 10)) return fail(400, "Max per trade must be between 0 and 10 SOL.");
+        if (!(maxLoss > 0 && maxLoss <= 100)) return fail(400, "Max loss per day must be between 0 and 100 SOL.");
+        const key = String(body.walletKey ?? "").trim();
+        let address: string;
+        try {
+          address = parseWalletSecret(key || this.ctx.effective("WALLET_PRIVATE_KEY")).address;
+        } catch {
+          return fail(400, key ? "That is not a Solana private key. In Phantom: Settings → Manage accounts → your bot wallet → Show private key." : "Paste the bot wallet's private key.");
+        }
+        this.ctx.setup.write({
+          LIVE_TRADING: LIVE_PHRASE,
+          ...(key ? { WALLET_PRIVATE_KEY: key } : {}),
+          LIVE_MAX_POSITION_SOL: String(maxPos),
+          LIVE_MAX_DAILY_LOSS_SOL: String(maxLoss),
+        });
+        this.ctx.log.warn("live trading enabled from the dashboard", { wallet: address, maxPos, maxLoss });
+        const restarting = this.ctx.restart();
+        return done({ address, restarting, ...restartNote(restarting) });
+      }
+      case "/api/setup/live-off": {
+        const e = this.ctx.engine();
+        e.updateSettings({ mode: "paper" });
+        e.persistNow();
+        this.ctx.setup.write({ LIVE_TRADING: "off" });
+        this.ctx.log.warn("live trading switched off from the dashboard");
+        const restarting = this.ctx.restart();
+        return done({ restarting, ...restartNote(restarting) });
+      }
+      case "/api/setup/wallet-remove": {
+        if (!isPrivateChannel(req)) return fail(403, `Remove the wallet on the computer running the bot: open http://localhost:${this.ctx.port} there.`);
+        const e = this.ctx.engine();
+        e.updateSettings({ mode: "paper" });
+        e.persistNow();
+        this.ctx.setup.write({ LIVE_TRADING: "off", WALLET_PRIVATE_KEY: "" });
+        const restarting = this.ctx.restart();
+        return done({ restarting, ...restartNote(restarting) });
+      }
+      case "/api/restart": {
+        const restarting = this.ctx.restart();
+        return restarting ? done({ restarting }) : fail(400, "This bot was started without its starter, so it cannot restart itself. Close it and start it again.");
+      }
+      default:
+        return fail(404, "unknown endpoint");
+    }
   }
 
   private stream(req: IncomingMessage, res: ServerResponse) {

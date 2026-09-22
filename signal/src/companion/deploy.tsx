@@ -42,14 +42,16 @@ export function CopyBlock({ text }: { text: string }) {
 }
 
 const HOSTS: [Host, string, string][] = [
-  ["railway", "Railway", "from your phone · ~$5–10/mo"],
+  ["windows", "Windows PC", "free · PC stays on"],
+  ["railway", "Railway", "cloud · ~$5–10/mo"],
   ["render", "Render", "Starter plan + disk"],
   ["vps", "Linux VPS", "~$4–6/mo · one command"],
-  ["windows", "Windows PC", "free · PC must stay on"],
 ];
 
+const ZIP = `https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip`;
+
 export function Deploy() {
-  const [host, setHost] = useState<Host>("railway");
+  const [host, setHost] = useState<Host>("windows");
   const [token, setToken] = useState(newToken);
   const [paper, setPaper] = useState(10);
   const [tg, setTg] = useState(true);
@@ -91,6 +93,15 @@ export function Deploy() {
         </div>
       </div>
 
+      {host === "windows" ? (
+        <div class="card">
+          <h2>2 · Settings</h2>
+          <p class="muted" style="margin:0">
+            None to write on a PC: the dashboard's <b>More → Setup</b> page takes your free market-data key, links Telegram with a code, and later adds a wallet with a few
+            taps.
+          </p>
+        </div>
+      ) : (
       <div class="card">
         <h2>2 · Your server settings</h2>
         <p class="muted" style="margin-top:0">
@@ -122,6 +133,7 @@ export function Deploy() {
         </div>
         <CopyBlock text={env} />
       </div>
+      )}
 
       <div class="card">
         <h2>3 · Steps</h2>
@@ -186,41 +198,61 @@ export function Deploy() {
             <li>
               Install{" "}
               <a href="https://nodejs.org" target="_blank" rel="noopener">
-                Node.js LTS
+                Node.js
               </a>{" "}
-              and download the repo (Code → Download ZIP on GitHub, branch <code>{BRANCH}</code>).
+              — the big <b>LTS</b> button, then Next until Finish.
             </li>
             <li>
-              Save the settings above as <code>signal\.env</code>.
+              <a href={ZIP} target="_blank" rel="noopener">
+                Download the bot
+              </a>{" "}
+              → right-click the ZIP → <b>Extract All</b>. Move the <code>signal</code> folder to <code>C:\</code> and rename it <code>SIGNAL</code>.
             </li>
             <li>
-              Double-click <code>signal\start-windows.bat</code>. It builds once and restarts the bot if it stops. Sleep mode must be off.
+              Double-click <code>start-windows.bat</code> (if Windows warns: More info → Run anyway). A black window opens — that is the bot, leave it open. The dashboard
+              opens in your browser.
             </li>
             <li>
-              Open:
-              <CopyBlock text={link} />
+              Dashboard → <b>More → Setup</b>: paste your free key from{" "}
+              <a href="https://dashboard.helius.dev" target="_blank" rel="noopener">
+                dashboard.helius.dev
+              </a>
+              , and link Telegram with the code it shows.
+            </li>
+            <li>
+              Double-click <code>autostart-windows.bat</code> once so it starts with Windows, and set Windows <b>Settings → System → Power → Sleep</b> to <b>Never</b>.
             </li>
           </ol>
         )}
         <p class="faint note">
-          Then: Bot tab → switch on <b>Score only</b>, set your score, TP 100%, SL 50%, turn trading on (paper). Telegram: send <code>/status</code> to your bot.
+          Then: Bot tab → <b>Strategy</b> → <b>Use this</b> on a rule → switch Auto-trading on (paper). Going live later is Setup → step 5, a few taps.
         </p>
       </div>
 
       <div class="card warnbox">
         <h2>Going live, later</h2>
         <p style="margin-top:0">
-          Only after Learn → go-live check is green. Create a <b>new</b> Phantom wallet for the bot and add these in your host's variables screen directly —{" "}
-          <b>never paste a private key into this page, a chat or a website</b>:
+          Only after Learn → go-live check is green, with a <b>new</b> Phantom account used only by the bot. <b>Never paste a private key into this page, a chat or a
+          website.</b>
         </p>
-        <pre class="mono">
-          {`LIVE_TRADING=I_UNDERSTAND_THE_RISK
+        {host === "windows" ? (
+          <p style="margin-bottom:0">
+            On your PC's own dashboard: <b>More → Setup → 5. Go live</b> → paste the key, set the two limits, type "I understand the risk" → <b>Allow live trading</b>. After
+            the restart: <b>Bot → Mode → Live</b>. For safety it only works on the PC itself, not from your phone.
+          </p>
+        ) : (
+          <>
+            <p>Add these in your host's variables screen:</p>
+            <pre class="mono">
+              {`LIVE_TRADING=I_UNDERSTAND_THE_RISK
 WALLET_PRIVATE_KEY=…
 LIVE_MAX_POSITION_SOL=0.05
 LIVE_MAX_DAILY_LOSS_SOL=0.25`}
-        </pre>
+            </pre>
+          </>
+        )}
         <p class="faint note" style="margin-bottom:0">
-          The caps cannot be raised from the dashboard. Orders are built by PumpPortal (0.5% fee), signed on your server, and sent through your RPC.
+          The limits cannot be raised from the Bot tab. Orders are built by PumpPortal (0.5% fee), signed on your computer, and sent through your RPC.
         </p>
       </div>
     </div>

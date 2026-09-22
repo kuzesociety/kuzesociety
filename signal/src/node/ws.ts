@@ -120,6 +120,7 @@ export class ReconnectingWS {
       this.lastAliveAt = now;
       this.h.lastMsgAt = now;
       this.h.msgs++;
+      this.h.bytes = (this.h.bytes ?? 0) + (Array.isArray(data) ? data.reduce((n, b) => n + b.length, 0) : (data as Buffer).byteLength);
       try {
         this.o.onMessage(data.toString());
       } catch (e) {

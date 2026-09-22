@@ -5,7 +5,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer, request } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,8 @@ import { WebSocketServer } from "ws";
 import { encodeAmmSwap, encodeComplete, encodeCreate, encodeCreatePool, encodeMigration, encodeTrade, programDataLine } from "../src/core/encode.js";
 import type { AmmSwap, MarketEvent } from "../src/core/types.js";
 import { MarketSim } from "../src/sim/market.js";
+import { base58Encode } from "../src/core/codec.js";
+import { walletFromSeed } from "../src/node/live/solana.js";
 
 const ROOT = join(__dirname, "..");
 const TOKEN = "e2e-token-123456";
@@ -43,10 +45,26 @@ let wss: WebSocketServer | null = null;
 let rpcHttp: ReturnType<typeof createServer> | null = null;
 let dataDir = "";
 let port = 0;
+let rpcPort = 0;
 let output = "";
 
 const api = (path: string, init: RequestInit = {}) =>
   fetch(`http://127.0.0.1:${port}${path}`, { ...init, headers: { authorization: `Bearer ${TOKEN}`, ...(init.headers ?? {}) } });
+const post = (body: unknown): RequestInit => ({ method: "POST", headers: { "content-type": "application/json", "x-signal": "1" }, body: JSON.stringify(body) });
+
+/** A request with a chosen Host header (fetch cannot set it): how a browser elsewhere looks. */
+function raw(path: string, headers: Record<string, string>, method = "GET", body?: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const r = request({ host: "127.0.0.1", port, path, method, headers }, (res) => {
+      let b = "";
+      res.on("data", (c) => (b += c));
+      res.on("end", () => resolve({ status: res.statusCode ?? 0, body: b }));
+    });
+    r.on("error", reject);
+    if (body) r.write(body);
+    r.end();
+  });
+}
 
 async function until<T>(fn: () => Promise<T | null | undefined | false>, ms = 30_000): Promise<T> {
   const t0 = Date.now();
@@ -69,7 +87,16 @@ beforeAll(async () => {
   rpcHttp = createServer((req, res) => {
     let b = "";
     req.on("data", (c) => (b += c));
-    req.on("end", () => res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { value: [] } })));
+    req.on("end", () => {
+      const method = (() => {
+        try {
+          return JSON.parse(b).method;
+        } catch {
+          return "";
+        }
+      })();
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: method === "getSlot" ? 312_000_000 : { value: [] } }));
+    });
   });
   await new Promise<void>((r) => rpcHttp!.listen(0, "127.0.0.1", () => r()));
   // mock RPC websocket streaming simulated activity as logs
@@ -97,6 +124,7 @@ beforeAll(async () => {
   });
   const wsPort = (wss.address() as AddressInfo).port;
   const httpPort = (rpcHttp.address() as AddressInfo).port;
+  rpcPort = httpPort;
   port = 20000 + Math.floor(Math.random() * 20000);
   proc = spawn(process.execPath, [join(ROOT, "dist/engine.mjs")], {
     cwd: dataDir,
@@ -130,7 +158,11 @@ afterAll(() => {
 
 describe("built server end-to-end", () => {
   it("rejects requests without the token and serves the dashboard with a strict CSP", async () => {
-    expect((await fetch(`http://127.0.0.1:${port}/api/state`)).status).toBe(401);
+    // a browser on another computer (or a DNS-rebinding page) needs the token…
+    expect((await raw("/api/state", { host: `bot.example:${port}` })).status).toBe(401);
+    expect((await raw("/api/state", { host: `localhost:${port}`, "x-forwarded-for": "1.2.3.4" })).status).toBe(401);
+    // …the computer running the bot does not
+    expect((await raw("/api/state", { host: `localhost:${port}` })).status).toBe(200);
     const page = await fetch(`http://127.0.0.1:${port}/`);
     expect(page.status).toBe(200);
     expect(page.headers.get("content-security-policy")).toMatch(/script-src 'self' 'sha256-/);
@@ -157,6 +189,34 @@ describe("built server end-to-end", () => {
     expect(run.report.status).toBe("not_enough_data");
     expect((await (await api("/api/edges")).json()).report.status).toBe("not_enough_data");
   }, 60_000);
+
+  it("sets up from the dashboard: keys are tested before saving, a wallet only from this computer", async () => {
+    expect((await api("/api/setup/rpc", post({ key: "not a key" }))).status).toBe(400);
+    const rpc = await (await api("/api/setup/rpc", post({ key: `http://127.0.0.1:${rpcPort}` }))).json();
+    expect(rpc).toMatchObject({ ok: true, slot: 312_000_000, restarting: false });
+    expect(rpc.note).toMatch(/start it again/);
+    const st = await (await api("/api/setup")).json();
+    expect(st.rpc.host).toBe(`127.0.0.1:${rpcPort}`);
+    expect(st.local).toBe(true);
+    expect(st.supervised).toBe(false);
+
+    const seed = new Uint8Array(32).fill(7);
+    const wallet = walletFromSeed(seed);
+    const secret = base58Encode(new Uint8Array([...seed, ...wallet.publicKey]));
+    const body = JSON.stringify({ walletKey: secret, confirm: "I understand the risk", maxPositionSol: 0.05, maxDailyLossSol: 0.25 });
+    const headers = { authorization: `Bearer ${TOKEN}`, "x-signal": "1", "content-type": "application/json" };
+    // from a phone on the Wi-Fi (plain http): refused, the key must not cross the network
+    expect((await raw("/api/setup/live", { ...headers, host: `192.168.1.10:${port}` }, "POST", body)).status).toBe(403);
+    expect((await api("/api/setup/live", post({ walletKey: secret, maxPositionSol: 0.05, maxDailyLossSol: 0.25 }))).status).toBe(400); // not confirmed
+    const live = await (await api("/api/setup/live", post(JSON.parse(body)))).json();
+    expect(live).toMatchObject({ ok: true, address: wallet.address, restarting: false });
+    const after = await (await api("/api/setup")).json();
+    expect(after.live).toMatchObject({ walletSet: true, address: wallet.address, pendingRestart: true, maxPositionSol: 0.05 });
+    expect(JSON.stringify(after)).not.toContain(secret); // write-only
+    expect(JSON.parse(readFileSync(join(dataDir, "config.json"), "utf8")).WALLET_PRIVATE_KEY).toBe(secret);
+    await api("/api/setup/wallet-remove", post({}));
+    expect((await (await api("/api/setup")).json()).live.walletSet).toBe(false);
+  });
 
   it("applies settings over the API (score-only) and streams server-sent events", async () => {
     const res = await api("/api/settings", { method: "POST", headers: { "content-type": "application/json", "x-signal": "1" }, body: JSON.stringify({ enabled: true, scoreOnly: true, minScore: 70 }) });

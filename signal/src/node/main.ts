@@ -4,7 +4,7 @@
  */
 import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getHeapStatistics } from "node:v8";
 import { Engine } from "../core/engine.js";
@@ -24,6 +24,7 @@ import { LiveExecutor } from "./live/executor.js";
 import { ServerLog } from "./log.js";
 import { EventRouter } from "./router.js";
 import { DashboardServer } from "./server.js";
+import { type SetupKey, SetupStore, lanAddress, openBrowser } from "./setup.js";
 import { DataStore } from "./store.js";
 import { Telegram } from "./telegram.js";
 
@@ -40,6 +41,11 @@ function dashboardHtml(): string {
 
 export async function main() {
   loadDotEnv();
+  // values saved from the dashboard (data feed, Telegram, wallet) win over .env and host variables
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const setup = new SetupStore(resolve(process.env.DATA_DIR ?? "./data"));
+  setup.applyTo(process.env);
+  const effective = (k: SetupKey) => setup.read()[k] ?? baseEnv[k] ?? "";
   const config = loadConfig();
   const log = new ServerLog(config.logLevel);
   const store = new DataStore(config.dataDir, log);
@@ -175,9 +181,18 @@ export async function main() {
   // ---- engine clock & housekeeping ------------------------------------------------
   let lagMs = 0;
   let lastTick = Date.now();
+  let lastSleepWarn = 0;
   const clock = setInterval(() => {
     const now = Date.now();
-    lagMs = Math.max(0, now - lastTick - 100);
+    const gap = now - lastTick;
+    lagMs = Math.max(0, gap - 100);
+    if (gap > 60_000 && now - lastSleepWarn > 3_600_000) {
+      // the computer slept (or froze): the market went on without us
+      lastSleepWarn = now;
+      const min = Math.round(gap / 60_000);
+      log.warn(`the computer was asleep for ${min} min — the bot missed that time`);
+      telegram?.send(`😴 The computer running SIGNAL was asleep for ${min} min, so the bot missed that time. Turn sleep off: Windows Settings → System → Power → Sleep → Never.`);
+    }
     lastTick = now;
     engine.advance(now);
   }, 100);
@@ -223,8 +238,33 @@ export async function main() {
   });
   learner.start();
 
-  telegram = new Telegram({ token: config.telegramToken, chatId: config.telegramChatId, log, engine: () => engine });
-  telegram.start();
+  /** (Re)starts Telegram from the current setup; linking a chat needs no restart. */
+  const startTelegram = () => {
+    telegram?.stop();
+    const chat = effective("TELEGRAM_CHAT_ID");
+    telegram = new Telegram({
+      token: effective("TELEGRAM_BOT_TOKEN"),
+      chatId: chat === "none" ? "" : chat,
+      linkCode: setup.read().TELEGRAM_LINK_CODE,
+      onLinked: (id) => {
+        setup.write({ TELEGRAM_CHAT_ID: id, TELEGRAM_LINK_CODE: "" });
+        log.info("telegram chat linked");
+      },
+      log,
+      engine: () => engine,
+    });
+    telegram.start();
+  };
+  startTelegram();
+
+  // Changing the data feed or the wallet restarts the bot (state is saved first). Only done
+  // under a supervisor that starts it again: the Windows/Mac starters, Docker, systemd.
+  let shutdownRef: (code: number) => void = () => {};
+  const restart = () => {
+    if (process.env.SIGNAL_SUPERVISED !== "1") return false;
+    setTimeout(() => shutdownRef(75), 500);
+    return true;
+  };
 
   server = new DashboardServer({
     engine: () => engine,
@@ -234,6 +274,11 @@ export async function main() {
     learner,
     live: () => live,
     token,
+    setup,
+    effective,
+    restart,
+    reloadTelegram: startTelegram,
+    port: config.port,
     dashboardHtml,
     extraHealth: () => ({
       loopLagMs: lagMs,
@@ -248,9 +293,11 @@ export async function main() {
   await server.listen(config.port, config.host);
 
   const shown = config.dashboardToken ? "(from DASHBOARD_TOKEN)" : token;
+  const lan = lanAddress();
   log.info("================================================================");
   log.info(`SIGNAL running — dashboard on port ${config.port}`);
-  log.info(`Open:  http://localhost:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
+  log.info(`On this computer: http://localhost:${config.port}  (no token needed)`);
+  if (lan) log.info(`On your phone at home (same Wi-Fi): http://${lan}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
   log.info(`Access token ${shown}`);
   log.info(`Feeds: ${[...config.feeds].join(", ")} · mode ${engine.settings.mode} · auto-trading ${engine.settings.enabled ? "ON" : "off"}`);
   if (config.feeds.has("sim")) log.warn("SIMULATION MODE: all coins and prices are synthetic");
@@ -260,6 +307,8 @@ export async function main() {
   const shutdown = (code: number) => {
     if (stopping) return;
     stopping = true;
+    // set now: once everything is closed Node may exit on its own before the timer below
+    process.exitCode = code;
     log.info("shutting down — saving state");
     try {
       engine.persistNow();
@@ -280,6 +329,8 @@ export async function main() {
     store.close();
     setTimeout(() => process.exit(code), 300).unref();
   };
+  shutdownRef = shutdown;
+  if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${config.port}/`, config.dataDir);
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
   process.on("unhandledRejection", (e) => log.error("unhandled rejection", { err: String(e) }));

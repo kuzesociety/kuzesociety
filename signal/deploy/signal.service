@@ -10,6 +10,7 @@ Type=simple
 User=signal
 WorkingDirectory=/opt/signal/signal
 EnvironmentFile=/opt/signal/signal/.env
+Environment=SIGNAL_SUPERVISED=1
 ExecStart=/usr/bin/node dist/engine.mjs
 Restart=always
 RestartSec=5

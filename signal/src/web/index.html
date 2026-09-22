@@ -186,6 +186,16 @@ tr:last-child td{border-bottom:0}
 .edge-meta{font-size:13px;color:var(--ink2);margin:10px 0 4px}
 .edge{display:grid;gap:3px;padding:10px 0;border-top:1px solid var(--line)}
 .edge-rule{font-weight:700}
+.strat{display:flex;gap:10px;align-items:center;padding:10px 0;border-top:1px solid var(--line)}
+.strat.active{box-shadow:inset 3px 0 0 var(--flare);padding-left:10px}
+.inp.wide{max-width:none;flex:1;min-width:0}
+.step .stepno{width:26px;height:26px;border-radius:50%;display:grid;place-items:center;background:var(--raised);font-weight:750;font-size:13px;flex:none}
+.step.done{border-color:color-mix(in srgb,var(--good) 35%,var(--line))}
+.step.done .stepno{background:var(--good-soft);color:var(--good)}
+.steps{margin:0;padding-left:20px;display:grid;gap:6px}
+.copyline{display:flex;gap:8px;align-items:center}
+.copyline code{flex:1;min-width:0;overflow-wrap:anywhere;font-family:var(--mono);font-size:12px;background:var(--raised);padding:6px 8px;border-radius:6px}
+.linkcode{font-size:20px;letter-spacing:.12em;color:var(--flare)}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
 </style>
 </head>

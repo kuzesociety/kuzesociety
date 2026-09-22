@@ -121,6 +121,8 @@ export interface FeedHealth {
   status: "connecting" | "open" | "down" | "off";
   lastMsgAt: number;
   msgs: number;
+  /** bytes received (data plans are often metered by volume) */
+  bytes?: number;
   reconnects: number;
   errors: number;
   note?: string;

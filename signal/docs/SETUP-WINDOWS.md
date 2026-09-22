@@ -1,0 +1,75 @@
+# Set up SIGNAL on your Windows PC (paper trading, free)
+
+About 15 minutes. You need: a Windows 10/11 PC that stays on, an internet connection, and (optional) Telegram on your phone. Nothing here costs money. Paper trading uses fake money on the real market.
+
+## 1. Install Node.js (once)
+
+1. Open **https://nodejs.org** and click the big **LTS** download button.
+2. Open the downloaded file and click **Next** until **Finish**. Leave every option as it is.
+
+## 2. Download SIGNAL
+
+1. Click this link — the download starts by itself:
+   **https://github.com/kuzesociety/kuzesociety/archive/refs/heads/claude/signal-meme-trading-bot-o142hw.zip**
+2. Right-click the downloaded ZIP → **Properties** → tick **Unblock** (if you see it) → **OK**.
+3. Right-click the ZIP → **Extract All…** → **Extract**.
+4. Open the extracted folder. Move the folder called **signal** to `C:\` and rename it **SIGNAL**, so you end up with `C:\SIGNAL`. (Avoid Desktop/Documents if OneDrive syncs them.)
+
+## 3. Start it
+
+1. Open `C:\SIGNAL` and double-click **start-windows.bat**.
+   - If a blue **"Windows protected your PC"** box appears: **More info → Run anyway**.
+   - If Windows asks whether Node.js may use the network: tick **Private networks** → **Allow** (needed for your phone).
+2. A black window opens and stays open — **that is the bot. Leave it open.** Your browser opens the dashboard by itself (or go to **http://localhost:8787**).
+
+## 4. Give it market data (free Helius key)
+
+1. Go to **https://dashboard.helius.dev** and sign up (Google login works). The free plan is chosen by default.
+2. Open **API Keys** and copy your key (it looks like `1a2b3c4d-5e6f-…`).
+3. In the dashboard: **More → Setup → 1. Market data** → paste → **Save and connect**. The bot tests the key, then restarts by itself in a few seconds.
+4. The yellow "Setup needed" banner disappears. **More → Health** shows *solana-rpc* green with the message count going up.
+
+The Setup page shows how much data the feed uses per day and whether it fits the Helius free plan (about 33,000 credits a day). If it does not, Helius will ask for a paid plan before the month ends — you will see it coming.
+
+## 5. Telegram alerts (optional, recommended)
+
+1. In Telegram, open **@BotFather** → send `/newbot` → pick any name → pick a username ending in `bot`.
+2. Copy the token BotFather sends (looks like `123456789:AAH…`).
+3. Dashboard: **More → Setup → 2. Telegram** → paste → **Connect**. A 6-digit code appears.
+4. Open your new bot in Telegram and send it that code. The Setup step turns green and the bot says **Linked**.
+
+From then on you get a message for every buy and sell, and you can control the bot from anywhere: `/status` `/pause` `/resume` `/score 75` `/tp 100` `/sl 50` `/hold 10` `/kill`.
+
+## 6. Start paper trading
+
+1. Dashboard → **Bot** tab → **Strategy** → **Use this** on the rule you want:
+   - **Your plan** — buy at score 75, sell at 2× or −50%.
+   - **Simulator finding: fast momentum** — buy at 95, sell at +500% or −20%, or after 10 minutes. Unproven on the real market; paper-testing it is exactly how you find out.
+   - **Found in your data** — appears after a day or more, when the edge finder proves a rule on data it never saw.
+2. Switch **Auto-trading** on at the top of the Bot tab. It trades with fake money (10 SOL to start).
+3. Leave it running for days. Check **Learn** (go-live check, edge finder) and **Trades**.
+
+## 7. Keep it running 24/7
+
+- **No sleep:** Windows **Settings → System → Power** (Windows 10: *Power & sleep*) → *When plugged in, put my device to sleep after* → **Never**. The screen may turn off; the PC must not sleep. If it does, Telegram tells you how long the bot was asleep.
+- **Start with Windows:** double-click **autostart-windows.bat** once. After a restart (for example Windows Update), sign in and the bot starts by itself. Run it again to undo.
+- **Your phone at home:** **More → Setup → 4** shows a link for your phone (same Wi-Fi). Away from home, use Telegram.
+- **Stop:** close the black window. **Start:** double-click `start-windows.bat` again. Everything is saved in `C:\SIGNAL\data`.
+
+## 8. Going live later (a few clicks, when the evidence says so)
+
+Only when **Learn → go-live check** is green for your strategy:
+
+1. In **Phantom**: add a **new account** used only by the bot, and send it only what you can afford to lose.
+2. Phantom → **Settings → Manage accounts →** that account → **Show private key** → copy.
+3. On the PC running the bot (for safety this does not work from your phone): **More → Setup → 5. Go live** → paste the key → set **Max SOL per trade** (e.g. 0.05) and **Stop for the day after losing** (e.g. 0.25) → type `I understand the risk` → **Allow live trading**. The bot restarts.
+4. **Bot → Mode → Live.** Done. To go back: **Mode → Paper**, or **Setup → Turn live off**.
+
+The key is saved only in `C:\SIGNAL\data\config.json` on your PC and is never shown again. The two limits cannot be raised from the Bot tab.
+
+## If something is wrong
+
+- **The black window closes immediately:** Node.js is not installed — do step 1, then start again.
+- **"Setup needed" banner stays:** the Helius key did not work — paste it again in Setup (the page says why).
+- **No trades after hours:** Bot tab → *Why no trades?* lists exactly what blocked each signal.
+- **Dashboard won't open:** make sure the black window is open, then go to http://localhost:8787.

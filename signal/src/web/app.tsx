@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { signedSol } from "./format";
 import { ext } from "./ext";
-import { api, connectStream, getState, refreshState, stopStream, useApp } from "./store";
+import { api, connectStream, getState, navigate, refreshState, stopStream, useApp } from "./store";
 import { Icon } from "./ui";
 import { Bot } from "./views/bot";
 import { Learn } from "./views/learn";
@@ -150,6 +150,14 @@ export function App() {
         </div>
       )}
       {account?.killed && <div class="banner bad">Kill switch is ON — no new entries.</div>}
+      {!ext.demo && health?.config?.rpcIsPublic && !health.simulated && (
+        <div class="banner sim">
+          <span style="flex:1">Setup needed: the bot is on the slow public data feed. Add your free Helius key.</span>
+          <button class="btn sm" onClick={() => navigate("more", "setup")}>
+            Set up
+          </button>
+        </div>
+      )}
       {health && health.feedDown && !health.simulated && <div class="banner bad">Live data feed is down — the bot will not open trades until it recovers.</div>}
       <nav class="tabs" aria-label="sections">
         {TABS.map(([k, label]) => (

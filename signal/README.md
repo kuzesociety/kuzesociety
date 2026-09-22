@@ -26,8 +26,8 @@ This installs Node, builds, creates a systemd service that restarts on failure, 
 
 With Docker instead: `cd signal && cp .env.example .env && docker compose up -d`.
 
-### Option C: Windows PC / Windows VPS
-Install [Node.js LTS](https://nodejs.org), download the repo, then double-click **`signal/start-windows.bat`**. It builds on first run and restarts the bot automatically if it stops. Open `http://localhost:8787/?token=…`. The token is printed in the window.
+### Option C: your Windows PC (free) — step-by-step guide: [`docs/SETUP-WINDOWS.md`](docs/SETUP-WINDOWS.md)
+Install [Node.js LTS](https://nodejs.org), [download the bot](https://github.com/kuzesociety/kuzesociety/archive/refs/heads/claude/signal-meme-trading-bot-o142hw.zip), then double-click **`signal/start-windows.bat`**. The dashboard opens in your browser (on the PC itself no token is needed) and the bot restarts automatically if it stops. Everything else — the data-feed key, Telegram, and later the wallet — is done with buttons in **More → Setup**. `autostart-windows.bat` makes it start with Windows. On a Mac, use `start-mac.command` (it also keeps the Mac awake).
 
 ### Try it in your browser first
 `dist/companion.html` (built by `npm run build`) is a single page that runs the real engine on a simulated market, with a research tab and a setup wizard that generates your server settings. Nothing in it touches real coins or money, and it stops when the page closes.
@@ -54,11 +54,15 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 ## 4. Bot settings (Bot tab or Telegram)
 
+**Strategy** (top of the Bot tab): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
+
+
 | Setting | Meaning |
 |---|---|
 | Minimum score | Enter when a coin reaches this. The slider shows how many coins per hour recently reached each value |
 | **Score only** | Buy on the score alone and ignore all token filters. Account limits still apply: size, max open positions, daily loss, one entry per coin, trades per hour |
 | Take profit / Stop loss | Net of every cost: pool fees, 0.5% venue fee, priority fee, account rent. The stop is fixed from entry. In a crash the fill can land below it, and the bot always sells |
+| Sell after | Time limit per trade: sells at market if neither target nor stop was hit (0 = no limit) |
 | **One entry per coin** | The bot buys a coin only at its first entry moment: the first time the score reaches your number and holds. In simulation, buying the same coin again after a dip lost about 40% per trade. Turn on re-entry to allow it anyway |
 | Score must hold | Evaluations in a row (about one per second on an active coin) at or above your score before buying. Default 5: skips one-off spikes and costs a few seconds |
 | Entry slippage + retry window | A buy lands at the price when the transaction lands. If the price moved further than your slippage, the buy fails like on-chain and the bot retries while the score still holds |
@@ -67,7 +71,7 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 **Why no trade?** The Bot tab shows, for the last hour, how many coins were scored, how many reached your score, what was bought, and exactly why the rest were blocked.
 
-Telegram commands: `/status /positions /pause /resume /score 75 /tp 100 /sl 50 /size 0.1 /scoreonly on|off /kill /unkill`.
+Telegram commands: `/status /positions /pause /resume /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill`.
 
 ## 5. Is it making money?
 
@@ -95,23 +99,25 @@ node dist/research.mjs selftest            # proves the learning pipeline finds 
 ## 6. Going live (real SOL)
 
 1. In Phantom, create a **new wallet used only by the bot**. Fund it with what you can afford to lose.
-2. Export its private key (Settings → Manage accounts → Show private key) and put it **only** in the server's `.env`:
+2. Export its private key (Settings → Manage accounts → Show private key).
+3. **With buttons:** on the computer running the bot, **More → Setup → 5. Go live** → paste the key, set the per-trade and per-day limits, type `I understand the risk` → **Allow live trading**. The bot saves it to `DATA_DIR/config.json` (owner-only file), restarts itself, and never shows the key again. For safety this only works on the computer itself or over HTTPS, never over plain Wi-Fi.
+   **Or in `.env` / host variables:**
    ```
    LIVE_TRADING=I_UNDERSTAND_THE_RISK
    WALLET_PRIVATE_KEY=...
    LIVE_MAX_POSITION_SOL=0.05
    LIVE_MAX_DAILY_LOSS_SOL=0.25
    ```
-3. Restart, then choose Bot → Mode → **Live**.
+4. Choose Bot → Mode → **Live**.
 
-Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the bonding curve and PumpSwap). It is signed on your server (the key never leaves it), sent through your RPC, and re-broadcast until confirmed. The real fill is then read back from the chain. The caps in `.env` cannot be raised from the dashboard. Four errors in a row or the daily cap halt new live entries, but exits always go through. After a restart, open live positions are reconciled against the wallet.
+Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the bonding curve and PumpSwap). It is signed on your server (the key never leaves it), sent through your RPC, and re-broadcast until confirmed. The real fill is then read back from the chain. The per-trade and per-day caps cannot be raised from the Bot tab. Four errors in a row or the daily cap halt new live entries, but exits always go through. After a restart, open live positions are reconciled against the wallet.
 
 ## 7. Development
 
 ```bash
 cd signal
 npm ci
-npm test          # 60 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
+npm test          # 67 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
