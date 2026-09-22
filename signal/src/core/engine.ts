@@ -134,6 +134,7 @@ export interface EngineHooks {
   persist?(state: PersistedState): void;
   journal?(entry: Record<string, unknown>): void;
   onSettings?(s: Settings): void;
+  onModel?(m: ModelSpec): void;
 }
 
 export interface PersistedToken {
@@ -232,6 +233,8 @@ export class Engine {
   private dirty = new Set<string>();
   private orders = new Map<string, OrderRequest>();
   private paperQueue: OrderRequest[] = [];
+  /** delayed actions (order retries) so failures never spin in a tight loop */
+  private later: { at: number; run: () => void }[] = [];
   private lastSweep = 0;
   private lastPersist = 0;
   private persistDirty = false;
@@ -524,6 +527,13 @@ export class Engine {
       if (now < this.now) now = this.now;
       this.now = now;
       this.landPaperOrders(now);
+      if (this.later.length) {
+        const due = this.later.filter((a) => a.at <= now);
+        if (due.length) {
+          this.later = this.later.filter((a) => a.at > now);
+          for (const a of due) a.run();
+        }
+      }
       if (fromIngest) return;
       this.rescoreDirty(now);
       if (now - this.lastSweep >= this.cfg.sweepMs) {
@@ -668,6 +678,7 @@ export class Engine {
     this.stats.entryTimes = this.stats.entryTimes.filter((x) => x > hourAgo);
     if (this.stats.entryTimes.length >= s.maxTradesPerHour) return "rate_limit";
     if (this.feedDown()) return "feed_down";
+    if (!this.modelReady()) return "warming_up";
     if (s.mode === "live") {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
@@ -686,6 +697,11 @@ export class Engine {
     if (f.maxDevLaunches24h > 0 && raw.creatorLaunches24h > f.maxDevLaunches24h) return "filter:serial_dev";
     if (f.maxDevSoldPct < 100 && raw.devSold * 100 > f.maxDevSoldPct) return "filter:dev_sold";
     return null;
+  }
+
+  /** A prior model trades only after it has been scaled to the live market once. */
+  modelReady(): boolean {
+    return this.model.source === "trained" || !!this.model.scaledAt;
   }
 
   /** True when the primary trade feed has gone quiet (no trading blind). */
@@ -778,14 +794,16 @@ export class Engine {
     this.orders.set(order.id, order);
     pos.pendingOrder = order.id;
     if (pos.mode === "live") {
-      if (!this.executor || !this.executor.ready()) {
-        this.onOrderResult({ orderId: order.id, ok: false, error: "live_disabled", ts: this.now, lamports: 0, tokens: 0 });
+      // exits are always handed to the executor (it allows closing even when halted)
+      const refuse = !this.executor || (order.side === "buy" && !this.executor.ready());
+      if (refuse) {
+        this.later.push({ at: this.now + 1, run: () => this.onOrderResult({ orderId: order.id, ok: false, error: "live_disabled", ts: this.now, lamports: 0, tokens: 0 }) });
         return;
       }
       try {
-        this.executor.submit(order);
+        this.executor!.submit(order);
       } catch (e) {
-        this.onOrderResult({ orderId: order.id, ok: false, error: "live_error", ts: this.now, lamports: 0, tokens: 0 });
+        this.later.push({ at: this.now + 1, run: () => this.onOrderResult({ orderId: order.id, ok: false, error: "live_error", ts: this.now, lamports: 0, tokens: 0 }) });
         this.log.error("executor.submit threw", { err: String(e) });
       }
       return;
@@ -904,8 +922,19 @@ export class Engine {
         pos.status = "open"; // wait for the pool; evaluate again on the next price
         return;
       }
-      const q = t ? quoteSell(t, o.amount, this.costs, this.solUsd) : null;
-      this.submit({ ...o, id: newId("o"), slippagePct: nextSlip, expectedPrice: q?.avgPriceSol ?? 0, submittedAt: this.now, attempt: o.attempt + 1, landAt: undefined }, pos);
+      if (pos.retries % 10 === 0) this.log.warn("exit still failing", { pos: pos.id, mint: pos.mint, error: r.error, retries: pos.retries });
+      const delay = Math.min(5_000, 500 * o.attempt);
+      pos.pendingOrder = "retry";
+      this.later.push({
+        at: this.now + delay,
+        run: () => {
+          if (pos.status === "closed" || !this.positions.has(pos.id)) return;
+          const tok = this.tokens.get(pos.mint);
+          const q = tok ? quoteSell(tok, Math.min(o.amount, pos.tokensLeft), this.costs, this.solUsd, o.closesAccount) : null;
+          pos.pendingOrder = undefined;
+          this.submit({ ...o, id: newId("o"), amount: Math.min(o.amount, pos.tokensLeft), slippagePct: nextSlip, expectedPrice: q?.ok ? q.avgPriceSol : 0, submittedAt: this.now, attempt: o.attempt + 1, landAt: undefined }, pos);
+        },
+      });
       return;
     }
     const sold = Math.min(pos.tokensLeft, r.tokens);
@@ -1020,10 +1049,12 @@ export class Engine {
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
     this.outcomes.setOptions({ latencyMs: next.paperLatencyMs, costs: this.costs });
-    // score thresholds changed: let every token signal again on its next crossing
+    // settings changed (bot switched on, threshold moved…): every coin currently at or
+    // above the threshold is a live signal again on its next evaluation
     for (const e of this.scores.values()) {
-      e.armed = e.res.score < next.minScore;
+      e.armed = true;
       e.above = 0;
+      e.at = 0;
     }
     this.hooks.onSettings?.(next);
     this.journal({ type: "settings", settings: next });
@@ -1049,6 +1080,30 @@ export class Engine {
     if (!t || p.tokensLeft <= 0 || p.pendingOrder) return false;
     this.sell(p, t, 1, reason, this.now);
     return true;
+  }
+
+  /**
+   * Live reconciliation after a restart: align a position with what the wallet actually
+   * holds (sold elsewhere, partially filled…).
+   */
+  reconcile(positionId: string, tokensInWallet: number) {
+    const p = this.positions.get(positionId);
+    if (!p) return;
+    if (tokensInWallet <= 0) {
+      p.notes.push("not found in wallet after restart — closed without proceeds (sold elsewhere?)");
+      this.closePosition(p, "external", this.now);
+      return;
+    }
+    if (p.status === "opening") {
+      p.status = "open";
+      p.tokens = tokensInWallet;
+      p.notes.push("entry confirmed from wallet after restart");
+    }
+    if (tokensInWallet < p.tokensLeft) {
+      p.notes.push(`wallet holds ${tokensInWallet} of ${p.tokensLeft} tokens — adjusted`);
+      p.tokensLeft = tokensInWallet;
+    }
+    this.markDirty();
   }
 
   setModel(m: ModelSpec): boolean {
@@ -1110,8 +1165,17 @@ export class Engine {
       changed = true;
     }
     if (changed) {
-      this.model = { ...this.model, version: `prior-2.0 · auto-scaled ${new Date(this.now).toISOString().slice(11, 16)}Z` };
-      for (const e of this.scores.values()) e.at = 0;
+      const first = !this.model.scaledAt;
+      this.model = { ...this.model, scaledAt: this.now, version: `prior-2.0 · auto-scaled ${new Date(this.now).toISOString().slice(0, 16)}Z` };
+      for (const e of this.scores.values()) {
+        e.at = 0;
+        if (first) {
+          e.armed = true;
+          e.above = 0;
+        }
+      }
+      this.hooks.onModel?.(this.model);
+      if (first) this.log.info("score scale learned from the live market — entries enabled");
     }
   }
 
@@ -1133,9 +1197,10 @@ export class Engine {
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
-    if (now - this.lastNormalize >= 5 * 60_000) {
+    const every = this.modelReady() ? 5 * 60_000 : 30_000;
+    if (now - this.lastNormalize >= every) {
       this.lastNormalize = now;
-      this.normalizePrior();
+      this.normalizePrior(this.modelReady() ? 300 : 150);
     }
     // unmapped PumpSwap swaps are only held for a short while
     for (const [pool, q] of this.ammPending) if (q.length === 0 || now - q[q.length - 1]!.ev.ts > 60_000) this.ammPending.delete(pool);

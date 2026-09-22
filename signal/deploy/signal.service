@@ -1,0 +1,22 @@
+# systemd unit — copy to /etc/systemd/system/signal.service, adjust paths/user, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now signal && journalctl -u signal -f
+[Unit]
+Description=SIGNAL meme-coin bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=signal
+WorkingDirectory=/opt/signal/signal
+EnvironmentFile=/opt/signal/signal/.env
+ExecStart=/usr/bin/node dist/engine.mjs
+Restart=always
+RestartSec=5
+# hardening
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -18,13 +18,14 @@
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "preact": "^10.27.2",
     "ws": "8.18.3"
   },
   "devDependencies": {
+    "@solana/web3.js": "^1.98.4",
     "@types/node": "22.15.30",
     "@types/ws": "8.18.1",
     "esbuild": "0.25.10",
+    "preact": "^10.27.2",
     "typescript": "5.9.2",
     "vitest": "3.2.4"
   }

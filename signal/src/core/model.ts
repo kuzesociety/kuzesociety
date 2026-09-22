@@ -36,6 +36,8 @@ export interface ModelSpec {
   version: string;
   createdAt: number;
   source: "prior" | "trained";
+  /** when a prior was last re-scaled to the live market (entries wait for this) */
+  scaledAt?: number;
   /** what "win" means for this model */
   target: { tpPct: number; slPct: number; horizonMin: number };
   stages: Record<StageKey, StageModel>;
@@ -81,10 +83,11 @@ const AMM_W: Record<string, number> = {
 };
 
 export function priorModel(now = 0): ModelSpec {
+  const soften = (w: Record<string, number>) => Object.fromEntries(Object.entries(w).map(([k, v]) => [k, v * 0.5]));
   const mk = (weights: Record<string, number>, pRef: number): StageModel => ({
     pRef,
     bias: logit(pRef),
-    weights: { ...weights },
+    weights: soften(weights),
     mean: { ...PRIOR_MEAN },
     std: { ...PRIOR_STD },
   });

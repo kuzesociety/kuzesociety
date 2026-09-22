@@ -35,6 +35,7 @@ export const REASON_TEXT: Record<string, string> = {
   daily_loss_limit: "Daily loss limit reached",
   rate_limit: "Max trades per hour reached",
   feed_down: "Live data feed is down — not trading blind",
+  warming_up: "Learning this market's score scale (first minutes after install)",
   insufficient_balance: "Not enough SOL in the wallet",
   slippage: "Price moved more than your slippage before the buy landed",
   migrating: "Coin is migrating to PumpSwap (not tradable for a moment)",
