@@ -1,7 +1,9 @@
 /** Research & odds: what is proven, how the pump.fun game works, what a trade costs. */
 import { useMemo, useState } from "preact/hooks";
 import { LAMPORTS_PER_SOL, curveBuyQuote, newCurve } from "../core/curve";
+import { CONDITIONS, HOLDS_MIN } from "../core/edges";
 import { breakEvenP } from "../core/model";
+import { ENTRY_LEVELS, GRID, GRID_SL, GRID_TP } from "../core/outcomes";
 import { DEFAULT_COSTS, quoteBuy, quoteSell } from "../core/positions";
 import { TokenState } from "../core/token";
 import { Tag } from "../web/ui";
@@ -308,6 +310,27 @@ export function Research() {
           </li>
           <li>Paper mode waits 1.5 s before filling and uses the price at landing, so paper results are not flattering.</li>
         </ul>
+      </div>
+
+      <div class="section-title">
+        <h2>Can it find an edge on its own?</h2>
+      </div>
+      <div class="card">
+        <p style="margin-top:0">
+          Yes — that is the <b>edge finder</b> on the server's Learn tab. It does not need your plan. It tries every combination of {ENTRY_LEVELS.length} score levels,{" "}
+          {CONDITIONS.length} kinds of coin (curve or graduated, market cap, age, bundles, holders, buyers, socials, dev behaviour) and {GRID.length * HOLDS_MIN.length} exits
+          (take profit {GRID_TP[0]}–{GRID_TP[GRID_TP.length - 1]}%, stop {GRID_SL[0]}–{GRID_SL[GRID_SL.length - 1]}%, optional time limit): about{" "}
+          {(Math.round((ENTRY_LEVELS.length * CONDITIONS.length * GRID.length * HOLDS_MIN.length) / 1000) * 1000).toLocaleString("en-US")} rules, each one the bot can run.
+        </p>
+        <ul class="ticks">
+          <li>It searches only the older two thirds of the recorded data.</li>
+          <li>The best 20 must also make money on the newest third, which the search never saw, with a stricter bar for testing 20 at once.</li>
+          <li>
+            It reruns everything on shuffled data, where nothing can work. Across 40 such runs it “found” something 3 times — about the 1-in-20 rate it is designed for.
+          </li>
+          <li>Rules that survive get a button to paper-trade them. It never switches your settings by itself.</li>
+        </ul>
+        <p class="faint note">It needs about a day of real recorded market to start and a couple of weeks to be confident, and it re-checks every few hours because edges fade.</p>
       </div>
 
       <div class="section-title">

@@ -61,6 +61,8 @@ export class DashboardServer {
         allowed: () => ctx.config.liveTrading && !!ctx.live()?.ready(),
       },
       logs: () => ctx.log.tail.toArray().slice(-200).reverse(),
+      edges: () => (ctx.learner.lastEdges ? { ...ctx.learner.lastEdges, running: ctx.learner.edgesRunning } : null),
+      edgesRun: () => ctx.learner.findEdges(),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;
         // the engine's onSettings hook already broadcasts the change to open dashboards

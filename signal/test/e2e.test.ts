@@ -151,6 +151,11 @@ describe("built server end-to-end", () => {
     const detail = await (await api(`/api/token/${radar.rows[0].mint}`)).json();
     expect(detail.mint).toBe(radar.rows[0].mint);
     expect(detail.score.contributions.length).toBeGreaterThan(0);
+    expect(detail.entry).toMatchObject({ need: expect.any(Number) });
+    // the edge finder answers honestly when there is too little data
+    const run = await (await api("/api/edges/run", { method: "POST", headers: { "content-type": "application/json", "x-signal": "1" }, body: "{}" })).json();
+    expect(run.report.status).toBe("not_enough_data");
+    expect((await (await api("/api/edges")).json()).report.status).toBe("not_enough_data");
   }, 60_000);
 
   it("applies settings over the API (score-only) and streams server-sent events", async () => {

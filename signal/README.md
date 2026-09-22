@@ -80,6 +80,7 @@ The **Learn** tab answers this with your own data:
 - a take-profit × stop-loss heat map for coins above your score
 - your paper-trading results (profit factor, drawdown)
 - the **go-live check**: it passes only with ≥150 resolved signals at your settings *and* a 95% lower bound on average net return above +2%
+- the **edge finder**: independently of your settings, it searches 10 score levels × 22 coin conditions (stage, market cap, age, bundles, holders, buyers, socials, dev behaviour) × 192 exits (take profit 25–500%, stop loss 10–70%, optional 10/30/60-minute time limit) for rules that made money after every cost. It ranks them on the older two thirds of the data, re-checks the best 20 on the newest third (which the search never saw) with a bound corrected for testing 20 at once, and repeats everything on shuffled data to show how often the search fools itself. Every rule it reports is one the bot can run: **Paper-trade this rule** switches your settings to it
 
 Exact replays on recorded data are available through the research CLI:
 ```bash
@@ -87,6 +88,7 @@ node dist/research.mjs report   --data ./data --score 75 --tp 100 --sl 50
 node dist/research.mjs replay   --data ./data --score 75 --tp 100 --sl 50 --scoreonly
 node dist/research.mjs sweep    --data ./data --scores 65,75,85 --tps 50,100,200 --sls 30,50
 node dist/research.mjs train    --data ./data --adopt
+node dist/research.mjs edges    --data ./data            # the edge finder on your recorded data
 node dist/research.mjs selftest            # proves the learning pipeline finds real edges and rejects fake ones
 ```
 
@@ -109,7 +111,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 53 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
+npm test          # 60 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```

@@ -1,8 +1,267 @@
 import { createRequire as __cr } from 'module'; const require = __cr(import.meta.url);
 
-// src/research/cli.ts
-import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
-import { join as join2 } from "node:path";
+// src/core/curve.ts
+var LAMPORTS_PER_SOL = 1e9;
+var RAW_PER_TOKEN = 1e6;
+var CURVE = {
+  initialVirtualTok: 1073e12,
+  initialVirtualSol: 3e10,
+  initialRealTok: 7931e11,
+  supply: 1e15
+};
+var CURVE_COMPLETE_REAL_SOL = (() => {
+  const k = CURVE.initialVirtualSol * CURVE.initialVirtualTok;
+  const vTokEnd = CURVE.initialVirtualTok - CURVE.initialRealTok;
+  return k / vTokEnd - CURVE.initialVirtualSol;
+})();
+var CURVE_FEES = { protocol: 95, creator: 30, lp: 0 };
+var AMM_FEE_TIERS = [
+  { mcapSol: 0, fees: { creator: 30, protocol: 93, lp: 2 } },
+  { mcapSol: 420, fees: { creator: 95, protocol: 5, lp: 20 } },
+  { mcapSol: 1470, fees: { creator: 90, protocol: 5, lp: 20 } },
+  { mcapSol: 2460, fees: { creator: 85, protocol: 5, lp: 20 } },
+  { mcapSol: 3440, fees: { creator: 80, protocol: 5, lp: 20 } },
+  { mcapSol: 4420, fees: { creator: 75, protocol: 5, lp: 20 } },
+  { mcapSol: 9820, fees: { creator: 70, protocol: 5, lp: 20 } },
+  { mcapSol: 14740, fees: { creator: 65, protocol: 5, lp: 20 } },
+  { mcapSol: 19650, fees: { creator: 60, protocol: 5, lp: 20 } },
+  { mcapSol: 24560, fees: { creator: 55, protocol: 5, lp: 20 } },
+  { mcapSol: 29470, fees: { creator: 50, protocol: 5, lp: 20 } },
+  { mcapSol: 34380, fees: { creator: 45, protocol: 5, lp: 20 } },
+  { mcapSol: 39300, fees: { creator: 40, protocol: 5, lp: 20 } },
+  { mcapSol: 44210, fees: { creator: 35, protocol: 5, lp: 20 } },
+  { mcapSol: 49120, fees: { creator: 30, protocol: 5, lp: 20 } },
+  { mcapSol: 54030, fees: { creator: 28, protocol: 5, lp: 20 } },
+  { mcapSol: 58940, fees: { creator: 25, protocol: 5, lp: 20 } },
+  { mcapSol: 63860, fees: { creator: 23, protocol: 5, lp: 20 } },
+  { mcapSol: 68770, fees: { creator: 20, protocol: 5, lp: 20 } },
+  { mcapSol: 73681, fees: { creator: 18, protocol: 5, lp: 20 } },
+  { mcapSol: 78590, fees: { creator: 15, protocol: 5, lp: 20 } },
+  { mcapSol: 83500, fees: { creator: 13, protocol: 5, lp: 20 } },
+  { mcapSol: 88400, fees: { creator: 10, protocol: 5, lp: 20 } },
+  { mcapSol: 93330, fees: { creator: 8, protocol: 5, lp: 20 } },
+  { mcapSol: 98240, fees: { creator: 5, protocol: 5, lp: 20 } }
+];
+function totalBps(f2) {
+  return f2.protocol + f2.creator + f2.lp;
+}
+function ammFeesForMcapSol(mcapSol) {
+  let chosen = AMM_FEE_TIERS[0].fees;
+  for (const tier of AMM_FEE_TIERS) {
+    if (mcapSol >= tier.mcapSol) chosen = tier.fees;
+    else break;
+  }
+  return chosen;
+}
+function newCurve() {
+  return {
+    vSol: CURVE.initialVirtualSol,
+    vTok: CURVE.initialVirtualTok,
+    realTok: CURVE.initialRealTok,
+    supply: CURVE.supply
+  };
+}
+function curveMcapLamports(s) {
+  if (s.vTok <= 0) return 0;
+  return s.vSol * s.supply / s.vTok;
+}
+function curveMcapSol(s) {
+  return curveMcapLamports(s) / LAMPORTS_PER_SOL;
+}
+function curvePriceSol(s) {
+  if (s.vTok <= 0) return 0;
+  return s.vSol / s.vTok * (RAW_PER_TOKEN / LAMPORTS_PER_SOL);
+}
+function curveProgress(s) {
+  const p = 1 - s.realTok / CURVE.initialRealTok;
+  return p < 0 ? 0 : p > 1 ? 1 : p;
+}
+function feeCeil(amount, bps) {
+  return Math.ceil(amount * bps / 1e4);
+}
+function curveBuyQuote(s, lamportsIn, fees = CURVE_FEES) {
+  const zero = { tokensOut: 0, solToCurve: 0, feeLamports: 0, solSpent: 0, avgPriceSol: 0, after: { ...s } };
+  if (!(lamportsIn > 1) || s.vTok <= 0 || s.realTok <= 0) return zero;
+  const bps = totalBps(fees);
+  const input = Math.floor((lamportsIn - 1) * 1e4 / (1e4 + bps));
+  let tokens = Math.floor(input * s.vTok / (s.vSol + input));
+  if (tokens > s.realTok) tokens = s.realTok;
+  if (tokens <= 0) return zero;
+  const cost = Math.floor(tokens * s.vSol / (s.vTok - tokens)) + 1;
+  const fee = feeCeil(cost, fees.protocol) + feeCeil(cost, fees.creator);
+  const spent = cost + fee;
+  return {
+    tokensOut: tokens,
+    solToCurve: cost,
+    feeLamports: fee,
+    solSpent: spent,
+    avgPriceSol: spent / LAMPORTS_PER_SOL / (tokens / RAW_PER_TOKEN),
+    after: { vSol: s.vSol + cost, vTok: s.vTok - tokens, realTok: s.realTok - tokens, supply: s.supply }
+  };
+}
+function curveSellQuote(s, tokensIn, fees = CURVE_FEES) {
+  if (!(tokensIn > 0) || s.vTok <= 0) {
+    return { solOut: 0, solFromCurve: 0, feeLamports: 0, avgPriceSol: 0, after: { ...s } };
+  }
+  const gross = Math.floor(tokensIn * s.vSol / (s.vTok + tokensIn));
+  const fee = feeCeil(gross, fees.protocol) + feeCeil(gross, fees.creator);
+  const out = Math.max(0, gross - fee);
+  return {
+    solOut: out,
+    solFromCurve: gross,
+    feeLamports: fee,
+    avgPriceSol: out / LAMPORTS_PER_SOL / (tokensIn / RAW_PER_TOKEN),
+    after: { vSol: s.vSol - gross, vTok: s.vTok + tokensIn, realTok: s.realTok + tokensIn, supply: s.supply }
+  };
+}
+function poolMcapSol(p) {
+  if (p.base <= 0) return 0;
+  return p.quote * p.supply / p.base / LAMPORTS_PER_SOL;
+}
+function poolPriceSol(p) {
+  if (p.base <= 0) return 0;
+  return p.quote / p.base * (RAW_PER_TOKEN / LAMPORTS_PER_SOL);
+}
+function ammFees(p) {
+  const f2 = ammFeesForMcapSol(poolMcapSol(p));
+  return p.hasCreator === false ? { ...f2, creator: 0 } : f2;
+}
+function poolBuyQuote(p, lamportsIn) {
+  const zeroAfter = { vSol: p.quote, vTok: p.base, realTok: p.base, supply: p.supply };
+  const zero = { tokensOut: 0, solToCurve: 0, feeLamports: 0, solSpent: 0, avgPriceSol: 0, after: zeroAfter };
+  if (!(lamportsIn > 1) || p.base <= 0 || p.quote <= 0) return zero;
+  const f2 = ammFees(p);
+  let effective = Math.floor(lamportsIn * 1e4 / (1e4 + totalBps(f2)));
+  const lpFee = feeCeil(effective, f2.lp);
+  const protocolFee = feeCeil(effective, f2.protocol);
+  const creatorFee = feeCeil(effective, f2.creator);
+  const total = effective + lpFee + protocolFee + creatorFee;
+  if (total > lamportsIn) effective -= total - lamportsIn;
+  const input = effective - 1;
+  if (input <= 0) return zero;
+  const out = Math.floor(p.base * input / (p.quote + input));
+  if (out <= 0 || out >= p.base) return zero;
+  const quoteIn = Math.ceil(p.quote * out / (p.base - out));
+  const fLp = feeCeil(quoteIn, f2.lp);
+  const fee = fLp + feeCeil(quoteIn, f2.protocol) + feeCeil(quoteIn, f2.creator);
+  const spent = quoteIn + fee;
+  return {
+    tokensOut: out,
+    solToCurve: quoteIn + fLp,
+    feeLamports: fee,
+    solSpent: spent,
+    avgPriceSol: spent / LAMPORTS_PER_SOL / (out / RAW_PER_TOKEN),
+    after: { vSol: p.quote + quoteIn + fLp, vTok: p.base - out, realTok: p.base - out, supply: p.supply }
+  };
+}
+function poolSellQuote(p, tokensIn) {
+  const same = { vSol: p.quote, vTok: p.base, realTok: p.base, supply: p.supply };
+  if (!(tokensIn > 0) || p.base <= 0 || p.quote <= 0) {
+    return { solOut: 0, solFromCurve: 0, feeLamports: 0, avgPriceSol: 0, after: same };
+  }
+  const f2 = ammFees(p);
+  const gross = Math.floor(p.quote * tokensIn / (p.base + tokensIn));
+  const lpFee = feeCeil(gross, f2.lp);
+  const fee = lpFee + feeCeil(gross, f2.protocol) + feeCeil(gross, f2.creator);
+  const out = Math.max(0, gross - fee);
+  return {
+    solOut: out,
+    solFromCurve: gross - lpFee,
+    feeLamports: fee,
+    avgPriceSol: out / LAMPORTS_PER_SOL / (tokensIn / RAW_PER_TOKEN),
+    after: { vSol: p.quote - (gross - lpFee), vTok: p.base + tokensIn, realTok: p.base + tokensIn, supply: p.supply }
+  };
+}
+
+// src/core/positions.ts
+var DEFAULT_COSTS = { priorityFeeSol: 5e-4, platformFeePct: 0.5, ataRentSol: 203928e-8, refundRent: true };
+function venueOf(t) {
+  if (t.stage === "curve") return t.vTok > 0 && t.realTok > 0 ? "curve" : "none";
+  if (t.stage === "migrating") return "none";
+  if (t.poolBase > 0 && t.poolQuote > 0) return "amm";
+  if (t.quote?.priceSol && t.quote.priceSol > 0) return "approx";
+  return "none";
+}
+function approxPool(t, solUsd) {
+  const q = t.quote;
+  const liqSol = q.liqUsd && solUsd > 0 ? q.liqUsd / solUsd / 2 : 50;
+  const quote = Math.max(1, liqSol) * LAMPORTS_PER_SOL;
+  const base = quote / (q.priceSol * LAMPORTS_PER_SOL) * RAW_PER_TOKEN;
+  return { base, quote, supply: t.supply };
+}
+function quoteBuy(t, lamportsAllIn, costs, solUsd = 0, firstBuy = true) {
+  const venue = venueOf(t);
+  const fixed = costs.priorityFeeSol * LAMPORTS_PER_SOL + (firstBuy ? costs.ataRentSol * LAMPORTS_PER_SOL : 0);
+  const platform = lamportsAllIn * (costs.platformFeePct / 100);
+  const swapIn = Math.floor(lamportsAllIn - fixed - platform);
+  if (venue === "none") return { ok: false, error: t.stage === "migrating" ? "migrating" : "no_price", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
+  if (swapIn <= 1e4) return { ok: false, error: "size_too_small", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
+  let q;
+  if (venue === "curve") q = curveBuyQuote(t, swapIn);
+  else if (venue === "amm") q = poolBuyQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, swapIn);
+  else q = poolBuyQuote(approxPool(t, solUsd), swapIn);
+  if (q.tokensOut <= 0) return { ok: false, error: "no_liquidity", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
+  const lamports = q.solSpent + fixed + platform;
+  return {
+    ok: true,
+    tokens: q.tokensOut,
+    lamports,
+    avgPriceSol: lamports / LAMPORTS_PER_SOL / (q.tokensOut / RAW_PER_TOKEN),
+    fees: q.feeLamports + fixed + platform,
+    mcapSol: t.mcapSol
+  };
+}
+function quoteSell(t, tokens, costs, solUsd = 0, closesAccount = false) {
+  const venue = venueOf(t);
+  if (tokens <= 0) return { ok: true, tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
+  if (venue === "none") return { ok: false, error: t.stage === "migrating" ? "migrating" : "no_price", tokens, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
+  let q;
+  if (venue === "curve") q = curveSellQuote(t, tokens);
+  else if (venue === "amm") q = poolSellQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, tokens);
+  else q = poolSellQuote(approxPool(t, solUsd), tokens);
+  const platform = q.solOut * (costs.platformFeePct / 100);
+  const refund = closesAccount && costs.refundRent ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
+  const lamports = Math.max(0, q.solOut - platform - costs.priorityFeeSol * LAMPORTS_PER_SOL + refund);
+  return {
+    ok: true,
+    tokens,
+    lamports,
+    avgPriceSol: tokens > 0 ? lamports / LAMPORTS_PER_SOL / (tokens / RAW_PER_TOKEN) : 0,
+    fees: q.feeLamports + platform + costs.priorityFeeSol * LAMPORTS_PER_SOL,
+    mcapSol: t.mcapSol
+  };
+}
+function positionMultiple(p) {
+  return p.cost > 0 ? (p.proceeds + p.value) / p.cost : 0;
+}
+function effectiveTrail(plan) {
+  return plan.takeInitials && plan.trailPct === 0 ? 40 : plan.trailPct;
+}
+function decideExit(p, now, lastTradeAt = now) {
+  const plan = p.plan;
+  const mult = positionMultiple(p);
+  if (p.tokensLeft <= 0) return { action: "hold" };
+  if (!p.tpHit && mult <= 1 - plan.slPct / 100) return { action: "sell", fraction: 1, reason: "sl" };
+  const trail = effectiveTrail(plan);
+  if (!p.tpHit && mult >= 1 + plan.tpPct / 100) {
+    if (plan.takeInitials && p.value > 0) {
+      const need = Math.max(0, p.cost - p.proceeds);
+      const fraction = Math.min(1, need / p.value);
+      if (fraction < 0.98) return { action: "sell", fraction, reason: "initials" };
+      return { action: "sell", fraction: 1, reason: "tp" };
+    }
+    if (trail > 0) return { action: "arm" };
+    return { action: "sell", fraction: 1, reason: "tp" };
+  }
+  if (p.tpHit && trail > 0 && p.peakValue > 0 && p.value <= p.peakValue * (1 - trail / 100)) {
+    return { action: "sell", fraction: 1, reason: "trail" };
+  }
+  if (p.tpHit && mult <= 1 - plan.slPct / 100) return { action: "sell", fraction: 1, reason: "sl" };
+  if (plan.maxHoldMin > 0 && now - p.openedAt >= plan.maxHoldMin * 6e4) return { action: "sell", fraction: 1, reason: "time" };
+  const stale = plan.staleExitMin ?? 0;
+  if (stale > 0 && now - Math.max(lastTradeAt, p.openedAt) >= stale * 6e4) return { action: "sell", fraction: 1, reason: "dead" };
+  return { action: "hold" };
+}
 
 // src/core/util.ts
 var clamp = (x, lo, hi) => x < lo ? lo : x > hi ? hi : x;
@@ -193,6 +452,484 @@ var silentLogger = { debug() {
 }, error() {
 } };
 
+// src/core/outcomes.ts
+var GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500];
+var GRID_SL = [10, 20, 30, 40, 50, 70];
+var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
+var GRID_VERSION = 2;
+var PATH_MIN = [5, 10, 30, 60, 120];
+var ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
+var r4 = (v) => Math.round(v * 1e4) / 1e4;
+var OutcomeTracker = class {
+  constructor(opts, sink) {
+    this.opts = opts;
+    this.sink = sink;
+  }
+  byMint = /* @__PURE__ */ new Map();
+  openCount = 0;
+  dropped = 0;
+  resolvedCount = 0;
+  setOptions(o) {
+    this.opts = { ...this.opts, ...o };
+  }
+  get open() {
+    return this.openCount;
+  }
+  has(mint, tag) {
+    return this.byMint.get(mint)?.some((h) => h.tag === tag) ?? false;
+  }
+  add(t, kind, tag, now, score, p, x, custom, facts) {
+    if (this.openCount >= this.opts.maxOpen) {
+      this.dropped++;
+      return false;
+    }
+    const combos = [{ tp: custom.tp, sl: custom.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 }];
+    for (const g of GRID) combos.push({ tp: g.tp, sl: g.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 });
+    const h = {
+      id: newId("h"),
+      kind,
+      tag,
+      mint: t.mint,
+      symbol: t.symbol,
+      ts: now,
+      stage: t.stage === "amm" ? "amm" : "curve",
+      score,
+      p,
+      x,
+      entryAt: now + this.opts.latencyMs,
+      entered: false,
+      entryMcap: 0,
+      a: 0,
+      b: 0,
+      maxMult: 1,
+      minMult: 1,
+      maxAt: now,
+      combos,
+      open: combos.length,
+      path: PATH_MIN.map(() => null),
+      pathNext: 0,
+      f: facts
+    };
+    let list = this.byMint.get(t.mint);
+    if (!list) {
+      list = [];
+      this.byMint.set(t.mint, list);
+    }
+    list.push(h);
+    this.openCount++;
+    if (this.opts.latencyMs === 0) this.enter(h, t, now);
+    return true;
+  }
+  enter(h, t, now) {
+    const size = this.opts.sizeSol * LAMPORTS_PER_SOL;
+    const q = quoteBuy(t, size, this.opts.costs, 0, true);
+    if (!q.ok || q.tokens <= 0 || t.mcapSol <= 0) {
+      this.remove(h);
+      return;
+    }
+    h.entered = true;
+    h.entryMcap = t.mcapSol;
+    const sellFee = (t.stage === "amm" ? 0.0125 : 0.0125) + this.opts.costs.platformFeePct / 100;
+    const tokensUi = q.tokens / 1e6;
+    const pricePerMcap = 1e6 / t.supply;
+    h.a = tokensUi * pricePerMcap * (1 - sellFee) / this.opts.sizeSol;
+    h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
+    h.ts = now;
+  }
+  mult(h, mcap) {
+    return h.a * mcap - h.b;
+  }
+  /** Records the value at each time-exit horizon that has passed. */
+  capturePath(h, now, m) {
+    while (h.pathNext < PATH_MIN.length && now - h.ts >= PATH_MIN[h.pathNext] * 6e4) h.path[h.pathNext++] = Math.max(-1, m - 1);
+  }
+  /** Price update for a token (call after every applied trade / quote). */
+  onPrice(t, now) {
+    const list = this.byMint.get(t.mint);
+    if (!list) return;
+    for (let i = list.length - 1; i >= 0; i--) {
+      const h = list[i];
+      if (!h.entered) {
+        if (now >= h.entryAt) this.enter(h, t, now);
+        continue;
+      }
+      if (t.stage === "migrating") continue;
+      const m = this.mult(h, t.mcapSol);
+      if (m > h.maxMult) {
+        h.maxMult = m;
+        h.maxAt = now;
+      }
+      if (m < h.minMult) h.minMult = m;
+      this.capturePath(h, now, m);
+      for (const c of h.combos) {
+        if (c.state === 2) continue;
+        if (c.state === 1) {
+          if (now >= c.exitAt) this.resolveCombo(h, c, m);
+          continue;
+        }
+        if (m >= 1 + c.tp / 100) this.trigger(h, c, "tp", now, m);
+        else if (m <= 1 - c.sl / 100) this.trigger(h, c, "sl", now, m);
+      }
+      if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
+      else if (h.open === 0) this.emit(h, now);
+    }
+  }
+  trigger(h, c, kind, now, m) {
+    c.kind = kind;
+    c.t = (now - h.ts) / 1e3;
+    if (this.opts.latencyMs <= 0) this.resolveCombo(h, c, m);
+    else {
+      c.state = 1;
+      c.exitAt = now + this.opts.latencyMs;
+    }
+  }
+  resolveCombo(h, c, m) {
+    if (c.state === 2) return;
+    c.state = 2;
+    c.ret = Math.max(-1, m - 1);
+    h.open--;
+  }
+  finish(h, m, kind, now) {
+    const end = Math.min(now, h.ts + this.opts.horizonMs);
+    this.capturePath(h, end, m);
+    for (const c of h.combos) {
+      if (c.state === 2) continue;
+      if (c.state === 0) {
+        c.kind = kind;
+        c.t = (end - h.ts) / 1e3;
+      }
+      this.resolveCombo(h, c, m);
+    }
+    this.emit(h, h.ts + this.opts.horizonMs);
+  }
+  emit(h, now) {
+    this.remove(h);
+    if (!h.entered) return;
+    const c0 = h.combos[0];
+    this.resolvedCount++;
+    this.sink({
+      id: h.id,
+      kind: h.kind,
+      tag: h.tag,
+      mint: h.mint,
+      symbol: h.symbol,
+      ts: h.ts,
+      stage: h.stage,
+      score: h.score,
+      p: h.p,
+      x: h.x,
+      entryMcap: h.entryMcap,
+      tp: c0.tp,
+      sl: c0.sl,
+      y: c0.kind === "tp" ? 1 : 0,
+      ret: c0.ret,
+      exit: c0.kind,
+      grid: h.combos.slice(1).map((c) => r4(c.ret)),
+      gv: GRID_VERSION,
+      gridT: h.combos.slice(1).map((c) => Math.round(Math.max(0, c.t) * 10) / 10),
+      path: h.path.map((v) => v === null ? null : r4(v)),
+      f: h.f,
+      maxMult: h.maxMult,
+      minMult: h.minMult,
+      secToMax: Math.max(0, (h.maxAt - h.ts) / 1e3),
+      resolvedAt: now
+    });
+  }
+  remove(h) {
+    const list = this.byMint.get(h.mint);
+    if (!list) return;
+    const i = list.indexOf(h);
+    if (i >= 0) {
+      list.splice(i, 1);
+      this.openCount--;
+    }
+    if (list.length === 0) this.byMint.delete(h.mint);
+  }
+  /** Token left memory (idle/dead): resolve everything at its last value. */
+  onTokenGone(t, now) {
+    const list = this.byMint.get(t.mint);
+    if (!list) return;
+    for (const h of [...list]) {
+      if (!h.entered) {
+        this.remove(h);
+        continue;
+      }
+      this.finish(h, this.mult(h, t.mcapSol), "dead", now);
+    }
+  }
+  /** Periodic sweep: time out hypotheticals of tokens that stopped trading. */
+  sweep(now, tokenOf) {
+    for (const [mint, list] of [...this.byMint]) {
+      const t = tokenOf(mint);
+      for (const h of [...list]) {
+        if (!h.entered) {
+          if (t && now >= h.entryAt) this.enter(h, t, now);
+          else if (!t) this.remove(h);
+          continue;
+        }
+        const m = t ? this.mult(h, t.mcapSol) : h.minMult;
+        this.capturePath(h, now, m);
+        for (const c of h.combos) if (c.state === 1 && now >= c.exitAt) this.resolveCombo(h, c, m);
+        if (h.open === 0) this.emit(h, now);
+        else if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
+      }
+    }
+  }
+};
+
+// src/core/edges.ts
+var HOLDS_MIN = [0, 10, 30, 60];
+var EXITS = GRID.length * HOLDS_MIN.length;
+var f = (s) => s.f;
+var CONDITIONS = [
+  { key: "any", label: "any coin", test: () => true },
+  { key: "curve", label: "still on the bonding curve", test: (s) => s.stage === "curve", stage: "curve" },
+  { key: "amm", label: "already graduated", test: (s) => s.stage === "amm", stage: "amm" },
+  ...[40, 80, 150].map((v) => ({ key: `mcap<=${v}`, label: `market cap \u2264 ${v} SOL`, test: (s) => f(s).mcap <= v, filters: { maxMcapSol: v } })),
+  ...[80, 150, 300].map((v) => ({ key: `mcap>=${v}`, label: `market cap \u2265 ${v} SOL`, test: (s) => f(s).mcap >= v, filters: { minMcapSol: v } })),
+  ...[1, 3, 10].map((m) => ({ key: `age<=${m}m`, label: `younger than ${m} min`, test: (s) => f(s).age <= m * 60, filters: { maxAgeMin: m } })),
+  ...[3, 10].map((m) => ({ key: `age>=${m}m`, label: `older than ${m} min`, test: (s) => f(s).age >= m * 60, filters: { minAgeSec: m * 60 } })),
+  { key: "bundle<=10", label: "\u2264 10% bundled at launch", test: (s) => f(s).bundle * 100 <= 10, filters: { maxBundlePct: 10 } },
+  { key: "top10<=30", label: "top 10 holders own \u2264 30%", test: (s) => f(s).top10 * 100 <= 30, filters: { maxTop10Pct: 30 } },
+  ...[30, 100].map((n) => ({ key: `buyers>=${n}`, label: `${n}+ buyers`, test: (s) => f(s).buyers >= n, filters: { minBuyers: n } })),
+  { key: "socials", label: "has socials", test: (s) => f(s).socials > 0, filters: { requireSocials: true } },
+  { key: "dev<=5", label: "dev holds \u2264 5%", test: (s) => f(s).devShare * 100 <= 5, filters: { maxDevPct: 5 } },
+  { key: "devheld", label: "dev hasn't sold", test: (s) => f(s).devSold <= 0, filters: { maxDevSoldPct: 0 } },
+  { key: "onelaunch", label: "dev's only launch today", test: (s) => f(s).launches24h <= 1, filters: { maxDevLaunches24h: 1 } }
+];
+var OPEN_FILTERS = {
+  minMcapSol: 0,
+  maxMcapSol: 0,
+  maxDevPct: 100,
+  maxTop10Pct: 100,
+  maxBundlePct: 100,
+  minBuyers: 0,
+  minAgeSec: 0,
+  maxAgeMin: 0,
+  requireSocials: false,
+  maxDevLaunches24h: 0,
+  maxDevSoldPct: 100
+};
+var DEFAULTS = {
+  horizonMs: 6 * 36e5,
+  minHours: 24,
+  minSamples: 1e3,
+  minDiscovery: 80,
+  minHoldout: 40,
+  candidates: 20,
+  minWins: 10,
+  placeboRuns: 3,
+  seed: 7
+};
+function normInv(p) {
+  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
+  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
+  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+  const q = Math.min(Math.max(p, 1e-12), 1 - 1e-12);
+  if (q < 0.02425) {
+    const t2 = Math.sqrt(-2 * Math.log(q));
+    return (((((c[0] * t2 + c[1]) * t2 + c[2]) * t2 + c[3]) * t2 + c[4]) * t2 + c[5]) / ((((d[0] * t2 + d[1]) * t2 + d[2]) * t2 + d[3]) * t2 + 1);
+  }
+  if (q > 1 - 0.02425) return -normInv(1 - q);
+  const t = q - 0.5;
+  const r = t * t;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * t / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+function exitReturn(s, c, h) {
+  const ret = s.grid[c];
+  const hold = HOLDS_MIN[h];
+  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return ret;
+  const v = s.path?.[PATH_MIN.indexOf(hold)];
+  return v ?? ret;
+}
+function describe(r) {
+  const cond = CONDITIONS.find((c) => c.key === r.cond);
+  const when = r.cond === "any" ? "" : ` \xB7 ${cond.label}`;
+  const time = r.hold ? `, or after ${r.hold} min` : "";
+  return `Buy when a coin first reaches ${r.level}${when} \xB7 sell at +${r.tp}% or \u2212${r.sl}%${time}`;
+}
+function settingsFor(r) {
+  const cond = CONDITIONS.find((c) => c.key === r.cond);
+  const out = {
+    minScore: r.level,
+    tpPct: r.tp,
+    slPct: r.sl,
+    maxHoldMin: r.hold || 360,
+    trailPct: 0,
+    takeInitials: false,
+    reentry: false,
+    tradeCurve: cond.stage !== "amm",
+    tradeAmm: cond.stage !== "curve",
+    scoreOnly: !cond.filters
+  };
+  if (cond.filters) out.filters = { ...OPEN_FILTERS, ...cond.filters };
+  return out;
+}
+function stats(d, idx, e, z) {
+  let n = 0;
+  let sum = 0;
+  let sq = 0;
+  let w = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e];
+    n++;
+    sum += v;
+    sq += v * v;
+    if (d.wins(v)) w++;
+  }
+  if (n < 2) return { n, mean: n ? sum : NaN, lo: -Infinity, winRate: n ? w / n : NaN };
+  const mean2 = sum / n;
+  const variance = Math.max(0, (sq - n * mean2 * mean2) / (n - 1));
+  return { n, mean: mean2, lo: mean2 - z * Math.sqrt(variance / n), winRate: w / n };
+}
+var wins = (st) => Math.round(st.winRate * st.n);
+function* search(d, groups, o) {
+  let tested = 0;
+  const best = [];
+  for (const g of groups) {
+    if (g.disc.length < o.minDiscovery) continue;
+    let top = null;
+    for (let e = 0; e < EXITS; e++) {
+      tested++;
+      const st = stats(d, g.disc, e, 2);
+      if (wins(st) < o.minWins) continue;
+      if (!top || st.lo > top.disc.lo) top = { g, e, disc: st };
+    }
+    if (top && top.disc.mean > 0 && top.disc.lo > 0) best.push(top);
+    yield;
+  }
+  best.sort((a, b) => b.disc.lo - a.disc.lo);
+  const cands = best.slice(0, o.candidates);
+  const z = normInv(1 - 0.05 / Math.max(1, cands.length));
+  const checked = cands.map((c) => ({ c, hold: stats(d, c.g.hold, c.e, z) }));
+  const passed = checked.filter((x) => x.hold.n >= o.minHoldout && wins(x.hold) >= o.minWins && x.hold.lo > 0);
+  return { tested, cands: checked, passed };
+}
+function findEdges(samples, opts = {}) {
+  const it = steps(samples, opts);
+  for (; ; ) {
+    const r = it.next();
+    if (r.done) return r.value;
+  }
+}
+function* steps(samples, opts) {
+  const o = { ...DEFAULTS, ...opts };
+  const now = opts.now ?? Date.now();
+  const base = {
+    generatedAt: now,
+    status: "not_enough_data",
+    note: "",
+    samples: 0,
+    hours: 0,
+    discoveryHours: 0,
+    holdoutHours: 0,
+    tested: 0,
+    candidates: 0,
+    survivors: [],
+    failed: [],
+    placebo: { runs: 0, avgSurvivors: 0, maxSurvivors: 0 }
+  };
+  let lastResolved = 0;
+  for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
+  const cutoff = lastResolved - o.horizonMs;
+  const rows = samples.filter(
+    (s) => s.kind === "entry" && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
+  );
+  rows.sort((a, b) => a.ts - b.ts);
+  const n = rows.length;
+  const t0 = n ? rows[0].ts : 0;
+  const t1 = n ? rows[n - 1].ts : 0;
+  const hours = n ? (t1 - t0) / 36e5 : 0;
+  base.samples = n;
+  base.hours = hours;
+  if (n < o.minSamples || hours < o.minHours) {
+    base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished entry outcomes (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 36e5)} hours after its entry.`;
+    return base;
+  }
+  const R = new Float32Array(n * EXITS);
+  for (let i = 0; i < n; i++) {
+    const s = rows[i];
+    for (let c = 0; c < GRID.length; c++) for (let h = 0; h < HOLDS_MIN.length; h++) R[i * EXITS + c * HOLDS_MIN.length + h] = exitReturn(s, c, h);
+    if (i % 2e3 === 0) yield;
+  }
+  const split = t0 + (t1 - t0) * 2 / 3;
+  const groups = [];
+  const byLevel = /* @__PURE__ */ new Map();
+  rows.forEach((s, i) => {
+    const level = Number(s.tag.slice(1));
+    let list = byLevel.get(level);
+    if (!list) byLevel.set(level, list = []);
+    list.push(i);
+  });
+  for (const level of ENTRY_LEVELS) {
+    const idx = byLevel.get(level) ?? [];
+    CONDITIONS.forEach((cond, ci) => {
+      const disc = [];
+      const hold = [];
+      for (const i of idx) if (cond.test(rows[i])) (rows[i].ts < split ? disc : hold).push(i);
+      groups.push({ level, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold) });
+    });
+  }
+  const zero = new Float64Array(EXITS);
+  const real = { R, row: (i) => i, shift: zero, wins: (v) => v > 0 };
+  const run = yield* search(real, groups, o);
+  const holdDays = Math.max(1 / 24, (t1 - split) / 864e5);
+  const toFound = (c, holdSt) => {
+    const combo = Math.floor(c.e / HOLDS_MIN.length);
+    const rule = { level: c.g.level, cond: CONDITIONS[c.g.cond].key, tp: GRID[combo].tp, sl: GRID[combo].sl, hold: HOLDS_MIN[c.e % HOLDS_MIN.length] };
+    const all = groups.find((g) => g.level === c.g.level && g.cond === 0);
+    return {
+      ...rule,
+      text: describe(rule),
+      discovery: c.disc,
+      holdout: holdSt,
+      baseline: stats(real, all.hold, c.e, 0).mean,
+      tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i].mint)).size / holdDays,
+      settings: settingsFor(rule)
+    };
+  };
+  const survivors = run.passed.map((x) => toFound(x.c, x.hold)).sort((a, b) => b.holdout.lo - a.holdout.lo);
+  const failed = run.cands.filter((x) => !run.passed.includes(x)).slice(0, 3).map((x) => toFound(x.c, x.hold));
+  const colMean = new Float64Array(EXITS);
+  for (let i = 0; i < n; i++) for (let e = 0; e < EXITS; e++) colMean[e] += R[i * EXITS + e];
+  for (let e = 0; e < EXITS; e++) colMean[e] /= n;
+  const rand = rng(o.seed);
+  const counts = [];
+  for (let r = 0; r < o.placeboRuns; r++) {
+    const perm = new Int32Array(n);
+    for (let i = 0; i < n; i++) perm[i] = i;
+    for (let i = n - 1; i > 0; i--) {
+      const j = Math.floor(rand() * (i + 1));
+      const t = perm[i];
+      perm[i] = perm[j];
+      perm[j] = t;
+    }
+    counts.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0 }, groups, o)).passed.length);
+  }
+  const discHours = (split - t0) / 36e5;
+  return {
+    ...base,
+    status: "ok",
+    note: survivors.length ? `${survivors.length} rule${survivors.length > 1 ? "s" : ""} held up on the newest data the search never saw.` : "No rule held up on the newest data yet. That is a real answer: keep recording, the search runs again every few hours.",
+    discoveryHours: discHours,
+    holdoutHours: hours - discHours,
+    tested: run.tested,
+    candidates: run.cands.length,
+    survivors,
+    failed,
+    placebo: {
+      runs: counts.length,
+      avgSurvivors: counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 0,
+      maxSurvivors: counts.length ? Math.max(...counts) : 0
+    }
+  };
+}
+
+// src/research/cli.ts
+import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
+import { join as join2 } from "node:path";
+
 // src/core/features.ts
 var MarketPulse = class {
   buys = new DecayRate(5 * 6e4);
@@ -303,48 +1040,48 @@ function extractFeatures(t, ctx) {
 var pct = (x) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
 var s2 = (x) => Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2);
 var FEATURE_DEFS = [
-  { key: "age", label: "Age", x: (f) => Math.log1p(f.ageSec), show: (f) => fmtAge(f.ageSec), good: "young", bad: "old for its stage" },
-  { key: "mcap", label: "Market cap", x: (f) => Math.log(Math.max(f.mcapSol, 1)), show: (f) => `${f.mcapSol.toFixed(0)} SOL`, good: "room to run", bad: "already big" },
-  { key: "progress", label: "Curve progress", x: (f) => f.progress, show: (f) => pct(f.progress), good: "curve filling", bad: "curve nearly done" },
-  { key: "net60", label: "Net inflow 60s", x: (f) => Math.asinh(f.net60), show: (f) => `${s2(f.net60)} SOL`, good: "buyers pouring in", bad: "net selling" },
-  { key: "net300", label: "Net inflow 5m", x: (f) => Math.asinh(f.net300), show: (f) => `${s2(f.net300)} SOL`, good: "sustained demand", bad: "demand fading" },
-  { key: "accel", label: "Acceleration", x: (f) => clamp((f.net60 - f.netPrev60) / (Math.abs(f.netPrev60) + 1), -3, 3), show: (f) => `${s2(f.net60 - f.netPrev60)} SOL vs prior min`, good: "speeding up", bad: "slowing down" },
-  { key: "buyRatio", label: "Buy share 60s", x: (f) => (f.buys60 + 1) / (f.buys60 + f.sells60 + 2), show: (f) => `${f.buys60}B/${f.sells60}S`, good: "mostly buys", bad: "mostly sells" },
-  { key: "uniq60", label: "New buyers 60s", x: (f) => Math.log1p(f.uniq60), show: (f) => `${f.uniq60}`, good: "many distinct buyers", bad: "few buyers" },
-  { key: "uniqTotal", label: "Buyers total", x: (f) => Math.log1p(f.uniqTotal), show: (f) => `${f.uniqTotal}`, good: "broad participation", bad: "thin participation" },
-  { key: "trades60", label: "Trades 60s", x: (f) => Math.log1p(f.trades60), show: (f) => `${f.trades60}`, good: "active", bad: "quiet" },
-  { key: "avgBuy", label: "Avg buy 5m", x: (f) => Math.log(0.01 + f.avgBuy300), show: (f) => `${s2(f.avgBuy300)} SOL`, good: "retail-sized buys", bad: "whale-sized buys" },
-  { key: "whale", label: "Largest buy share", x: (f) => f.whale300, show: (f) => pct(f.whale300), good: "no single whale", bad: "one whale dominates" },
-  { key: "devShare", label: "Dev holds", x: (f) => f.devShare, show: (f) => pct(f.devShare), good: "dev holds little", bad: "dev holds a lot" },
-  { key: "devSold", label: "Dev sold", x: (f) => f.devSold, show: (f) => pct(f.devSold), good: "dev holding", bad: "dev dumping" },
-  { key: "bundle", label: "Bundled supply", x: (f) => f.bundleShare, show: (f) => pct(f.bundleShare), good: "no bundle", bad: "bundled at launch" },
-  { key: "early", label: "Sniper supply", x: (f) => f.earlyShare, show: (f) => pct(f.earlyShare), good: "snipers gone", bad: "snipers holding" },
-  { key: "top10", label: "Top 10 holders", x: (f) => f.top10, show: (f) => pct(f.top10), good: "spread out", bad: "concentrated" },
-  { key: "holders", label: "Holders", x: (f) => Math.log1p(f.holders), show: (f) => `${f.holders}`, good: "many holders", bad: "few holders" },
-  { key: "drawdown", label: "Below peak", x: (f) => f.drawdown, show: (f) => pct(f.drawdown), good: "near highs", bad: "far below peak" },
-  { key: "chg30", label: "Move 30s", x: (f) => clamp(f.chg30, -2, 2), show: (f) => pct(Math.exp(f.chg30) - 1), good: "rising", bad: "falling" },
-  { key: "chg120", label: "Move 2m", x: (f) => clamp(f.chg120, -2, 2), show: (f) => pct(Math.exp(f.chg120) - 1), good: "trending up", bad: "trending down" },
-  { key: "smart", label: "Smart wallets in", x: (f) => Math.log1p(f.smartBuyers), show: (f) => `${f.smartBuyers}`, good: "proven wallets buying", bad: "" },
-  { key: "fresh", label: "Fresh wallets", x: (f) => Number.isFinite(f.freshShare) ? f.freshShare : 0.3, show: (f) => Number.isFinite(f.freshShare) ? pct(f.freshShare) : "learning", good: "real wallets", bad: "brand-new wallets (alts)" },
-  { key: "socials", label: "Socials", x: (f) => f.socials / 3, show: (f) => `${f.socials}/3`, good: "has socials", bad: "no socials" },
-  { key: "tweet", label: "Tweet-linked", x: (f) => f.tweetLink, show: (f) => f.tweetLink ? "yes" : "no", good: "anchored to a tweet", bad: "" },
-  { key: "cluster", label: "Narrative heat", x: (f) => Math.log(Math.max(1, f.clusterSize)), show: (f) => `${f.clusterSize} similar`, good: "hot narrative", bad: "" },
-  { key: "leader", label: "Narrative leader", x: (f) => f.isLeader, show: (f) => f.isLeader ? "leads" : "\u2014", good: "leads its narrative", bad: "" },
-  { key: "copycat", label: "Copycat", x: (f) => f.clusterSize > 1 && !f.isLeader ? 1 : 0, show: (f) => f.clusterSize > 1 && !f.isLeader ? "yes" : "no", good: "", bad: "copy of a bigger coin" },
-  { key: "serial", label: "Serial launcher", x: (f) => Math.log1p(Math.max(0, f.creatorLaunches24h - 1)), show: (f) => `${f.creatorLaunches24h} launches/24h`, good: "", bad: "dev launches many coins" },
-  { key: "creatorBest", label: "Dev track record", x: (f) => Math.log1p(f.creatorBest / 100), show: (f) => `best ${f.creatorBest.toFixed(0)} SOL`, good: "dev had a winner", bad: "" },
-  { key: "heat", label: "Market heat", x: (f) => f.heat, show: (f) => s2(f.heat), good: "hot market", bad: "cold market" },
-  { key: "hourSin", label: "Hour (sin)", x: (f) => Math.sin(2 * Math.PI * f.hourUtc / 24), show: (f) => `${f.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
-  { key: "hourCos", label: "Hour (cos)", x: (f) => Math.cos(2 * Math.PI * f.hourUtc / 24), show: (f) => `${f.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
-  { key: "liquidity", label: "Liquidity", x: (f) => Math.log1p(f.liquiditySol), show: (f) => `${f.liquiditySol.toFixed(1)} SOL`, good: "deep pool", bad: "thin pool" },
-  { key: "sinceMig", label: "Since migration", x: (f) => f.stage === "amm" ? Math.log1p(f.sinceMigrateSec) : 0, show: (f) => f.stage === "amm" ? fmtAge(f.sinceMigrateSec) : "\u2014", good: "just graduated", bad: "stale after graduation" },
-  { key: "dex", label: "DEX listing paid", x: (f) => f.dexSignal, show: (f) => `${f.dexSignal}/2`, good: "paid profile/boost", bad: "" }
+  { key: "age", label: "Age", x: (f2) => Math.log1p(f2.ageSec), show: (f2) => fmtAge(f2.ageSec), good: "young", bad: "old for its stage" },
+  { key: "mcap", label: "Market cap", x: (f2) => Math.log(Math.max(f2.mcapSol, 1)), show: (f2) => `${f2.mcapSol.toFixed(0)} SOL`, good: "room to run", bad: "already big" },
+  { key: "progress", label: "Curve progress", x: (f2) => f2.progress, show: (f2) => pct(f2.progress), good: "curve filling", bad: "curve nearly done" },
+  { key: "net60", label: "Net inflow 60s", x: (f2) => Math.asinh(f2.net60), show: (f2) => `${s2(f2.net60)} SOL`, good: "buyers pouring in", bad: "net selling" },
+  { key: "net300", label: "Net inflow 5m", x: (f2) => Math.asinh(f2.net300), show: (f2) => `${s2(f2.net300)} SOL`, good: "sustained demand", bad: "demand fading" },
+  { key: "accel", label: "Acceleration", x: (f2) => clamp((f2.net60 - f2.netPrev60) / (Math.abs(f2.netPrev60) + 1), -3, 3), show: (f2) => `${s2(f2.net60 - f2.netPrev60)} SOL vs prior min`, good: "speeding up", bad: "slowing down" },
+  { key: "buyRatio", label: "Buy share 60s", x: (f2) => (f2.buys60 + 1) / (f2.buys60 + f2.sells60 + 2), show: (f2) => `${f2.buys60}B/${f2.sells60}S`, good: "mostly buys", bad: "mostly sells" },
+  { key: "uniq60", label: "New buyers 60s", x: (f2) => Math.log1p(f2.uniq60), show: (f2) => `${f2.uniq60}`, good: "many distinct buyers", bad: "few buyers" },
+  { key: "uniqTotal", label: "Buyers total", x: (f2) => Math.log1p(f2.uniqTotal), show: (f2) => `${f2.uniqTotal}`, good: "broad participation", bad: "thin participation" },
+  { key: "trades60", label: "Trades 60s", x: (f2) => Math.log1p(f2.trades60), show: (f2) => `${f2.trades60}`, good: "active", bad: "quiet" },
+  { key: "avgBuy", label: "Avg buy 5m", x: (f2) => Math.log(0.01 + f2.avgBuy300), show: (f2) => `${s2(f2.avgBuy300)} SOL`, good: "retail-sized buys", bad: "whale-sized buys" },
+  { key: "whale", label: "Largest buy share", x: (f2) => f2.whale300, show: (f2) => pct(f2.whale300), good: "no single whale", bad: "one whale dominates" },
+  { key: "devShare", label: "Dev holds", x: (f2) => f2.devShare, show: (f2) => pct(f2.devShare), good: "dev holds little", bad: "dev holds a lot" },
+  { key: "devSold", label: "Dev sold", x: (f2) => f2.devSold, show: (f2) => pct(f2.devSold), good: "dev holding", bad: "dev dumping" },
+  { key: "bundle", label: "Bundled supply", x: (f2) => f2.bundleShare, show: (f2) => pct(f2.bundleShare), good: "no bundle", bad: "bundled at launch" },
+  { key: "early", label: "Sniper supply", x: (f2) => f2.earlyShare, show: (f2) => pct(f2.earlyShare), good: "snipers gone", bad: "snipers holding" },
+  { key: "top10", label: "Top 10 holders", x: (f2) => f2.top10, show: (f2) => pct(f2.top10), good: "spread out", bad: "concentrated" },
+  { key: "holders", label: "Holders", x: (f2) => Math.log1p(f2.holders), show: (f2) => `${f2.holders}`, good: "many holders", bad: "few holders" },
+  { key: "drawdown", label: "Below peak", x: (f2) => f2.drawdown, show: (f2) => pct(f2.drawdown), good: "near highs", bad: "far below peak" },
+  { key: "chg30", label: "Move 30s", x: (f2) => clamp(f2.chg30, -2, 2), show: (f2) => pct(Math.exp(f2.chg30) - 1), good: "rising", bad: "falling" },
+  { key: "chg120", label: "Move 2m", x: (f2) => clamp(f2.chg120, -2, 2), show: (f2) => pct(Math.exp(f2.chg120) - 1), good: "trending up", bad: "trending down" },
+  { key: "smart", label: "Smart wallets in", x: (f2) => Math.log1p(f2.smartBuyers), show: (f2) => `${f2.smartBuyers}`, good: "proven wallets buying", bad: "" },
+  { key: "fresh", label: "Fresh wallets", x: (f2) => Number.isFinite(f2.freshShare) ? f2.freshShare : 0.3, show: (f2) => Number.isFinite(f2.freshShare) ? pct(f2.freshShare) : "learning", good: "real wallets", bad: "brand-new wallets (alts)" },
+  { key: "socials", label: "Socials", x: (f2) => f2.socials / 3, show: (f2) => `${f2.socials}/3`, good: "has socials", bad: "no socials" },
+  { key: "tweet", label: "Tweet-linked", x: (f2) => f2.tweetLink, show: (f2) => f2.tweetLink ? "yes" : "no", good: "anchored to a tweet", bad: "" },
+  { key: "cluster", label: "Narrative heat", x: (f2) => Math.log(Math.max(1, f2.clusterSize)), show: (f2) => `${f2.clusterSize} similar`, good: "hot narrative", bad: "" },
+  { key: "leader", label: "Narrative leader", x: (f2) => f2.isLeader, show: (f2) => f2.isLeader ? "leads" : "\u2014", good: "leads its narrative", bad: "" },
+  { key: "copycat", label: "Copycat", x: (f2) => f2.clusterSize > 1 && !f2.isLeader ? 1 : 0, show: (f2) => f2.clusterSize > 1 && !f2.isLeader ? "yes" : "no", good: "", bad: "copy of a bigger coin" },
+  { key: "serial", label: "Serial launcher", x: (f2) => Math.log1p(Math.max(0, f2.creatorLaunches24h - 1)), show: (f2) => `${f2.creatorLaunches24h} launches/24h`, good: "", bad: "dev launches many coins" },
+  { key: "creatorBest", label: "Dev track record", x: (f2) => Math.log1p(f2.creatorBest / 100), show: (f2) => `best ${f2.creatorBest.toFixed(0)} SOL`, good: "dev had a winner", bad: "" },
+  { key: "heat", label: "Market heat", x: (f2) => f2.heat, show: (f2) => s2(f2.heat), good: "hot market", bad: "cold market" },
+  { key: "hourSin", label: "Hour (sin)", x: (f2) => Math.sin(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
+  { key: "hourCos", label: "Hour (cos)", x: (f2) => Math.cos(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
+  { key: "liquidity", label: "Liquidity", x: (f2) => Math.log1p(f2.liquiditySol), show: (f2) => `${f2.liquiditySol.toFixed(1)} SOL`, good: "deep pool", bad: "thin pool" },
+  { key: "sinceMig", label: "Since migration", x: (f2) => f2.stage === "amm" ? Math.log1p(f2.sinceMigrateSec) : 0, show: (f2) => f2.stage === "amm" ? fmtAge(f2.sinceMigrateSec) : "\u2014", good: "just graduated", bad: "stale after graduation" },
+  { key: "dex", label: "DEX listing paid", x: (f2) => f2.dexSignal, show: (f2) => `${f2.dexSignal}/2`, good: "paid profile/boost", bad: "" }
 ];
 var FEATURE_KEYS = FEATURE_DEFS.map((d) => d.key);
-function featureVector(f) {
+function featureVector(f2) {
   const out = new Array(FEATURE_DEFS.length);
   for (let i = 0; i < FEATURE_DEFS.length; i++) {
-    const v = FEATURE_DEFS[i].x(f);
+    const v = FEATURE_DEFS[i].x(f2);
     out[i] = Number.isFinite(v) ? v : 0;
   }
   return out;
@@ -519,10 +1256,10 @@ function linear(stage, z) {
 function scoreFromLogit(stage, zLogit) {
   return clamp(50 + (zLogit - logit(stage.pRef)) * POINTS_PER_LOGIT, 0, 100);
 }
-function scoreToken(model, f, explain = true) {
-  const stageKey = f.stage;
+function scoreToken(model, f2, explain = true) {
+  const stageKey = f2.stage;
   const stage = model.stages[stageKey];
-  const x = featureVector(f);
+  const x = featureVector(f2);
   const z = standardize(stage, x);
   const lin = linear(stage, z);
   const pLogit = stage.calib ? stage.calib.a + stage.calib.b * lin : lin;
@@ -536,7 +1273,7 @@ function scoreToken(model, f, explain = true) {
       if (w === 0) continue;
       const pts = w * z[i] * POINTS_PER_LOGIT;
       if (Math.abs(pts) < 0.5) continue;
-      contributions.push({ key: d.key, label: d.label, value: d.show(f), points: pts, note: pts > 0 ? d.good : d.bad });
+      contributions.push({ key: d.key, label: d.label, value: d.show(f2), points: pts, note: pts > 0 ? d.good : d.bad });
     }
     contributions.sort((a, b) => Math.abs(b.points) - Math.abs(a.points));
     contributions = contributions.slice(0, 10);
@@ -633,17 +1370,17 @@ function fitLogistic(Z, y, w, prior, lambda, maxIter = 30) {
   const d = prior.length;
   let beta = prior.slice();
   const objective = (b) => {
-    let f = 0;
+    let f2 = 0;
     for (let i = 0; i < Z.length; i++) {
       let s = b[0];
       const z = Z[i];
       for (let j = 1; j < d; j++) s += b[j] * z[j - 1];
       const p = clamp(sigmoid(s), 1e-9, 1 - 1e-9);
-      f -= w[i] * (y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p));
+      f2 -= w[i] * (y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p));
     }
-    for (let j = 1; j < d; j++) f += 0.5 * lambda * (b[j] - prior[j]) ** 2;
-    f += 0.5 * 1e-4 * (b[0] - prior[0]) ** 2;
-    return f;
+    for (let j = 1; j < d; j++) f2 += 0.5 * lambda * (b[j] - prior[j]) ** 2;
+    f2 += 0.5 * 1e-4 * (b[0] - prior[0]) ** 2;
+    return f2;
   };
   let fPrev = objective(beta);
   let converged = false;
@@ -831,473 +1568,6 @@ function trainAndSelect(current, rows, opts = {}) {
   return { model: next, reports };
 }
 
-// src/core/curve.ts
-var LAMPORTS_PER_SOL = 1e9;
-var RAW_PER_TOKEN = 1e6;
-var CURVE = {
-  initialVirtualTok: 1073e12,
-  initialVirtualSol: 3e10,
-  initialRealTok: 7931e11,
-  supply: 1e15
-};
-var CURVE_COMPLETE_REAL_SOL = (() => {
-  const k = CURVE.initialVirtualSol * CURVE.initialVirtualTok;
-  const vTokEnd = CURVE.initialVirtualTok - CURVE.initialRealTok;
-  return k / vTokEnd - CURVE.initialVirtualSol;
-})();
-var CURVE_FEES = { protocol: 95, creator: 30, lp: 0 };
-var AMM_FEE_TIERS = [
-  { mcapSol: 0, fees: { creator: 30, protocol: 93, lp: 2 } },
-  { mcapSol: 420, fees: { creator: 95, protocol: 5, lp: 20 } },
-  { mcapSol: 1470, fees: { creator: 90, protocol: 5, lp: 20 } },
-  { mcapSol: 2460, fees: { creator: 85, protocol: 5, lp: 20 } },
-  { mcapSol: 3440, fees: { creator: 80, protocol: 5, lp: 20 } },
-  { mcapSol: 4420, fees: { creator: 75, protocol: 5, lp: 20 } },
-  { mcapSol: 9820, fees: { creator: 70, protocol: 5, lp: 20 } },
-  { mcapSol: 14740, fees: { creator: 65, protocol: 5, lp: 20 } },
-  { mcapSol: 19650, fees: { creator: 60, protocol: 5, lp: 20 } },
-  { mcapSol: 24560, fees: { creator: 55, protocol: 5, lp: 20 } },
-  { mcapSol: 29470, fees: { creator: 50, protocol: 5, lp: 20 } },
-  { mcapSol: 34380, fees: { creator: 45, protocol: 5, lp: 20 } },
-  { mcapSol: 39300, fees: { creator: 40, protocol: 5, lp: 20 } },
-  { mcapSol: 44210, fees: { creator: 35, protocol: 5, lp: 20 } },
-  { mcapSol: 49120, fees: { creator: 30, protocol: 5, lp: 20 } },
-  { mcapSol: 54030, fees: { creator: 28, protocol: 5, lp: 20 } },
-  { mcapSol: 58940, fees: { creator: 25, protocol: 5, lp: 20 } },
-  { mcapSol: 63860, fees: { creator: 23, protocol: 5, lp: 20 } },
-  { mcapSol: 68770, fees: { creator: 20, protocol: 5, lp: 20 } },
-  { mcapSol: 73681, fees: { creator: 18, protocol: 5, lp: 20 } },
-  { mcapSol: 78590, fees: { creator: 15, protocol: 5, lp: 20 } },
-  { mcapSol: 83500, fees: { creator: 13, protocol: 5, lp: 20 } },
-  { mcapSol: 88400, fees: { creator: 10, protocol: 5, lp: 20 } },
-  { mcapSol: 93330, fees: { creator: 8, protocol: 5, lp: 20 } },
-  { mcapSol: 98240, fees: { creator: 5, protocol: 5, lp: 20 } }
-];
-function totalBps(f) {
-  return f.protocol + f.creator + f.lp;
-}
-function ammFeesForMcapSol(mcapSol) {
-  let chosen = AMM_FEE_TIERS[0].fees;
-  for (const tier of AMM_FEE_TIERS) {
-    if (mcapSol >= tier.mcapSol) chosen = tier.fees;
-    else break;
-  }
-  return chosen;
-}
-function newCurve() {
-  return {
-    vSol: CURVE.initialVirtualSol,
-    vTok: CURVE.initialVirtualTok,
-    realTok: CURVE.initialRealTok,
-    supply: CURVE.supply
-  };
-}
-function curveMcapLamports(s) {
-  if (s.vTok <= 0) return 0;
-  return s.vSol * s.supply / s.vTok;
-}
-function curveMcapSol(s) {
-  return curveMcapLamports(s) / LAMPORTS_PER_SOL;
-}
-function curvePriceSol(s) {
-  if (s.vTok <= 0) return 0;
-  return s.vSol / s.vTok * (RAW_PER_TOKEN / LAMPORTS_PER_SOL);
-}
-function curveProgress(s) {
-  const p = 1 - s.realTok / CURVE.initialRealTok;
-  return p < 0 ? 0 : p > 1 ? 1 : p;
-}
-function feeCeil(amount, bps) {
-  return Math.ceil(amount * bps / 1e4);
-}
-function curveBuyQuote(s, lamportsIn, fees = CURVE_FEES) {
-  const zero = { tokensOut: 0, solToCurve: 0, feeLamports: 0, solSpent: 0, avgPriceSol: 0, after: { ...s } };
-  if (!(lamportsIn > 1) || s.vTok <= 0 || s.realTok <= 0) return zero;
-  const bps = totalBps(fees);
-  const input = Math.floor((lamportsIn - 1) * 1e4 / (1e4 + bps));
-  let tokens = Math.floor(input * s.vTok / (s.vSol + input));
-  if (tokens > s.realTok) tokens = s.realTok;
-  if (tokens <= 0) return zero;
-  const cost = Math.floor(tokens * s.vSol / (s.vTok - tokens)) + 1;
-  const fee = feeCeil(cost, fees.protocol) + feeCeil(cost, fees.creator);
-  const spent = cost + fee;
-  return {
-    tokensOut: tokens,
-    solToCurve: cost,
-    feeLamports: fee,
-    solSpent: spent,
-    avgPriceSol: spent / LAMPORTS_PER_SOL / (tokens / RAW_PER_TOKEN),
-    after: { vSol: s.vSol + cost, vTok: s.vTok - tokens, realTok: s.realTok - tokens, supply: s.supply }
-  };
-}
-function curveSellQuote(s, tokensIn, fees = CURVE_FEES) {
-  if (!(tokensIn > 0) || s.vTok <= 0) {
-    return { solOut: 0, solFromCurve: 0, feeLamports: 0, avgPriceSol: 0, after: { ...s } };
-  }
-  const gross = Math.floor(tokensIn * s.vSol / (s.vTok + tokensIn));
-  const fee = feeCeil(gross, fees.protocol) + feeCeil(gross, fees.creator);
-  const out = Math.max(0, gross - fee);
-  return {
-    solOut: out,
-    solFromCurve: gross,
-    feeLamports: fee,
-    avgPriceSol: out / LAMPORTS_PER_SOL / (tokensIn / RAW_PER_TOKEN),
-    after: { vSol: s.vSol - gross, vTok: s.vTok + tokensIn, realTok: s.realTok + tokensIn, supply: s.supply }
-  };
-}
-function poolMcapSol(p) {
-  if (p.base <= 0) return 0;
-  return p.quote * p.supply / p.base / LAMPORTS_PER_SOL;
-}
-function poolPriceSol(p) {
-  if (p.base <= 0) return 0;
-  return p.quote / p.base * (RAW_PER_TOKEN / LAMPORTS_PER_SOL);
-}
-function ammFees(p) {
-  const f = ammFeesForMcapSol(poolMcapSol(p));
-  return p.hasCreator === false ? { ...f, creator: 0 } : f;
-}
-function poolBuyQuote(p, lamportsIn) {
-  const zeroAfter = { vSol: p.quote, vTok: p.base, realTok: p.base, supply: p.supply };
-  const zero = { tokensOut: 0, solToCurve: 0, feeLamports: 0, solSpent: 0, avgPriceSol: 0, after: zeroAfter };
-  if (!(lamportsIn > 1) || p.base <= 0 || p.quote <= 0) return zero;
-  const f = ammFees(p);
-  let effective = Math.floor(lamportsIn * 1e4 / (1e4 + totalBps(f)));
-  const lpFee = feeCeil(effective, f.lp);
-  const protocolFee = feeCeil(effective, f.protocol);
-  const creatorFee = feeCeil(effective, f.creator);
-  const total = effective + lpFee + protocolFee + creatorFee;
-  if (total > lamportsIn) effective -= total - lamportsIn;
-  const input = effective - 1;
-  if (input <= 0) return zero;
-  const out = Math.floor(p.base * input / (p.quote + input));
-  if (out <= 0 || out >= p.base) return zero;
-  const quoteIn = Math.ceil(p.quote * out / (p.base - out));
-  const fLp = feeCeil(quoteIn, f.lp);
-  const fee = fLp + feeCeil(quoteIn, f.protocol) + feeCeil(quoteIn, f.creator);
-  const spent = quoteIn + fee;
-  return {
-    tokensOut: out,
-    solToCurve: quoteIn + fLp,
-    feeLamports: fee,
-    solSpent: spent,
-    avgPriceSol: spent / LAMPORTS_PER_SOL / (out / RAW_PER_TOKEN),
-    after: { vSol: p.quote + quoteIn + fLp, vTok: p.base - out, realTok: p.base - out, supply: p.supply }
-  };
-}
-function poolSellQuote(p, tokensIn) {
-  const same = { vSol: p.quote, vTok: p.base, realTok: p.base, supply: p.supply };
-  if (!(tokensIn > 0) || p.base <= 0 || p.quote <= 0) {
-    return { solOut: 0, solFromCurve: 0, feeLamports: 0, avgPriceSol: 0, after: same };
-  }
-  const f = ammFees(p);
-  const gross = Math.floor(p.quote * tokensIn / (p.base + tokensIn));
-  const lpFee = feeCeil(gross, f.lp);
-  const fee = lpFee + feeCeil(gross, f.protocol) + feeCeil(gross, f.creator);
-  const out = Math.max(0, gross - fee);
-  return {
-    solOut: out,
-    solFromCurve: gross - lpFee,
-    feeLamports: fee,
-    avgPriceSol: out / LAMPORTS_PER_SOL / (tokensIn / RAW_PER_TOKEN),
-    after: { vSol: p.quote - (gross - lpFee), vTok: p.base + tokensIn, realTok: p.base + tokensIn, supply: p.supply }
-  };
-}
-
-// src/core/positions.ts
-var DEFAULT_COSTS = { priorityFeeSol: 5e-4, platformFeePct: 0.5, ataRentSol: 203928e-8, refundRent: true };
-function venueOf(t) {
-  if (t.stage === "curve") return t.vTok > 0 && t.realTok > 0 ? "curve" : "none";
-  if (t.stage === "migrating") return "none";
-  if (t.poolBase > 0 && t.poolQuote > 0) return "amm";
-  if (t.quote?.priceSol && t.quote.priceSol > 0) return "approx";
-  return "none";
-}
-function approxPool(t, solUsd) {
-  const q = t.quote;
-  const liqSol = q.liqUsd && solUsd > 0 ? q.liqUsd / solUsd / 2 : 50;
-  const quote = Math.max(1, liqSol) * LAMPORTS_PER_SOL;
-  const base = quote / (q.priceSol * LAMPORTS_PER_SOL) * RAW_PER_TOKEN;
-  return { base, quote, supply: t.supply };
-}
-function quoteBuy(t, lamportsAllIn, costs, solUsd = 0, firstBuy = true) {
-  const venue = venueOf(t);
-  const fixed = costs.priorityFeeSol * LAMPORTS_PER_SOL + (firstBuy ? costs.ataRentSol * LAMPORTS_PER_SOL : 0);
-  const platform = lamportsAllIn * (costs.platformFeePct / 100);
-  const swapIn = Math.floor(lamportsAllIn - fixed - platform);
-  if (venue === "none") return { ok: false, error: t.stage === "migrating" ? "migrating" : "no_price", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
-  if (swapIn <= 1e4) return { ok: false, error: "size_too_small", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
-  let q;
-  if (venue === "curve") q = curveBuyQuote(t, swapIn);
-  else if (venue === "amm") q = poolBuyQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, swapIn);
-  else q = poolBuyQuote(approxPool(t, solUsd), swapIn);
-  if (q.tokensOut <= 0) return { ok: false, error: "no_liquidity", tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
-  const lamports = q.solSpent + fixed + platform;
-  return {
-    ok: true,
-    tokens: q.tokensOut,
-    lamports,
-    avgPriceSol: lamports / LAMPORTS_PER_SOL / (q.tokensOut / RAW_PER_TOKEN),
-    fees: q.feeLamports + fixed + platform,
-    mcapSol: t.mcapSol
-  };
-}
-function quoteSell(t, tokens, costs, solUsd = 0, closesAccount = false) {
-  const venue = venueOf(t);
-  if (tokens <= 0) return { ok: true, tokens: 0, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
-  if (venue === "none") return { ok: false, error: t.stage === "migrating" ? "migrating" : "no_price", tokens, lamports: 0, avgPriceSol: 0, fees: 0, mcapSol: t.mcapSol };
-  let q;
-  if (venue === "curve") q = curveSellQuote(t, tokens);
-  else if (venue === "amm") q = poolSellQuote({ base: t.poolBase, quote: t.poolQuote, supply: t.supply }, tokens);
-  else q = poolSellQuote(approxPool(t, solUsd), tokens);
-  const platform = q.solOut * (costs.platformFeePct / 100);
-  const refund = closesAccount && costs.refundRent ? costs.ataRentSol * LAMPORTS_PER_SOL : 0;
-  const lamports = Math.max(0, q.solOut - platform - costs.priorityFeeSol * LAMPORTS_PER_SOL + refund);
-  return {
-    ok: true,
-    tokens,
-    lamports,
-    avgPriceSol: tokens > 0 ? lamports / LAMPORTS_PER_SOL / (tokens / RAW_PER_TOKEN) : 0,
-    fees: q.feeLamports + platform + costs.priorityFeeSol * LAMPORTS_PER_SOL,
-    mcapSol: t.mcapSol
-  };
-}
-function positionMultiple(p) {
-  return p.cost > 0 ? (p.proceeds + p.value) / p.cost : 0;
-}
-function effectiveTrail(plan) {
-  return plan.takeInitials && plan.trailPct === 0 ? 40 : plan.trailPct;
-}
-function decideExit(p, now, lastTradeAt = now) {
-  const plan = p.plan;
-  const mult = positionMultiple(p);
-  if (p.tokensLeft <= 0) return { action: "hold" };
-  if (!p.tpHit && mult <= 1 - plan.slPct / 100) return { action: "sell", fraction: 1, reason: "sl" };
-  const trail = effectiveTrail(plan);
-  if (!p.tpHit && mult >= 1 + plan.tpPct / 100) {
-    if (plan.takeInitials && p.value > 0) {
-      const need = Math.max(0, p.cost - p.proceeds);
-      const fraction = Math.min(1, need / p.value);
-      if (fraction < 0.98) return { action: "sell", fraction, reason: "initials" };
-      return { action: "sell", fraction: 1, reason: "tp" };
-    }
-    if (trail > 0) return { action: "arm" };
-    return { action: "sell", fraction: 1, reason: "tp" };
-  }
-  if (p.tpHit && trail > 0 && p.peakValue > 0 && p.value <= p.peakValue * (1 - trail / 100)) {
-    return { action: "sell", fraction: 1, reason: "trail" };
-  }
-  if (p.tpHit && mult <= 1 - plan.slPct / 100) return { action: "sell", fraction: 1, reason: "sl" };
-  if (plan.maxHoldMin > 0 && now - p.openedAt >= plan.maxHoldMin * 6e4) return { action: "sell", fraction: 1, reason: "time" };
-  const stale = plan.staleExitMin ?? 0;
-  if (stale > 0 && now - Math.max(lastTradeAt, p.openedAt) >= stale * 6e4) return { action: "sell", fraction: 1, reason: "dead" };
-  return { action: "hold" };
-}
-
-// src/core/outcomes.ts
-var GRID_TP = [25, 50, 100, 200, 400];
-var GRID_SL = [20, 35, 50, 70];
-var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
-var ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
-var OutcomeTracker = class {
-  constructor(opts, sink) {
-    this.opts = opts;
-    this.sink = sink;
-  }
-  byMint = /* @__PURE__ */ new Map();
-  openCount = 0;
-  dropped = 0;
-  resolvedCount = 0;
-  setOptions(o) {
-    this.opts = { ...this.opts, ...o };
-  }
-  get open() {
-    return this.openCount;
-  }
-  has(mint, tag) {
-    return this.byMint.get(mint)?.some((h) => h.tag === tag) ?? false;
-  }
-  add(t, kind, tag, now, score, p, x, custom) {
-    if (this.openCount >= this.opts.maxOpen) {
-      this.dropped++;
-      return false;
-    }
-    const combos = [{ tp: custom.tp, sl: custom.sl, state: 0, exitAt: 0, kind: "timeout", ret: 0 }];
-    for (const g of GRID) combos.push({ tp: g.tp, sl: g.sl, state: 0, exitAt: 0, kind: "timeout", ret: 0 });
-    const h = {
-      id: newId("h"),
-      kind,
-      tag,
-      mint: t.mint,
-      symbol: t.symbol,
-      ts: now,
-      stage: t.stage === "amm" ? "amm" : "curve",
-      score,
-      p,
-      x,
-      entryAt: now + this.opts.latencyMs,
-      entered: false,
-      entryMcap: 0,
-      a: 0,
-      b: 0,
-      maxMult: 1,
-      minMult: 1,
-      maxAt: now,
-      combos,
-      open: combos.length
-    };
-    let list = this.byMint.get(t.mint);
-    if (!list) {
-      list = [];
-      this.byMint.set(t.mint, list);
-    }
-    list.push(h);
-    this.openCount++;
-    if (this.opts.latencyMs === 0) this.enter(h, t, now);
-    return true;
-  }
-  enter(h, t, now) {
-    const size = this.opts.sizeSol * LAMPORTS_PER_SOL;
-    const q = quoteBuy(t, size, this.opts.costs, 0, true);
-    if (!q.ok || q.tokens <= 0 || t.mcapSol <= 0) {
-      this.remove(h);
-      return;
-    }
-    h.entered = true;
-    h.entryMcap = t.mcapSol;
-    const sellFee = (t.stage === "amm" ? 0.0125 : 0.0125) + this.opts.costs.platformFeePct / 100;
-    const tokensUi = q.tokens / 1e6;
-    const pricePerMcap = 1e6 / t.supply;
-    h.a = tokensUi * pricePerMcap * (1 - sellFee) / this.opts.sizeSol;
-    h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
-    h.ts = now;
-  }
-  mult(h, mcap) {
-    return h.a * mcap - h.b;
-  }
-  /** Price update for a token (call after every applied trade / quote). */
-  onPrice(t, now) {
-    const list = this.byMint.get(t.mint);
-    if (!list) return;
-    for (let i = list.length - 1; i >= 0; i--) {
-      const h = list[i];
-      if (!h.entered) {
-        if (now >= h.entryAt) this.enter(h, t, now);
-        continue;
-      }
-      if (t.stage === "migrating") continue;
-      const m = this.mult(h, t.mcapSol);
-      if (m > h.maxMult) {
-        h.maxMult = m;
-        h.maxAt = now;
-      }
-      if (m < h.minMult) h.minMult = m;
-      for (const c of h.combos) {
-        if (c.state === 2) continue;
-        if (c.state === 1) {
-          if (now >= c.exitAt) this.resolveCombo(h, c, m);
-          continue;
-        }
-        if (m >= 1 + c.tp / 100) this.trigger(h, c, "tp", now, m);
-        else if (m <= 1 - c.sl / 100) this.trigger(h, c, "sl", now, m);
-      }
-      if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout");
-      else if (h.open === 0) this.emit(h, now);
-    }
-  }
-  trigger(h, c, kind, now, m) {
-    c.kind = kind;
-    if (this.opts.latencyMs <= 0) this.resolveCombo(h, c, m);
-    else {
-      c.state = 1;
-      c.exitAt = now + this.opts.latencyMs;
-    }
-  }
-  resolveCombo(h, c, m) {
-    if (c.state === 2) return;
-    c.state = 2;
-    c.ret = Math.max(-1, m - 1);
-    h.open--;
-  }
-  finish(h, m, kind) {
-    for (const c of h.combos) {
-      if (c.state === 2) continue;
-      if (c.state === 0) c.kind = kind;
-      this.resolveCombo(h, c, m);
-    }
-    this.emit(h, h.ts + this.opts.horizonMs);
-  }
-  emit(h, now) {
-    this.remove(h);
-    if (!h.entered) return;
-    const c0 = h.combos[0];
-    this.resolvedCount++;
-    this.sink({
-      id: h.id,
-      kind: h.kind,
-      tag: h.tag,
-      mint: h.mint,
-      symbol: h.symbol,
-      ts: h.ts,
-      stage: h.stage,
-      score: h.score,
-      p: h.p,
-      x: h.x,
-      entryMcap: h.entryMcap,
-      tp: c0.tp,
-      sl: c0.sl,
-      y: c0.kind === "tp" ? 1 : 0,
-      ret: c0.ret,
-      exit: c0.kind,
-      grid: h.combos.slice(1).map((c) => c.ret),
-      maxMult: h.maxMult,
-      minMult: h.minMult,
-      secToMax: Math.max(0, (h.maxAt - h.ts) / 1e3),
-      resolvedAt: now
-    });
-  }
-  remove(h) {
-    const list = this.byMint.get(h.mint);
-    if (!list) return;
-    const i = list.indexOf(h);
-    if (i >= 0) {
-      list.splice(i, 1);
-      this.openCount--;
-    }
-    if (list.length === 0) this.byMint.delete(h.mint);
-  }
-  /** Token left memory (idle/dead): resolve everything at its last value. */
-  onTokenGone(t, now) {
-    const list = this.byMint.get(t.mint);
-    if (!list) return;
-    for (const h of [...list]) {
-      if (!h.entered) {
-        this.remove(h);
-        continue;
-      }
-      this.finish(h, this.mult(h, t.mcapSol), "dead");
-    }
-    void now;
-  }
-  /** Periodic sweep: time out hypotheticals of tokens that stopped trading. */
-  sweep(now, tokenOf) {
-    for (const [mint, list] of [...this.byMint]) {
-      const t = tokenOf(mint);
-      for (const h of [...list]) {
-        if (!h.entered) {
-          if (t && now >= h.entryAt) this.enter(h, t, now);
-          else if (!t) this.remove(h);
-          continue;
-        }
-        const m = t ? this.mult(h, t.mcapSol) : h.minMult;
-        for (const c of h.combos) if (c.state === 1 && now >= c.exitAt) this.resolveCombo(h, c, m);
-        if (h.open === 0) this.emit(h, now);
-        else if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout");
-      }
-    }
-  }
-};
-
 // src/core/report.ts
 function nearestGrid(tp, sl) {
   let best = 0;
@@ -1311,23 +1581,26 @@ function nearestGrid(tp, sl) {
   });
   return best;
 }
+function gridOf(s) {
+  return s.grid?.length === GRID.length ? s.grid : void 0;
+}
 function sampleReturn(s, tp, sl) {
   if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
-  const gi = GRID.findIndex((g) => g.tp === tp && g.sl === sl);
-  if (gi >= 0 && Number.isFinite(s.grid?.[gi])) return { ret: s.grid[gi], exact: true };
-  const ni = nearestGrid(tp, sl);
-  return { ret: s.grid?.[ni] ?? s.ret, exact: false };
+  const g = gridOf(s);
+  const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
+  if (g && gi >= 0 && Number.isFinite(g[gi])) return { ret: g[gi], exact: true };
+  return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
 }
 function statsOf(rets) {
-  const wins = rets.filter((r) => r > 0).length;
-  const w = wilson(wins, rets.length);
+  const wins2 = rets.filter((r) => r > 0).length;
+  const w = wilson(wins2, rets.length);
   const m = meanCI(rets);
-  return { n: rets.length, winRate: rets.length ? wins / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
+  return { n: rets.length, winRate: rets.length ? wins2 / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
 }
 function paperStats(closed) {
   const done = closed.filter((p) => p.status === "closed" && Number.isFinite(p.pnl));
-  const wins = done.filter((p) => (p.pnl ?? 0) > 0);
-  const gross = wins.reduce((s, p) => s + (p.pnl ?? 0), 0);
+  const wins2 = done.filter((p) => (p.pnl ?? 0) > 0);
+  const gross = wins2.reduce((s, p) => s + (p.pnl ?? 0), 0);
   const loss = -done.filter((p) => (p.pnl ?? 0) <= 0).reduce((s, p) => s + (p.pnl ?? 0), 0);
   let peak = 0;
   let eq = 0;
@@ -1339,8 +1612,8 @@ function paperStats(closed) {
   }
   return {
     trades: done.length,
-    wins: wins.length,
-    winRate: done.length ? wins.length / done.length : NaN,
+    wins: wins2.length,
+    winRate: done.length ? wins2.length / done.length : NaN,
     pnlSol: (gross - loss) / 1e9,
     avgPct: done.length ? done.reduce((s, p) => s + (p.pnlPct ?? 0), 0) / done.length : NaN,
     profitFactor: loss > 0 ? gross / loss : gross > 0 ? Infinity : NaN,
@@ -1392,7 +1665,7 @@ function buildReport(samples, settings, model, closed, now) {
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid = GRID.map((g, i) => {
-    const rets = pool.map((s) => s.grid?.[i]).filter((x) => Number.isFinite(x));
+    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x) => Number.isFinite(x));
     const st = statsOf(rets);
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
@@ -1431,7 +1704,7 @@ function buildReport(samples, settings, model, closed, now) {
     const rows = atLevel(min);
     if (rows.length < 150) continue;
     GRID.forEach((g, i) => {
-      const val = (s) => s.grid?.[i];
+      const val = (s) => gridOf(s)?.[i];
       const all = rows.map(val).filter((x) => Number.isFinite(x));
       if (all.length < 150) return;
       const lo = zBound(all, 3.5);
@@ -1536,7 +1809,7 @@ function bool(v, d) {
 }
 function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
   const i = input && typeof input === "object" ? input : {};
-  const f = i.filters && typeof i.filters === "object" ? i.filters : {};
+  const f2 = i.filters && typeof i.filters === "object" ? i.filters : {};
   const b = base;
   const bf = base.filters;
   const out = {
@@ -1566,17 +1839,17 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
     autoTune: bool(i.autoTune, b.autoTune),
     filters: {
-      minMcapSol: clamp(num(f.minMcapSol, bf.minMcapSol), 0, 1e7),
-      maxMcapSol: clamp(num(f.maxMcapSol, bf.maxMcapSol), 0, 1e7),
-      maxDevPct: clamp(num(f.maxDevPct, bf.maxDevPct), 0, 100),
-      maxTop10Pct: clamp(num(f.maxTop10Pct, bf.maxTop10Pct), 0, 100),
-      maxBundlePct: clamp(num(f.maxBundlePct, bf.maxBundlePct), 0, 100),
-      minBuyers: Math.round(clamp(num(f.minBuyers, bf.minBuyers), 0, 1e4)),
-      minAgeSec: clamp(num(f.minAgeSec, bf.minAgeSec), 0, 86400),
-      maxAgeMin: clamp(num(f.maxAgeMin, bf.maxAgeMin), 0, 1e5),
-      requireSocials: bool(f.requireSocials, bf.requireSocials),
-      maxDevLaunches24h: Math.round(clamp(num(f.maxDevLaunches24h, bf.maxDevLaunches24h), 0, 1e3)),
-      maxDevSoldPct: clamp(num(f.maxDevSoldPct, bf.maxDevSoldPct), 0, 100)
+      minMcapSol: clamp(num(f2.minMcapSol, bf.minMcapSol), 0, 1e7),
+      maxMcapSol: clamp(num(f2.maxMcapSol, bf.maxMcapSol), 0, 1e7),
+      maxDevPct: clamp(num(f2.maxDevPct, bf.maxDevPct), 0, 100),
+      maxTop10Pct: clamp(num(f2.maxTop10Pct, bf.maxTop10Pct), 0, 100),
+      maxBundlePct: clamp(num(f2.maxBundlePct, bf.maxBundlePct), 0, 100),
+      minBuyers: Math.round(clamp(num(f2.minBuyers, bf.minBuyers), 0, 1e4)),
+      minAgeSec: clamp(num(f2.minAgeSec, bf.minAgeSec), 0, 86400),
+      maxAgeMin: clamp(num(f2.maxAgeMin, bf.maxAgeMin), 0, 1e5),
+      requireSocials: bool(f2.requireSocials, bf.requireSocials),
+      maxDevLaunches24h: Math.round(clamp(num(f2.maxDevLaunches24h, bf.maxDevLaunches24h), 0, 1e3)),
+      maxDevSoldPct: clamp(num(f2.maxDevSoldPct, bf.maxDevSoldPct), 0, 100)
     }
   };
   if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
@@ -2206,21 +2479,21 @@ var DataStore = class {
     const cutoff = day(now - days * 864e5);
     let files = [];
     try {
-      files = readdirSync(join(this.dir, "samples")).filter((f) => f.endsWith(".jsonl") && f.slice(0, 10) >= cutoff).sort().reverse();
+      files = readdirSync(join(this.dir, "samples")).filter((f2) => f2.endsWith(".jsonl") && f2.slice(0, 10) >= cutoff).sort().reverse();
     } catch {
       return [];
     }
     const perFile = [];
     let nCp = 0;
     let nEn = 0;
-    for (const f of files) {
+    for (const f2 of files) {
       const roomCp = limits.checkpoints - nCp;
       const roomEn = limits.entries - nEn;
       if (roomCp <= 0 && roomEn <= 0) break;
       const cps = [];
       const ens = [];
       try {
-        forEachLine(join(this.dir, "samples", f), (line) => {
+        forEachLine(join(this.dir, "samples", f2), (line) => {
           const isCp = line.includes('"kind":"checkpoint"');
           if (isCp ? roomCp <= 0 : roomEn <= 0) return;
           let s;
@@ -2236,7 +2509,7 @@ var DataStore = class {
           if (into.length >= room * 2) into.splice(0, into.length - room);
         });
       } catch (e) {
-        this.log.warn("could not read samples", { file: f, err: String(e) });
+        this.log.warn("could not read samples", { file: f2, err: String(e) });
         continue;
       }
       if (cps.length > roomCp) cps.splice(0, cps.length - Math.max(0, roomCp));
@@ -2269,7 +2542,7 @@ var DataStore = class {
   }
   recordFiles() {
     try {
-      return readdirSync(join(this.dir, "record")).filter((f) => f.endsWith(".jsonl.gz")).sort().map((f) => join(this.dir, "record", f));
+      return readdirSync(join(this.dir, "record")).filter((f2) => f2.endsWith(".jsonl.gz")).sort().map((f2) => join(this.dir, "record", f2));
     } catch {
       return [];
     }
@@ -2286,6 +2559,19 @@ var DataStore = class {
     try {
       const m = JSON.parse(readFileSync(p, "utf8"));
       return validateModel(m) ? m : null;
+    } catch {
+      return null;
+    }
+  }
+  // ---- edge finder -----------------------------------------------------------------
+  saveEdges(report) {
+    writeFileAtomic(join(this.dir, "edges.json"), JSON.stringify(report));
+  }
+  loadEdges() {
+    const p = join(this.dir, "edges.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
     } catch {
       return null;
     }
@@ -2321,7 +2607,7 @@ var DataStore = class {
     const prune = (sub, days) => {
       const cutoff = day(now - days * 864e5);
       try {
-        for (const f of readdirSync(join(this.dir, sub))) if (f.slice(0, 10) < cutoff) rmSync(join(this.dir, sub, f), { force: true });
+        for (const f2 of readdirSync(join(this.dir, sub))) if (f2.slice(0, 10) < cutoff) rmSync(join(this.dir, sub, f2), { force: true });
       } catch {
       }
     };
@@ -2333,8 +2619,8 @@ var DataStore = class {
     let total = 0;
     const walk = (d) => {
       try {
-        for (const f of readdirSync(d)) {
-          const p = join(d, f);
+        for (const f2 of readdirSync(d)) {
+          const p = join(d, f2);
           const st = statSync(p);
           if (st.isDirectory()) walk(p);
           else total += st.size;
@@ -3197,6 +3483,20 @@ var DEFAULT_CONFIG = {
   seed: 1
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
+function entryFacts(t, f2) {
+  const r = (v, d = 4) => Number.isFinite(v) ? Math.round(v * 10 ** d) / 10 ** d : 0;
+  return {
+    mcap: r(t.mcapSol, 2),
+    age: Math.round(f2.ageSec),
+    buyers: f2.uniqTotal,
+    top10: r(f2.top10),
+    bundle: r(f2.bundleShare),
+    devShare: r(f2.devShare),
+    devSold: r(f2.devSold),
+    socials: f2.socials,
+    launches24h: f2.creatorLaunches24h
+  };
+}
 var Engine = class {
   cfg;
   settings;
@@ -3549,16 +3849,16 @@ var Engine = class {
     }
   }
   scoreOne(t, now) {
-    const f = extractFeatures(t, { now, wallets: this.wallets, narratives: this.narratives, pulse: this.pulse, mcapOf: (m) => this.tokens.get(m)?.mcapSol ?? 0 });
-    const res = scoreToken(this.model, f, true);
-    const x = featureVector(f);
+    const f2 = extractFeatures(t, { now, wallets: this.wallets, narratives: this.narratives, pulse: this.pulse, mcapOf: (m) => this.tokens.get(m)?.mcapSol ?? 0 });
+    const res = scoreToken(this.model, f2, true);
+    const x = featureVector(f2);
     let e = this.scores.get(t.mint);
     if (!e) {
-      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
+      e = { res, f: f2, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
       this.scores.set(t.mint, e);
     } else {
       e.res = res;
-      e.f = f;
+      e.f = f2;
       e.x = x;
       e.at = now;
     }
@@ -3607,7 +3907,7 @@ var Engine = class {
       const bit = 1 << i;
       if (e.reached & bit || e.held[i] < need) continue;
       e.reached |= bit;
-      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom);
+      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
     }
   }
   signalLogic(t, e, now) {
@@ -3635,7 +3935,7 @@ var Engine = class {
       why: e.res.contributions.slice(0, 4)
     };
     const custom = { tp: s.tpPct, sl: s.slPct };
-    this.outcomes.add(t, "signal", `sig${Math.floor(now / 1e3)}`, now, score, e.res.p, e.x, custom);
+    this.outcomes.add(t, "signal", `sig${Math.floor(now / 1e3)}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
     const blocked = this.entryBlock(t, e);
     if (blocked) {
       rec.decision = "blocked";
@@ -3672,19 +3972,19 @@ var Engine = class {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
     if (s.scoreOnly) return null;
-    const f = s.filters;
+    const f2 = s.filters;
     const raw = e.f;
-    if (f.minMcapSol > 0 && t.mcapSol < f.minMcapSol) return "filter:mcap_min";
-    if (f.maxMcapSol > 0 && t.mcapSol > f.maxMcapSol) return "filter:mcap_max";
-    if (raw.devShare * 100 > f.maxDevPct) return "filter:dev";
-    if (raw.top10 * 100 > f.maxTop10Pct) return "filter:top10";
-    if (raw.bundleShare * 100 > f.maxBundlePct) return "filter:bundle";
-    if (raw.uniqTotal < f.minBuyers) return "filter:buyers";
-    if (f.minAgeSec > 0 && raw.ageSec < f.minAgeSec) return "filter:age_min";
-    if (f.maxAgeMin > 0 && raw.ageSec > f.maxAgeMin * 60) return "filter:age_max";
-    if (f.requireSocials && raw.socials === 0) return "filter:socials";
-    if (f.maxDevLaunches24h > 0 && raw.creatorLaunches24h > f.maxDevLaunches24h) return "filter:serial_dev";
-    if (f.maxDevSoldPct < 100 && raw.devSold * 100 > f.maxDevSoldPct) return "filter:dev_sold";
+    if (f2.minMcapSol > 0 && t.mcapSol < f2.minMcapSol) return "filter:mcap_min";
+    if (f2.maxMcapSol > 0 && t.mcapSol > f2.maxMcapSol) return "filter:mcap_max";
+    if (raw.devShare * 100 > f2.maxDevPct) return "filter:dev";
+    if (raw.top10 * 100 > f2.maxTop10Pct) return "filter:top10";
+    if (raw.bundleShare * 100 > f2.maxBundlePct) return "filter:bundle";
+    if (raw.uniqTotal < f2.minBuyers) return "filter:buyers";
+    if (f2.minAgeSec > 0 && raw.ageSec < f2.minAgeSec) return "filter:age_min";
+    if (f2.maxAgeMin > 0 && raw.ageSec > f2.maxAgeMin * 60) return "filter:age_max";
+    if (f2.requireSocials && raw.socials === 0) return "filter:socials";
+    if (f2.maxDevLaunches24h > 0 && raw.creatorLaunches24h > f2.maxDevLaunches24h) return "filter:serial_dev";
+    if (f2.maxDevSoldPct < 100 && raw.devSold * 100 > f2.maxDevSoldPct) return "filter:dev_sold";
     return null;
   }
   /** A prior model trades only after it has been scaled to the live market once. */
@@ -3693,9 +3993,9 @@ var Engine = class {
   }
   /** True when the primary trade feed has gone quiet (no trading blind). */
   feedDown() {
-    const critical = [...this.feeds.values()].filter((f) => f.critical && f.status !== "off");
+    const critical = [...this.feeds.values()].filter((f2) => f2.critical && f2.status !== "off");
     if (critical.length === 0) return false;
-    const anyAlive = critical.some((f) => f.status === "open" && this.now - f.lastMsgAt < this.cfg.feedStaleMs);
+    const anyAlive = critical.some((f2) => f2.status === "open" && this.now - f2.lastMsgAt < this.cfg.feedStaleMs);
     return !anyAlive;
   }
   setFeedHealth(h) {
@@ -4332,15 +4632,15 @@ var Engine = class {
     return rows.slice(0, limit);
   }
   radarRow(t, e, held) {
-    const f = e.f;
+    const f2 = e.f;
     const flags = [];
-    if (f.bundleShare > 0.15) flags.push("bundled");
-    if (f.devSold > 0.5) flags.push("dev sold");
-    if (f.creatorLaunches24h > 3) flags.push("serial dev");
-    if (f.smartBuyers > 0) flags.push(`${f.smartBuyers} smart`);
-    if (f.top10 > 0.5) flags.push("concentrated");
-    if (f.isLeader) flags.push("narrative leader");
-    else if (f.clusterSize > 1) flags.push("copycat");
+    if (f2.bundleShare > 0.15) flags.push("bundled");
+    if (f2.devSold > 0.5) flags.push("dev sold");
+    if (f2.creatorLaunches24h > 3) flags.push("serial dev");
+    if (f2.smartBuyers > 0) flags.push(`${f2.smartBuyers} smart`);
+    if (f2.top10 > 0.5) flags.push("concentrated");
+    if (f2.isLeader) flags.push("narrative leader");
+    else if (f2.clusterSize > 1) flags.push("copycat");
     return {
       mint: t.mint,
       name: t.name,
@@ -4351,14 +4651,14 @@ var Engine = class {
       calibrated: e.res.calibrated,
       mcapSol: t.mcapSol,
       athMcapSol: t.athMcapSol,
-      ageSec: f.ageSec,
+      ageSec: f2.ageSec,
       progress: t.progress,
-      net60: f.net60,
-      buyers: f.uniqTotal,
-      holders: f.holders,
-      top10: f.top10,
-      devShare: f.devShare,
-      cluster: f.clusterSize,
+      net60: f2.net60,
+      buyers: f2.uniqTotal,
+      holders: f2.holders,
+      top10: f2.top10,
+      devShare: f2.devShare,
+      cluster: f2.clusterSize,
       flags,
       held,
       spent: !e.armed,
@@ -4502,13 +4802,13 @@ async function replay(events, opts) {
   }
   if (!engine) throw new Error("no events to replay");
   for (let t = to; t <= to + 3e4; t += 500) engine.advance(t);
-  const f = engine.funnel.summary(engine.clock, 1e6);
+  const f2 = engine.funnel.summary(engine.clock, 1e6);
   const closed = engine.closed.toArray();
   const exits = {};
   for (const p of closed) if (p.status === "closed") exits[p.exitReason ?? "?"] = (exits[p.exitReason ?? "?"] ?? 0) + 1;
   const blocked = {};
-  for (const r of f.reasons) blocked[r.reason] = r.n;
-  const stats = paperStats(closed);
+  for (const r of f2.reasons) blocked[r.reason] = r.n;
+  const stats2 = paperStats(closed);
   return {
     events: n,
     from,
@@ -4517,12 +4817,12 @@ async function replay(events, opts) {
     settings: engine.settings,
     modelVersion: engine.model.version,
     entries: engine.stats.entries,
-    signals: f.signals,
+    signals: f2.signals,
     blocked,
-    failed: f.failed,
+    failed: f2.failed,
     exits,
-    paper: stats,
-    avgPnlPct: stats.avgPct,
+    paper: stats2,
+    avgPnlPct: stats2.avgPct,
     samples,
     errors: engine.stats.errors
   };
@@ -4622,12 +4922,12 @@ function args(argv) {
 var pct2 = (x) => Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : "\u2014";
 async function* recorded(dataDir, from, to) {
   const store = new DataStore(dataDir, silentLogger);
-  const files = store.recordFiles().filter((f) => {
-    const name = f.split(/[\\/]/).pop().slice(0, 13);
+  const files = store.recordFiles().filter((f2) => {
+    const name = f2.split(/[\\/]/).pop().slice(0, 13);
     return (!from || name >= from) && (!to || name <= to);
   });
   store.close();
-  for (const f of files) yield* readRecording(f);
+  for (const f2 of files) yield* readRecording(f2);
 }
 function loadModel(path) {
   if (typeof path !== "string") return void 0;
@@ -4702,6 +5002,24 @@ Go-live gate: ${r.gate.verdict} \u2014 ${r.gate.detail}`);
       }
       store.close();
       console.log(`wrote ${n} simulated events to ${out}/record (SYNTHETIC \u2014 for testing the pipeline only)`);
+      break;
+    }
+    case "edges": {
+      const store = new DataStore(data, silentLogger);
+      const samples = store.loadSamples(Number(a.days ?? 30));
+      store.close();
+      const r = findEdges(samples, { placeboRuns: Number(a.placebo ?? 5) });
+      console.log(r.note);
+      if (r.status === "ok") {
+        console.log(`
+${r.samples.toLocaleString("en-US")} entry outcomes over ${r.hours.toFixed(1)} h: searched the first ${r.discoveryHours.toFixed(1)} h, checked on the last ${r.holdoutHours.toFixed(1)} h`);
+        console.log(`${r.tested.toLocaleString("en-US")} rules scored, ${r.candidates} re-tested, ${r.survivors.length} held up. Placebo (shuffled data): ${r.placebo.avgSurvivors.toFixed(2)} per run, max ${r.placebo.maxSurvivors}
+`);
+        for (const s of r.survivors)
+          console.log(`\u2714 ${s.text}
+   newest data ${pct2(s.holdout.mean)} per trade (worst case ${pct2(s.holdout.lo)}, ${s.holdout.n} trades, ${pct2(s.holdout.winRate)} winners) \xB7 search data ${pct2(s.discovery.mean)} \xB7 every coin at ${s.level}: ${pct2(s.baseline)} \xB7 ${s.tradesPerDay.toFixed(0)} coins/day`);
+        for (const s of r.failed) console.log(`\u2718 ${s.text}: ${pct2(s.discovery.mean)} in the search data, ${pct2(s.holdout.mean)} on the newest data`);
+      }
       break;
     }
     case "selftest": {

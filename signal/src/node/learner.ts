@@ -2,6 +2,7 @@
  * Periodic learning: retrain the scorer on the samples recorded on disk, validate it on
  * the newest data, and switch models only when the new one wins out-of-sample.
  */
+import { type EdgeReport, findEdgesAsync } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import { type TrainReport, trainAndSelect } from "../core/learn.js";
 import { buildReport } from "../core/report.js";
@@ -13,13 +14,26 @@ export class Learner {
   lastReports: TrainReport[] = [];
   lastError = "";
   running = false;
+  lastEdges: EdgeReport | null = null;
+  edgesRunning = false;
   private timer: NodeJS.Timeout | null = null;
 
   constructor(
-    private o: { store: DataStore; engine: () => Engine; log: Logger; everyHours: number; sampleDays: number; onAdopt?: (version: string) => void; onTune?: (msg: string) => void },
+    private o: {
+      store: DataStore;
+      engine: () => Engine;
+      log: Logger;
+      everyHours: number;
+      sampleDays: number;
+      onAdopt?: (version: string) => void;
+      onTune?: (msg: string) => void;
+      /** a rule held up on data the search never saw (only when the set of rules changes) */
+      onEdges?: (msg: string) => void;
+    },
   ) {}
 
   start() {
+    this.lastEdges = (this.o.store.loadEdges() as EdgeReport | null) ?? null;
     if (this.o.everyHours <= 0) return;
     this.timer = setInterval(() => void this.run(), this.o.everyHours * 3_600_000);
     this.timer.unref?.();
@@ -29,6 +43,30 @@ export class Learner {
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+  }
+
+  /** Searches the recorded outcomes for rules that made money on their own (see core/edges). */
+  async findEdges(samples?: ReturnType<DataStore["loadSamples"]>): Promise<EdgeReport | null> {
+    if (this.edgesRunning) return this.lastEdges;
+    this.edgesRunning = true;
+    try {
+      const rep = await findEdgesAsync(samples ?? this.o.store.loadSamples(this.o.sampleDays), { placeboRuns: 5 });
+      const before = new Set(this.lastEdges?.survivors.map((x) => x.text) ?? []);
+      const fresh = rep.survivors.filter((x) => !before.has(x.text));
+      this.lastEdges = rep;
+      if (fresh.length) {
+        const lines = fresh.slice(0, 3).map((x) => `• ${x.text}: ${(x.holdout.mean * 100).toFixed(1)}% per trade on unseen data (${x.holdout.n} trades)`);
+        this.o.onEdges?.(`🔎 Edge finder: ${fresh.length} new rule${fresh.length > 1 ? "s" : ""} held up on data the search never saw.\n${lines.join("\n")}\nPaper-trade it from the Learn tab.`);
+      }
+      this.o.store.saveEdges(rep);
+      if (rep.survivors.length) this.o.log.info("edge search", { survivors: rep.survivors.map((x) => x.text), placebo: rep.placebo.avgSurvivors });
+      return rep;
+    } catch (e) {
+      this.o.log.error("edge search failed", { err: String(e) });
+      return this.lastEdges;
+    } finally {
+      this.edgesRunning = false;
+    }
   }
 
   /** Paper mode + autoTune: adopt a robustly better TP/SL/score combination. */
@@ -67,6 +105,7 @@ export class Learner {
         this.o.onAdopt?.(model.version);
       } else this.o.log.info("model kept", { reasons: reports.map((r) => `${r.stage}: ${r.reason}`) });
       this.autoTune(samples);
+      void this.findEdges(samples);
       return reports;
     } catch (e) {
       this.lastError = String(e);

@@ -5,9 +5,11 @@
  *   node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
  *   node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
  *   node dist/research.mjs train    [--data ./data] [--days 14] [--adopt]
+ *   node dist/research.mjs edges    [--data ./data] [--days 30] [--placebo 5]   (searches for rules that made money on their own)
  *   node dist/research.mjs sim      [--hours 6] [--out ./simdata] [--predictability 0.7] [--seed 1]
  *   node dist/research.mjs selftest            (proves the learning pipeline on known worlds)
  */
+import { findEdges } from "../core/edges.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { trainAndSelect } from "../core/learn.js";
@@ -122,6 +124,21 @@ async function main() {
       }
       store.close();
       console.log(`wrote ${n} simulated events to ${out}/record (SYNTHETIC — for testing the pipeline only)`);
+      break;
+    }
+    case "edges": {
+      const store = new DataStore(data, silentLogger);
+      const samples = store.loadSamples(Number(a.days ?? 30));
+      store.close();
+      const r = findEdges(samples, { placeboRuns: Number(a.placebo ?? 5) });
+      console.log(r.note);
+      if (r.status === "ok") {
+        console.log(`\n${r.samples.toLocaleString("en-US")} entry outcomes over ${r.hours.toFixed(1)} h: searched the first ${r.discoveryHours.toFixed(1)} h, checked on the last ${r.holdoutHours.toFixed(1)} h`);
+        console.log(`${r.tested.toLocaleString("en-US")} rules scored, ${r.candidates} re-tested, ${r.survivors.length} held up. Placebo (shuffled data): ${r.placebo.avgSurvivors.toFixed(2)} per run, max ${r.placebo.maxSurvivors}\n`);
+        for (const s of r.survivors)
+          console.log(`✔ ${s.text}\n   newest data ${pct(s.holdout.mean)} per trade (worst case ${pct(s.holdout.lo)}, ${s.holdout.n} trades, ${pct(s.holdout.winRate)} winners) · search data ${pct(s.discovery.mean)} · every coin at ${s.level}: ${pct(s.baseline)} · ${s.tradesPerDay.toFixed(0)} coins/day`);
+        for (const s of r.failed) console.log(`✘ ${s.text}: ${pct(s.discovery.mean)} in the search data, ${pct(s.holdout.mean)} on the newest data`);
+      }
       break;
     }
     case "selftest": {

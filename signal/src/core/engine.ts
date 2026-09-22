@@ -15,7 +15,7 @@ import { type RawFeatures, MarketPulse, extractFeatures, featureVector } from ".
 import { Funnel, type SignalRecord } from "./funnel.js";
 import { type ModelSpec, type ScoreResult, type StageKey, priorModel, scoreToken, validateModel } from "./model.js";
 import { NarrativeIndex } from "./narratives.js";
-import { ENTRY_LEVELS, OutcomeTracker, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, type EntryFacts, OutcomeTracker, type Sample } from "./outcomes.js";
 import {
   type CostModel,
   DEFAULT_COSTS,
@@ -210,6 +210,22 @@ interface ScoreEntry {
 }
 
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+
+/** What the bot's filters would see at this moment (same fields, same units). */
+function entryFacts(t: TokenState, f: RawFeatures): EntryFacts {
+  const r = (v: number, d = 4) => (Number.isFinite(v) ? Math.round(v * 10 ** d) / 10 ** d : 0);
+  return {
+    mcap: r(t.mcapSol, 2),
+    age: Math.round(f.ageSec),
+    buyers: f.uniqTotal,
+    top10: r(f.top10),
+    bundle: r(f.bundleShare),
+    devShare: r(f.devShare),
+    devSold: r(f.devSold),
+    socials: f.socials,
+    launches24h: f.creatorLaunches24h,
+  };
+}
 
 export class Engine {
   readonly cfg: EngineConfig;
@@ -647,7 +663,7 @@ export class Engine {
       const bit = 1 << i;
       if (e.reached & bit || e.held[i]! < need) continue;
       e.reached |= bit;
-      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom);
+      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
     }
   }
 
@@ -679,7 +695,7 @@ export class Engine {
       why: e.res.contributions.slice(0, 4),
     };
     const custom = { tp: s.tpPct, sl: s.slPct };
-    this.outcomes.add(t, "signal", `sig${Math.floor(now / 1000)}`, now, score, e.res.p, e.x, custom);
+    this.outcomes.add(t, "signal", `sig${Math.floor(now / 1000)}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
     const blocked = this.entryBlock(t, e);
     if (blocked) {
       rec.decision = "blocked";

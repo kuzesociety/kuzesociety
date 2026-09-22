@@ -214,6 +214,7 @@ export async function main() {
     sampleDays: config.sampleDays,
     onAdopt: (v) => telegram?.send(`🧠 New scoring model adopted: ${v}`),
     onTune: (m) => telegram?.send(m),
+    onEdges: (m) => telegram?.send(m),
   });
   learner.start();
 

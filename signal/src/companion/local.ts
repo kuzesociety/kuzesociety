@@ -4,6 +4,7 @@
  * agent simulator standing in for the Solana feeds. Nothing leaves the browser.
  */
 import { type ApiContext, accountSummary, handleApi } from "../core/api";
+import { type EdgeReport, findEdgesAsync } from "../core/edges";
 import { Engine, type FeedHealth } from "../core/engine";
 import { trainAndSelect } from "../core/learn";
 import { priorModel } from "../core/model";
@@ -86,6 +87,7 @@ export function createLocalEngine(o: DemoOptions) {
   let lastAdvance = 0;
   let caughtUp = warmMs === 0;
   let learner = { lastRun: 0, running: false, lastError: "", reports: [] as unknown[] };
+  let edges: EdgeReport | null = null;
 
   /** Releases simulated events up to `until`, spending at most `budgetMs` of main-thread time. */
   function pump(until: number, budgetMs: number): boolean {
@@ -183,6 +185,8 @@ export function createLocalEngine(o: DemoOptions) {
       }
     },
     logs: () => lines.toArray().slice(-200).reverse(),
+    edges: () => edges,
+    edgesRun: async () => (edges = await findEdgesAsync(engine.samples.toArray(), { placeboRuns: 3 })),
   };
 
   const transport: Transport = {

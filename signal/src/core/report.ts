@@ -72,13 +72,18 @@ function nearestGrid(tp: number, sl: number): number {
   return best;
 }
 
+/** The sample's exit grid when it uses the current layout (older layouts are not comparable). */
+export function gridOf(s: Sample): number[] | undefined {
+  return s.grid?.length === GRID.length ? s.grid : undefined;
+}
+
 /** Return of a sample for the (tp, sl) combo: exact when recorded, else from the grid. */
 export function sampleReturn(s: Sample, tp: number, sl: number): { ret: number; exact: boolean } {
   if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
-  const gi = GRID.findIndex((g) => g.tp === tp && g.sl === sl);
-  if (gi >= 0 && Number.isFinite(s.grid?.[gi])) return { ret: s.grid[gi]!, exact: true };
-  const ni = nearestGrid(tp, sl);
-  return { ret: s.grid?.[ni] ?? s.ret, exact: false };
+  const g = gridOf(s);
+  const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
+  if (g && gi >= 0 && Number.isFinite(g[gi])) return { ret: g[gi]!, exact: true };
+  return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
 }
 
 function statsOf(rets: number[]) {
@@ -166,7 +171,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid: GridCell[] = GRID.map((g, i) => {
-    const rets = pool.map((s) => s.grid?.[i]).filter((x): x is number => Number.isFinite(x));
+    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x): x is number => Number.isFinite(x));
     const st = statsOf(rets);
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
@@ -211,7 +216,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     const rows = atLevel(min);
     if (rows.length < 150) continue;
     GRID.forEach((g, i) => {
-      const val = (s: Sample) => s.grid?.[i];
+      const val = (s: Sample) => gridOf(s)?.[i];
       const all = rows.map(val).filter((x): x is number => Number.isFinite(x));
       if (all.length < 150) return;
       const lo = zBound(all, 3.5);

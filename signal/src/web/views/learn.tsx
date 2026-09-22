@@ -1,4 +1,6 @@
 import { useEffect, useState } from "preact/hooks";
+import { CONDITIONS, type EdgeFound, type EdgeReport, HOLDS_MIN } from "../../core/edges";
+import { ENTRY_LEVELS, GRID, GRID_SL, GRID_TP } from "../../core/outcomes";
 import type { LearnReport } from "../../core/report";
 import { pct } from "../format";
 import { api, toast, useApp } from "../store";
@@ -46,6 +48,8 @@ export function Learn() {
           settings ≈ <b>{pct(r.breakEven)}</b> (fees, delay and stop slippage included).
         </p>
       </div>
+
+      <EdgeFinder mode={settings?.mode ?? "paper"} />
 
       {r.suggestion && (
         <div class="card" style="margin-top:12px;border-color:var(--flare)">
@@ -260,6 +264,96 @@ export function Learn() {
           </p>
         </div>
       </div>
+    </div>
+  );
+}
+
+const hrs = (h: number) => (h >= 48 ? `${(h / 24).toFixed(1)} days` : `${h.toFixed(0)} h`);
+
+/** Rules the bot found on its own, and how they did on newer data the search never saw. */
+function EdgeFinder({ mode }: { mode: string }) {
+  const [r, setR] = useState<(EdgeReport & { running?: boolean }) | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    api<{ report: EdgeReport | null }>("/api/edges")
+      .then((x) => setR(x.report))
+      .catch(() => {});
+  }, []);
+  const run = async () => {
+    setBusy(true);
+    try {
+      setR((await api<{ report: EdgeReport | null }>("/api/edges/run", {})).report);
+    } catch (e) {
+      toast(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const apply = async (s: EdgeFound) => {
+    try {
+      await api("/api/settings", s.settings);
+      toast("Paper-trading this rule — your score, exits and filters were replaced");
+    } catch (e) {
+      toast(String((e as Error).message));
+    }
+  };
+  return (
+    <div class="card" style="margin-top:12px">
+      <div class="row" style="align-items:flex-start">
+        <div style="flex:1">
+          <h2 style="margin-bottom:4px">Edge finder</h2>
+          <div class="muted" style="font-size:13px">
+            Looks for profitable rules on its own: {ENTRY_LEVELS.length} score levels × {CONDITIONS.length} coin conditions × {GRID.length * HOLDS_MIN.length} exits (take
+            profit {GRID_TP[0]}–{GRID_TP[GRID_TP.length - 1]}%, stop {GRID_SL[0]}–{GRID_SL[GRID_SL.length - 1]}%, optional time limit). The best are re-checked on newer data
+            the search never saw.
+          </div>
+        </div>
+        <button class="btn sm" disabled={busy || r?.running} onClick={run}>
+          {busy || r?.running ? "Searching…" : "Search now"}
+        </button>
+      </div>
+      {!r && <p class="faint note">Runs after every learning cycle, every few hours. Needs about a day of recorded market first.</p>}
+      {r?.status === "not_enough_data" && <p class="faint note">{r.note}</p>}
+      {r?.status === "ok" && (
+        <>
+          <p class="edge-meta">
+            Scored <b class="num">{r.tested.toLocaleString("en-US")}</b> rules on the first {hrs(r.discoveryHours)}, re-checked the best {r.candidates} on the last{" "}
+            {hrs(r.holdoutHours)}: <b>{r.survivors.length} held up</b>. On shuffled data, where no rule can work, the same search "found" {r.placebo.avgSurvivors.toFixed(1)} per
+            run — that is its rate of fooling itself.
+          </p>
+          {r.survivors.map((s) => (
+            <div class="edge" key={s.text}>
+              <div class="edge-rule">{s.text}</div>
+              <div class="num" style="font-size:13px">
+                <b class={s.holdout.mean > 0 ? "good" : "bad"}>{pct(s.holdout.mean, 1, true)}</b> per trade on the newest data · worst case {pct(s.holdout.lo, 1, true)} ·{" "}
+                {s.holdout.n} trades · {pct(s.holdout.winRate)} winners · ~{s.tradesPerDay.toFixed(0)} coins/day
+              </div>
+              <div class="faint num" style="font-size:12.5px">
+                In the search data {pct(s.discovery.mean, 1, true)} · every coin reaching {s.level}, same exit: {pct(s.baseline, 1, true)}
+              </div>
+              {mode === "paper" && (
+                <button class="btn sm primary" style="justify-self:start;margin-top:4px" onClick={() => apply(s)}>
+                  Paper-trade this rule
+                </button>
+              )}
+            </div>
+          ))}
+          {!r.survivors.length && <p class="note">{r.note}</p>}
+          {r.failed.length > 0 && (
+            <details class="more">
+              <summary>Looked good, then failed on newer data ({r.failed.length})</summary>
+              {r.failed.map((s) => (
+                <div class="edge" key={s.text}>
+                  <div>{s.text}</div>
+                  <div class="faint num" style="font-size:12.5px">
+                    {pct(s.discovery.mean, 1, true)} in the search data → {pct(s.holdout.mean, 1, true)} on the newest data ({s.holdout.n} trades)
+                  </div>
+                </div>
+              ))}
+            </details>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -91,7 +91,28 @@ These are simulated markets built to test the machinery. They say the entry logi
 
 **5. Snapshots flatter thresholds.** A snapshot of a coin that happens to be above a score is kinder than buying the moment it gets there. The Learn tab therefore compares thresholds with **entry outcomes**: for every coin, the first time it reached each of 50, 55 … 95 and held, followed as if bought. Snapshot tables are only shown until 200 entry outcomes exist.
 
-## 6. Method
+## 6. Finding edges independently
+
+The user's plan (score 75, 2×, −50%) is one rule among many. The **edge finder** (`src/core/edges.ts`, Learn tab, `node dist/research.mjs edges`) searches for rules on its own, using only rules the bot can execute:
+
+- **Entry:** the first time a coin reaches one of 10 score levels (50 … 95) and holds, followed exactly the way the bot buys.
+- **Which coins:** any, or one of 21 conditions that map to existing settings: bonding curve or graduated, market cap bands (≤40/80/150 SOL, ≥80/150/300 SOL), age (≤1/3/10 min, ≥3/10 min), ≤10% bundled, top 10 holders ≤30%, 30+/100+ buyers, socials, dev holds ≤5%, dev hasn't sold, dev's only launch today.
+- **Exit:** 48 take-profit × stop-loss pairs (25–500% × 10–70%, reward:risk from 0.36 to 50) × 4 time limits (none, 10, 30, 60 minutes). Each would-be trade records when every pair triggered and its value at 5, 10, 30, 60 and 120 minutes, so time limits are evaluated from the same trades.
+
+That is about 42,000 rules. Searching that many guarantees some look great by luck, so:
+
+1. **Discovery.** Rules are ranked on the older two thirds of the data only, by a lower confidence bound; the best exit per (score, condition) pair competes, so the finalists are distinct.
+2. **Holdout.** The best 20 are re-tested on the newest third, which the search never saw. A rule survives only if its average net return stays positive at a bound corrected for testing 20 at once (z ≈ 2.8), with at least 40 trades and 10 winners (so a rule cannot rest on a few lucky +500% hits).
+3. **Placebo.** The whole search runs again on shuffled, centred outcomes where no rule can have an edge. Measured over 40 shuffled runs on synthetic data, it "found" something 3 times (7.5% per search), in line with the 5% it is designed for.
+4. **Planted-edge test.** On synthetic data with one real edge hidden among losing rules (graduated coins, score 70+, +50%/−20%), it finds exactly that rule; on pure noise it finds nothing (`test/edges.test.ts`).
+
+Only complete outcomes are used (entries older than the 6-hour follow-up), so the newest data is not biased toward quick exits. The search needs at least a day of recorded market and 1,000 finished entries before it answers, runs after every learning cycle, and never changes settings on its own: **Paper-trade this rule** is a button.
+
+What it cannot do: find an edge that is not in the data, or guarantee that one found in the past continues. pump.fun is adversarial and changes; the search reruns every few hours, and the go-live check keeps judging whatever rule is live.
+
+<!-- EDGE_SIM -->
+
+## 7. Method
 
 - **Outcome tracking.** Every coin that passes basic sanity is followed from fixed checkpoints (20 s, 45 s, 90 s, 3, 6 and 12 min on the curve; 25/50/75% curve progress; 1, 5, 15 and 60 min after graduation), at every signal, and at its first entry moment for each score level from 50 to 95, as if bought with the configured size and a landing delay. Each follow-up resolves on target, stop, dead coin or a 6-hour horizon, for the user's TP/SL and for a 5 × 4 grid of alternatives.
 - **Score scale.** `score = 50 + 12.5 · log2(odds / reference odds)`: 75 is 4× the odds of an average coin at that moment, and each +12.5 doubles them again. The shipped prior is rescaled to the live population during the first minutes; entries wait for that (`warming_up`).
@@ -99,7 +120,7 @@ These are simulated markets built to test the machinery. They say the entry logi
 - **Go-live check.** Passes only with ≥150 resolved signals at the user's exact settings **and** a 95% lower confidence bound on the average net return above +2% per trade.
 - **Auto-tune (optional, paper only).** Searches 10 thresholds × 20 exit pairs. A suggestion must clear a multiple-comparison-corrected bound (z = 3.5) and be positive separately in the older and the newer half of the data.
 
-## 7. Sources
+## 8. Sources
 
 - pump.fun fees: https://pump.fun/docs/fees
 - pump.fun program docs and IDLs: https://github.com/pump-fun/pump-public-docs

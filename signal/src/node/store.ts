@@ -258,6 +258,22 @@ export class DataStore {
     }
   }
 
+  // ---- edge finder -----------------------------------------------------------------
+
+  saveEdges(report: unknown) {
+    writeFileAtomic(join(this.dir, "edges.json"), JSON.stringify(report));
+  }
+
+  loadEdges(): unknown {
+    const p = join(this.dir, "edges.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   // ---- wallets ---------------------------------------------------------------------
 
   saveWallets(snap: unknown) {

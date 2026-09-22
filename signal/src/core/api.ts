@@ -14,6 +14,9 @@ export interface ApiContext {
   learnRun: () => Promise<unknown[]>;
   live?: { status(): unknown; resume(): void; allowed(): boolean };
   logs: () => unknown[];
+  /** last edge-finder report (null before the first run) */
+  edges: () => unknown;
+  edgesRun: () => Promise<unknown>;
   onSettingsChanged?: () => void;
 }
 
@@ -74,6 +77,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         });
       case "/api/logs":
         return ok({ lines: ctx.logs() });
+      case "/api/edges":
+        return ok({ report: ctx.edges() ?? null });
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));
@@ -99,6 +104,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ killed: e.killed });
       case "/api/learn/run":
         return ok({ reports: await ctx.learnRun() });
+      case "/api/edges/run":
+        return ok({ report: await ctx.edgesRun() });
       case "/api/live/resume":
         ctx.live?.resume();
         return ok({ live: ctx.live?.status() ?? null });

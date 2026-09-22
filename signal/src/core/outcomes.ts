@@ -14,9 +14,27 @@ import { type CostModel, quoteBuy } from "./positions.js";
 import type { TokenState } from "./token.js";
 import { newId } from "./util.js";
 
-export const GRID_TP = [25, 50, 100, 200, 400] as const;
-export const GRID_SL = [20, 35, 50, 70] as const;
+/** Exit alternatives every would-be trade is followed for (take profit × stop loss, %). */
+export const GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500] as const;
+export const GRID_SL = [10, 20, 30, 40, 50, 70] as const;
 export const GRID: ReadonlyArray<{ tp: number; sl: number }> = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
+/** Layout of `grid`/`gridT` in stored samples (v1 was 5 × 4 and had no timing). */
+export const GRID_VERSION = 2;
+/** Minutes after entry at which a would-be position's value is recorded, for time exits. */
+export const PATH_MIN = [5, 10, 30, 60, 120] as const;
+
+/** Conditions at the moment of the signal, in the units the bot's filters use. */
+export interface EntryFacts {
+  mcap: number;
+  age: number;
+  buyers: number;
+  top10: number;
+  bundle: number;
+  devShare: number;
+  devSold: number;
+  socials: number;
+  launches24h: number;
+}
 
 /** Score levels at which every coin's first crossing is followed as a would-be entry. */
 export const ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
@@ -51,6 +69,14 @@ export interface Sample {
   exit: "tp" | "sl" | "timeout" | "dead";
   /** net returns for GRID combos, same order as GRID */
   grid: number[];
+  /** GRID layout version; samples from another layout are not compared */
+  gv?: number;
+  /** seconds from entry until each GRID combo exited (target/stop hit, or the coin died/timed out) */
+  gridT?: number[];
+  /** net return if sold at each PATH_MIN horizon; null once every combo had exited */
+  path?: (number | null)[];
+  /** entry conditions (signal and entry samples) */
+  f?: EntryFacts;
   maxMult: number;
   minMult: number;
   secToMax: number;
@@ -62,6 +88,8 @@ interface Combo {
   sl: number;
   state: 0 | 1 | 2; // 0 open, 1 exit pending (latency), 2 resolved
   exitAt: number;
+  /** seconds from entry to the exit trigger */
+  t: number;
   kind: "tp" | "sl" | "timeout" | "dead";
   ret: number;
 }
@@ -87,6 +115,9 @@ interface Hypo {
   maxAt: number;
   combos: Combo[]; // [custom, ...GRID]
   open: number;
+  path: (number | null)[];
+  pathNext: number;
+  f?: EntryFacts;
 }
 
 export interface OutcomeOptions {
@@ -96,6 +127,8 @@ export interface OutcomeOptions {
   maxOpen: number;
   costs: CostModel;
 }
+
+const r4 = (v: number) => Math.round(v * 1e4) / 1e4;
 
 export class OutcomeTracker {
   private byMint = new Map<string, Hypo[]>();
@@ -129,13 +162,14 @@ export class OutcomeTracker {
     p: number,
     x: number[],
     custom: { tp: number; sl: number },
+    facts?: EntryFacts,
   ): boolean {
     if (this.openCount >= this.opts.maxOpen) {
       this.dropped++;
       return false;
     }
-    const combos: Combo[] = [{ tp: custom.tp, sl: custom.sl, state: 0, exitAt: 0, kind: "timeout", ret: 0 }];
-    for (const g of GRID) combos.push({ tp: g.tp, sl: g.sl, state: 0, exitAt: 0, kind: "timeout", ret: 0 });
+    const combos: Combo[] = [{ tp: custom.tp, sl: custom.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 }];
+    for (const g of GRID) combos.push({ tp: g.tp, sl: g.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 });
     const h: Hypo = {
       id: newId("h"),
       kind,
@@ -157,6 +191,9 @@ export class OutcomeTracker {
       maxAt: now,
       combos,
       open: combos.length,
+      path: PATH_MIN.map(() => null),
+      pathNext: 0,
+      f: facts,
     };
     let list = this.byMint.get(t.mint);
     if (!list) {
@@ -192,6 +229,11 @@ export class OutcomeTracker {
     return h.a * mcap - h.b;
   }
 
+  /** Records the value at each time-exit horizon that has passed. */
+  private capturePath(h: Hypo, now: number, m: number) {
+    while (h.pathNext < PATH_MIN.length && now - h.ts >= PATH_MIN[h.pathNext]! * 60_000) h.path[h.pathNext++] = Math.max(-1, m - 1);
+  }
+
   /** Price update for a token (call after every applied trade / quote). */
   onPrice(t: TokenState, now: number) {
     const list = this.byMint.get(t.mint);
@@ -209,6 +251,7 @@ export class OutcomeTracker {
         h.maxAt = now;
       }
       if (m < h.minMult) h.minMult = m;
+      this.capturePath(h, now, m);
       for (const c of h.combos) {
         if (c.state === 2) continue;
         if (c.state === 1) {
@@ -218,13 +261,14 @@ export class OutcomeTracker {
         if (m >= 1 + c.tp / 100) this.trigger(h, c, "tp", now, m);
         else if (m <= 1 - c.sl / 100) this.trigger(h, c, "sl", now, m);
       }
-      if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout");
+      if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
       else if (h.open === 0) this.emit(h, now);
     }
   }
 
   private trigger(h: Hypo, c: Combo, kind: "tp" | "sl", now: number, m: number) {
     c.kind = kind;
+    c.t = (now - h.ts) / 1000;
     if (this.opts.latencyMs <= 0) this.resolveCombo(h, c, m);
     else {
       c.state = 1;
@@ -239,10 +283,15 @@ export class OutcomeTracker {
     h.open--;
   }
 
-  private finish(h: Hypo, m: number, kind: "timeout" | "dead") {
+  private finish(h: Hypo, m: number, kind: "timeout" | "dead", now: number) {
+    const end = Math.min(now, h.ts + this.opts.horizonMs);
+    this.capturePath(h, end, m);
     for (const c of h.combos) {
       if (c.state === 2) continue;
-      if (c.state === 0) c.kind = kind;
+      if (c.state === 0) {
+        c.kind = kind;
+        c.t = (end - h.ts) / 1000;
+      }
       this.resolveCombo(h, c, m);
     }
     this.emit(h, h.ts + this.opts.horizonMs);
@@ -270,7 +319,11 @@ export class OutcomeTracker {
       y: c0.kind === "tp" ? 1 : 0,
       ret: c0.ret,
       exit: c0.kind,
-      grid: h.combos.slice(1).map((c) => c.ret),
+      grid: h.combos.slice(1).map((c) => r4(c.ret)),
+      gv: GRID_VERSION,
+      gridT: h.combos.slice(1).map((c) => Math.round(Math.max(0, c.t) * 10) / 10),
+      path: h.path.map((v) => (v === null ? null : r4(v))),
+      f: h.f,
       maxMult: h.maxMult,
       minMult: h.minMult,
       secToMax: Math.max(0, (h.maxAt - h.ts) / 1000),
@@ -298,9 +351,8 @@ export class OutcomeTracker {
         this.remove(h);
         continue;
       }
-      this.finish(h, this.mult(h, t.mcapSol), "dead");
+      this.finish(h, this.mult(h, t.mcapSol), "dead", now);
     }
-    void now;
   }
 
   /** Periodic sweep: time out hypotheticals of tokens that stopped trading. */
@@ -314,10 +366,11 @@ export class OutcomeTracker {
           continue;
         }
         const m = t ? this.mult(h, t.mcapSol) : h.minMult;
+        this.capturePath(h, now, m);
         // exits pending past their landing time resolve at the latest value
         for (const c of h.combos) if (c.state === 1 && now >= c.exitAt) this.resolveCombo(h, c, m);
         if (h.open === 0) this.emit(h, now);
-        else if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout");
+        else if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
       }
     }
   }
