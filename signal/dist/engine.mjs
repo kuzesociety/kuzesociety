@@ -7884,7 +7884,7 @@ var ReconnectingWS = class {
     this.h.status = s;
     if (note !== void 0) this.h.note = note;
     try {
-      this.o.onHealth?.({ ...this.h });
+      this.o.onHealth?.(this.h);
     } catch {
     }
   }

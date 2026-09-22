@@ -4,7 +4,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { base58Decode } from "../src/core/codec.js";
 import { encodeAmmSwap, encodeCreate, encodeTrade, programDataLine } from "../src/core/encode.js";
 import type { DecodedEvent } from "../src/core/decode.js";
-import type { FeedHealth } from "../src/core/engine.js";
+import { Engine, type FeedHealth } from "../src/core/engine.js";
 import { PUMP_AMM_PROGRAM, PUMP_PROGRAM } from "../src/core/types.js";
 import { silentLogger } from "../src/core/util.js";
 import { parsePumpPortal } from "../src/node/feeds/pumpportal.js";
@@ -55,7 +55,9 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     });
     const port = (wss.address() as AddressInfo).port;
     const events: DecodedEvent[] = [];
-    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: (e) => events.push(e), onHealth: () => {} });
+    // wired to the engine the way the server wires it
+    const engine = new Engine({ now: Date.now() });
+    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: (e) => events.push(e), onHealth: (h) => engine.setFeedHealth(h) });
     feed.start();
     await waitFor(() => subs.length === 2);
     expect(subs).toEqual([PUMP_PROGRAM, PUMP_AMM_PROGRAM]);
@@ -72,6 +74,16 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     expect(events.map((e) => e.k)).toEqual(["create", "trade", "ammSwap"]);
     expect(feed.failedTx).toBe(1);
     expect((events[0] as { slot?: number }).slot).toBe(123);
+    // messages arrive without a status change: the engine must still see them, or it calls the
+    // feed down while trades are flowing and refuses to trade
+    engine.advance(Date.now());
+    const seen = engine.health().feeds.find((f) => f.name === "solana-rpc")!;
+    expect(seen.status).toBe("open");
+    expect(seen.msgs).toBeGreaterThanOrEqual(6);
+    expect(seen.lastMsgAt).toBeGreaterThan(0);
+    expect(engine.feedDown()).toBe(false);
+    engine.advance(Date.now() + 60_000); // …and down again once it really goes quiet
+    expect(engine.feedDown()).toBe(true);
     feed.stop();
   });
 
@@ -85,12 +97,12 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
       if (connections === 1) setTimeout(() => ws.terminate(), 100);
     });
     const port = (wss.address() as AddressInfo).port;
-    const health: FeedHealth[] = [];
-    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: () => {}, onHealth: (h) => health.push(h) });
+    const statuses: FeedHealth["status"][] = [];
+    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: () => {}, onHealth: (h) => statuses.push(h.status) });
     feed.start();
     await waitFor(() => connections >= 2 && subs >= 4, 10_000);
     expect(feed.health.reconnects).toBeGreaterThanOrEqual(1);
-    expect(health.some((h) => h.status === "down")).toBe(true);
+    expect(statuses).toContain("down");
     feed.stop();
   });
 });

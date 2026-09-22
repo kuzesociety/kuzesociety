@@ -78,7 +78,9 @@ export class ReconnectingWS {
     this.h.status = s;
     if (note !== undefined) this.h.note = note;
     try {
-      this.o.onHealth?.({ ...this.h });
+      // the live record, not a copy: message counts and the last-message time change on every
+      // message without a status change, and the engine judges "feed down" by them
+      this.o.onHealth?.(this.h);
     } catch {
       /* ignore */
     }

@@ -177,7 +177,10 @@ describe("built server end-to-end", () => {
       return s.health.events > 3000 && s.health.scored > 10 ? s : null;
     }, 45_000);
     expect(st.health.errors).toBe(0);
-    expect(st.health.feeds.find((f: { name: string }) => f.name === "solana-rpc").status).toBe("open");
+    const rpcFeed = st.health.feeds.find((f: { name: string }) => f.name === "solana-rpc");
+    expect(rpcFeed.status).toBe("open");
+    expect(rpcFeed.msgs).toBeGreaterThan(100);
+    expect(st.health.feedDown).toBe(false); // the "Live data feed is down" banner stays off while data flows
     const radar = await (await api("/api/radar?limit=10")).json();
     expect(radar.rows.length).toBeGreaterThan(0);
     const detail = await (await api(`/api/token/${radar.rows[0].mint}`)).json();
