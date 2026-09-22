@@ -99,7 +99,7 @@ export interface TruthRow {
 const WORDS = [
   "pepe", "doge", "cat", "frog", "moon", "chad", "wojak", "bonk", "milady", "jeet", "sigma", "based", "goat", "pnut",
   "hawk", "tuah", "jean", "phil", "dance", "grok", "neiro", "shib", "floki", "kitty", "bull", "bear", "pump", "wif",
-  "hat", "gigachad", "retard", "fartcoin", "ai", "agent", "trump", "elon", "zerebro", "luna", "banana", "monkey", "ape",
+  "hat", "gigachad", "wagmi", "fartcoin", "ai", "agent", "trump", "elon", "zerebro", "luna", "banana", "monkey", "ape",
   "penguin", "pengu", "turbo", "brett", "andy", "landwolf", "mog", "popcat", "michi", "mew", "slerf", "ponke", "giga",
   "spx", "ansem", "orca", "fish", "whale", "dragon", "tiger", "panda", "duck", "chicken", "hamster", "capybara", "otter",
 ];

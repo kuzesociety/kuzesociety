@@ -61,3 +61,22 @@ describe("funnel", () => {
     expect(s.maxScore).toBe(82);
   });
 });
+
+describe("entry outcomes", () => {
+  it("rank thresholds by what happened after coins first reached them, once there are enough", () => {
+    const cps = makeSamples(3000, (score) => (score >= 80 ? 0.5 : -0.2), 7);
+    const base = makeSamples(400, () => -0.3, 9);
+    // snapshots above 80 look great, but buying the moment coins reach 80 loses
+    const entries = base.map((s, i) => ({ ...s, id: `e${i}`, kind: "entry" as const, tag: `x${[60, 70, 80, 90][i % 4]}`, ret: -0.3, grid: s.grid.map(() => -0.3) }));
+    const snapOnly = buildReport(cps, { ...DEFAULT_SETTINGS, minScore: 80 }, priorModel(), [], Date.now());
+    expect(snapOnly.thresholdSource).toBe("checkpoints");
+    expect(snapOnly.thresholds.find((t) => t.min === 80)!.avgRet).toBeGreaterThan(0);
+    const withEntries = buildReport([...cps, ...entries], { ...DEFAULT_SETTINGS, minScore: 80 }, priorModel(), [], Date.now());
+    expect(withEntries.thresholdSource).toBe("entries");
+    const row = withEntries.thresholds.find((t) => t.min === 80)!;
+    expect(row.n).toBe(100);
+    expect(row.avgRet).toBeLessThan(0);
+    expect(withEntries.gridSource).toBe("entries");
+    expect(withEntries.suggestion).toBeNull();
+  });
+});

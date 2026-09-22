@@ -104,7 +104,9 @@ export const DEFAULT_SETTINGS: Settings = {
   exitSlippagePct: 25,
   priorityFeeSol: 0.0005,
   platformFeePct: 0.5,
-  confirmTicks: 1,
+  // hold ~5 s (one evaluation per second while the coin trades): in simulation, buying on the
+  // first tick above the line caught more one-off spikes and did 2–6 points worse per trade
+  confirmTicks: 5,
   retryWindowSec: 20,
   reentry: false,
   paperLatencyMs: 1500,

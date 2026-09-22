@@ -18,9 +18,20 @@ export const GRID_TP = [25, 50, 100, 200, 400] as const;
 export const GRID_SL = [20, 35, 50, 70] as const;
 export const GRID: ReadonlyArray<{ tp: number; sl: number }> = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
 
+/** Score levels at which every coin's first crossing is followed as a would-be entry. */
+export const ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
+
+/**
+ * checkpoint: a snapshot at a fixed age or curve progress (what the model trains on)
+ * signal:     the moment the coin crossed the user's own threshold (exact settings)
+ * entry:      the first moment the coin reached one of ENTRY_LEVELS (tag `x75` …) — how the
+ *             bot would have entered at that threshold, used to compare thresholds honestly
+ */
+export type SampleKind = "checkpoint" | "signal" | "entry";
+
 export interface Sample {
   id: string;
-  kind: "checkpoint" | "signal";
+  kind: SampleKind;
   tag: string;
   mint: string;
   symbol: string;
@@ -57,7 +68,7 @@ interface Combo {
 
 interface Hypo {
   id: string;
-  kind: "checkpoint" | "signal";
+  kind: SampleKind;
   tag: string;
   mint: string;
   symbol: string;
@@ -111,7 +122,7 @@ export class OutcomeTracker {
 
   add(
     t: TokenState,
-    kind: "checkpoint" | "signal",
+    kind: SampleKind,
     tag: string,
     now: number,
     score: number,

@@ -10,7 +10,7 @@ The bot runs on a **server** (a VPS, a cloud container, or your PC). The dashboa
 
 ## 1. Run it
 
-### Option A: cloud, from your phone (Railway, about $5/month)
+### Option A: cloud, from your phone (Railway, about $5–10/month, usage-based)
 1. Open [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub repo** → pick `kuzesociety/kuzesociety`, branch `claude/signal-meme-trading-bot-o142hw`. Railway finds the `Dockerfile` automatically.
 2. **Variables**: add `DASHBOARD_TOKEN` (a long random password), plus `RPC_URL` / `RPC_WS_URL` (see step 2). Add the Telegram variables if you want alerts.
 3. **Volumes**: add a volume mounted at `/data`. Without it, trade history resets on every redeploy.
@@ -29,7 +29,10 @@ With Docker instead: `cd signal && cp .env.example .env && docker compose up -d`
 ### Option C: Windows PC / Windows VPS
 Install [Node.js LTS](https://nodejs.org), download the repo, then double-click **`signal/start-windows.bat`**. It builds on first run and restarts the bot automatically if it stops. Open `http://localhost:8787/?token=…`. The token is printed in the window.
 
-### Try it without any keys
+### Try it in your browser first
+`dist/companion.html` (built by `npm run build`) is a single page that runs the real engine on a simulated market, with a research tab and a setup wizard that generates your server settings. Nothing in it touches real coins or money, and it stops when the page closes.
+
+### Try the server without any keys
 Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated market with fake coins runs so you can explore the dashboard. The dashboard shows a banner that it is simulated.
 
 ## 2. Data feeds
@@ -56,6 +59,8 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 | Minimum score | Enter when a coin reaches this. The slider shows how many coins per hour recently reached each value |
 | **Score only** | Buy on the score alone and ignore all token filters. Account limits still apply: size, max open positions, daily loss, one entry per coin, trades per hour |
 | Take profit / Stop loss | Net of every cost: pool fees, 0.5% venue fee, priority fee, account rent. The stop is fixed from entry. In a crash the fill can land below it, and the bot always sells |
+| **One entry per coin** | The bot buys a coin only at its first entry moment: the first time the score reaches your number and holds. In simulation, buying the same coin again after a dip lost about 40% per trade. Turn on re-entry to allow it anyway |
+| Score must hold | Evaluations in a row (about one per second on an active coin) at or above your score before buying. Default 5: skips one-off spikes and costs a few seconds |
 | Entry slippage + retry window | A buy lands at the price when the transaction lands. If the price moved further than your slippage, the buy fails like on-chain and the bot retries while the score still holds |
 | Dead-coin exit | Sells a coin with no trades for N minutes so dead positions don't block new entries |
 | Trailing stop / take initials | Optional: after the target, sell the stake and let the rest ride with a trailing stop |
@@ -65,6 +70,9 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 Telegram commands: `/status /positions /pause /resume /score 75 /tp 100 /sl 50 /size 0.1 /scoreonly on|off /kill /unkill`.
 
 ## 5. Is it making money?
+
+Background, costs, break-even tables and simulator findings: [`docs/RESEARCH.md`](docs/RESEARCH.md).
+
 
 The **Learn** tab answers this with your own data:
 - outcome by score bucket (win rate and average net result with a 95% range)
@@ -101,8 +109,8 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 49 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, end-to-end
-npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html
+npm test          # 53 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
+npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
 
@@ -110,6 +118,7 @@ Layout:
 - `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning, positions, outcomes, funnel
 - `src/node`: server: feeds, websocket reconnects, storage, HTTP/SSE API, Telegram, live executor
 - `src/web`: dashboard (Preact, bundled into one HTML file)
+- `src/companion`: the demo page: the same dashboard and engine running on a simulated market in the browser, plus research and a setup wizard
 - `src/sim`: market simulator, for tests and demos only
 - `src/research`: replays, sweeps, self-test
 

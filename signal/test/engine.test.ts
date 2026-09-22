@@ -33,6 +33,31 @@ describe("entries", () => {
     expect(pos[0]!.cost).toBeLessThanOrEqual(0.1e9 + 1);
   });
 
+  it("buys a coin only at its first crossing, not late after switching on", () => {
+    const s = new Scenario({ scoreOnly: true, enabled: false });
+    s.create(MINT, DEV);
+    s.buy(MINT, DEV, 1);
+    s.crowd(MINT, 6, 0.4, 100);
+    s.advance(3000);
+    const first = s.engine.funnel.recent.toArray();
+    expect(first.length).toBe(1);
+    expect(first[0]!.reason).toBe("bot_off");
+    // switching on later does not buy the coin that already crossed…
+    s.engine.updateSettings({ enabled: true });
+    s.crowd(MINT, 4, 0.3, 100, 700);
+    s.advance(3000);
+    expect(s.positions()).toHaveLength(0);
+    expect(s.engine.funnel.recent.toArray()).toHaveLength(1);
+    expect(s.engine.radar({ limit: 5 })[0]!.spent).toBe(true);
+    // …but a new coin that crosses while trading is on is bought
+    const OTHER = key(77);
+    s.create(OTHER, key(78));
+    s.buy(OTHER, key(78), 1);
+    s.crowd(OTHER, 6, 0.4, 100, 300);
+    s.advance(3000);
+    expect(s.positions().map((p) => p.mint)).toEqual([OTHER]);
+  });
+
   it("fills at the price when the order LANDS (latency), not when it was decided", () => {
     const s = new Scenario({ scoreOnly: true, paperLatencyMs: 2000, slippagePct: 50 });
     s.create(MINT, DEV);
@@ -115,12 +140,13 @@ describe("exits (net of all costs)", () => {
   });
 
   it("stops out at −50% (and a gap fills below the stop, like real life)", () => {
-    // pump first with the bot off, then switch it on so it buys near the top
+    // pump first with the bot off, then switch it on with re-entry (which re-arms coins that
+    // already had their moment) so it buys near the top
     const s = new Scenario({ scoreOnly: true, paperLatencyMs: 500, enabled: false, tpPct: 100, slPct: 50 });
     s.create(MINT, DEV);
     s.buy(MINT, DEV, 1.5);
     s.crowd(MINT, 14, 1, 850);
-    s.engine.updateSettings({ enabled: true });
+    s.engine.updateSettings({ enabled: true, reentry: true });
     s.buy(MINT, key(870), 0.2, 300);
     s.advance(2000);
     const pos = s.positions()[0]!;

@@ -543,9 +543,9 @@ function scoreToken(model, f, explain = true) {
   }
   return { score, p, calibrated: !!stage.calib && model.source === "trained", stage: stageKey, contributions };
 }
-function breakEvenP(tpPct, slPct, roundTripCost = 0.035, slSlippage = 0.1) {
-  const win = tpPct / 100 - roundTripCost;
-  const loss = slPct / 100 + roundTripCost + slSlippage;
+function breakEvenP(tpPct, slPct, slSlippage = 0.1) {
+  const win = tpPct / 100;
+  const loss = slPct / 100 + slSlippage;
   return loss / (win + loss);
 }
 function validateModel(m) {
@@ -1098,6 +1098,7 @@ function decideExit(p, now, lastTradeAt = now) {
 var GRID_TP = [25, 50, 100, 200, 400];
 var GRID_SL = [20, 35, 50, 70];
 var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
+var ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
 var OutcomeTracker = class {
   constructor(opts, sink) {
     this.opts = opts;
@@ -1366,14 +1367,30 @@ function buildReport(samples, settings, model, closed, now) {
   }
   const sigAbove = signals.filter((s) => s.score >= settings.minScore);
   const signalStats = statsOf(sigAbove.map(retOf));
+  const entries = samples.filter((s) => s.kind === "entry");
+  const thresholdSource = entries.length >= 200 ? "entries" : "checkpoints";
+  const atLevel = (min) => thresholdSource === "entries" ? entries.filter((s) => s.tag === `x${min}`) : checkpoints.filter((s) => s.score >= min);
   const thresholds = [];
   for (let min = 50; min <= 95; min += 5) {
-    const rows = checkpoints.filter((s) => s.score >= min);
+    const rows = atLevel(min);
     const st = statsOf(rows.map(retOf));
     const tokens = new Set(rows.map((s) => s.mint)).size;
     thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
   }
-  const pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
+  const level = [...ENTRY_LEVELS].reverse().find((l) => l <= settings.minScore) ?? ENTRY_LEVELS[0];
+  const levelEntries = entries.filter((s) => s.tag === `x${level}`);
+  let gridSource;
+  let pool;
+  if (sigAbove.length >= 50) {
+    gridSource = "signals";
+    pool = sigAbove;
+  } else if (levelEntries.length >= 50) {
+    gridSource = "entries";
+    pool = levelEntries;
+  } else {
+    gridSource = "checkpoints";
+    pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
+  }
   const grid = GRID.map((g, i) => {
     const rets = pool.map((s) => s.grid?.[i]).filter((x) => Number.isFinite(x));
     const st = statsOf(rets);
@@ -1407,11 +1424,11 @@ function buildReport(samples, settings, model, closed, now) {
     const m = meanCI(xs);
     return Number.isFinite(m.lo) ? m.mean - (m.mean - m.lo) / 1.96 * z : -Infinity;
   };
-  const cur = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)].map(retOf);
+  const cur = pool.map(retOf);
   let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
   const mid = t0 + (t1 - t0) / 2;
   for (let min = 50; min <= 95; min += 5) {
-    const rows = checkpoints.filter((s) => s.score >= min);
+    const rows = atLevel(min);
     if (rows.length < 150) continue;
     GRID.forEach((g, i) => {
       const val = (s) => s.grid?.[i];
@@ -1431,7 +1448,7 @@ function buildReport(samples, settings, model, closed, now) {
         avgRet: m.mean,
         retLo: lo,
         n: all.length,
-        why: `score \u2265 ${min} with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
+        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
       };
     });
   }
@@ -1441,6 +1458,7 @@ function buildReport(samples, settings, model, closed, now) {
     samples: samples.length,
     checkpoints: checkpoints.length,
     signals: signals.length,
+    entries: entries.length,
     spanHours,
     settings: { tpPct: tp, slPct: sl, minScore: settings.minScore },
     combo: { tp, sl, exact: exactCombo },
@@ -1448,7 +1466,9 @@ function buildReport(samples, settings, model, closed, now) {
     buckets,
     signalStats,
     thresholds,
+    thresholdSource,
     grid,
+    gridSource,
     best,
     gate,
     paper: paperStats(closed),
@@ -1478,7 +1498,9 @@ var DEFAULT_SETTINGS = {
   exitSlippagePct: 25,
   priorityFeeSol: 5e-4,
   platformFeePct: 0.5,
-  confirmTicks: 1,
+  // hold ~5 s (one evaluation per second while the coin trades): in simulation, buying on the
+  // first tick above the line caught more one-off spikes and did 2–6 points worse per trade
+  confirmTicks: 5,
   retryWindowSec: 20,
   reentry: false,
   paperLatencyMs: 1500,
@@ -1646,7 +1668,7 @@ var WORDS = [
   "wif",
   "hat",
   "gigachad",
-  "retard",
+  "wagmi",
   "fartcoin",
   "ai",
   "agent",
@@ -2065,6 +2087,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -2076,7 +2099,28 @@ import { createGzip, gunzipSync, gzipSync } from "node:zlib";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
+import { StringDecoder } from "node:string_decoder";
 var day = (ts) => new Date(ts).toISOString().slice(0, 10);
+var SAMPLE_LIMITS = { checkpoints: 4e4, entries: 25e3 };
+function forEachLine(path, fn) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    const dec = new StringDecoder("utf8");
+    let rest = "";
+    for (; ; ) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
+      rest = lines.pop() ?? "";
+      for (const l of lines) if (l) fn(l);
+    }
+    rest += dec.end();
+    if (rest) fn(rest);
+  } finally {
+    closeSync(fd);
+  }
+}
 var hour = (ts) => new Date(ts).toISOString().slice(0, 13);
 function writeFileAtomic(path, data) {
   const tmp = `${path}.tmp-${process.pid}`;
@@ -2153,27 +2197,55 @@ var DataStore = class {
       this.log.error("journal/sample flush failed", { err: String(e) });
     }
   }
-  loadSamples(days, now = Date.now()) {
-    const out = [];
+  /**
+   * Labelled samples from the last `days`, oldest first. Files are read newest first and
+   * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
+   * so memory stays bounded however much has been recorded.
+   */
+  loadSamples(days, now = Date.now(), limits = SAMPLE_LIMITS) {
     const cutoff = day(now - days * 864e5);
     let files = [];
     try {
-      files = readdirSync(join(this.dir, "samples")).filter((f) => f.endsWith(".jsonl") && f.slice(0, 10) >= cutoff).sort();
+      files = readdirSync(join(this.dir, "samples")).filter((f) => f.endsWith(".jsonl") && f.slice(0, 10) >= cutoff).sort().reverse();
     } catch {
-      return out;
+      return [];
     }
+    const perFile = [];
+    let nCp = 0;
+    let nEn = 0;
     for (const f of files) {
-      const text = readFileSync(join(this.dir, "samples", f), "utf8");
-      for (const line of text.split("\n")) {
-        if (!line) continue;
-        try {
-          const s = JSON.parse(line);
-          if (Array.isArray(s.x) && (s.y === 0 || s.y === 1)) out.push(s);
-        } catch {
-        }
+      const roomCp = limits.checkpoints - nCp;
+      const roomEn = limits.entries - nEn;
+      if (roomCp <= 0 && roomEn <= 0) break;
+      const cps = [];
+      const ens = [];
+      try {
+        forEachLine(join(this.dir, "samples", f), (line) => {
+          const isCp = line.includes('"kind":"checkpoint"');
+          if (isCp ? roomCp <= 0 : roomEn <= 0) return;
+          let s;
+          try {
+            s = JSON.parse(line);
+          } catch {
+            return;
+          }
+          if (!Array.isArray(s.x) || s.y !== 0 && s.y !== 1) return;
+          const into = s.kind === "checkpoint" ? cps : ens;
+          const room = s.kind === "checkpoint" ? roomCp : roomEn;
+          into.push(s);
+          if (into.length >= room * 2) into.splice(0, into.length - room);
+        });
+      } catch (e) {
+        this.log.warn("could not read samples", { file: f, err: String(e) });
+        continue;
       }
+      if (cps.length > roomCp) cps.splice(0, cps.length - Math.max(0, roomCp));
+      if (ens.length > roomEn) ens.splice(0, ens.length - Math.max(0, roomEn));
+      nCp += cps.length;
+      nEn += ens.length;
+      perFile.push(cps.concat(ens));
     }
-    return out;
+    return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
   }
   // ---- market recorder (gzip, hourly files) ----------------------------------------
   record(ev, ts) {
@@ -3482,7 +3554,7 @@ var Engine = class {
     const x = featureVector(f);
     let e = this.scores.get(t.mint);
     if (!e) {
-      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0 };
+      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
       this.scores.set(t.mint, e);
     } else {
       e.res = res;
@@ -3516,13 +3588,36 @@ var Engine = class {
       for (const s of this.cfg.checkpointsAmmSec) if (since >= s && since < s * 1.6) add(`mig${s}`);
     }
   }
+  /**
+   * Follows the first entry at every level the way the bot would have bought it: the score
+   * reached the level and held it for the configured number of evaluations.
+   */
+  entryLevels(t, e, now) {
+    if (!this.modelReady()) return;
+    const score = e.res.score;
+    const need = this.settings.confirmTicks;
+    const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
+    for (let i = 0; i < ENTRY_LEVELS.length; i++) {
+      const level = ENTRY_LEVELS[i];
+      if (score < level) {
+        e.held[i] = 0;
+        continue;
+      }
+      if (e.held[i] < 255) e.held[i]++;
+      const bit = 1 << i;
+      if (e.reached & bit || e.held[i] < need) continue;
+      e.reached |= bit;
+      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom);
+    }
+  }
   signalLogic(t, e, now) {
+    this.entryLevels(t, e, now);
     const s = this.settings;
     const score = e.res.score;
     if (score >= s.minScore) e.above++;
     else {
       e.above = 0;
-      if (score < s.minScore - 5) e.armed = true;
+      if (s.reentry && score < s.minScore - 5) e.armed = true;
     }
     if (!e.armed || e.above < s.confirmTicks) return;
     e.armed = false;
@@ -3920,14 +4015,17 @@ var Engine = class {
   // Controls
   // -------------------------------------------------------------------------
   updateSettings(patch) {
-    const next = sanitizeSettings(patch, this.settings);
+    const prev = this.settings;
+    const next = sanitizeSettings(patch, prev);
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
     this.outcomes.setOptions({ latencyMs: next.paperLatencyMs, costs: this.costs });
+    const moved = next.minScore !== prev.minScore;
     for (const e of this.scores.values()) {
-      e.armed = true;
       e.above = 0;
       e.at = 0;
+      if (next.reentry) e.armed = true;
+      else if (moved) e.armed = e.res.score < next.minScore;
     }
     this.hooks.onSettings?.(next);
     this.journal({ type: "settings", settings: next });
@@ -4263,6 +4361,7 @@ var Engine = class {
       cluster: f.clusterSize,
       flags,
       held,
+      spent: !e.armed,
       createdAt: t.createdAt,
       lastTradeAt: t.lastTradeAt,
       image: t.meta.image,
@@ -4307,7 +4406,14 @@ var Engine = class {
       holders,
       creatorStats: t.creator ? this.wallets.creator(t.creator, this.now) : null,
       trades: t.trades.toArray().slice(-60).reverse(),
-      positions: [...this.positions.values(), ...this.closed.toArray()].filter((p) => p.mint === mint)
+      positions: [...this.positions.values(), ...this.closed.toArray()].filter((p) => p.mint === mint),
+      // the coin's entry moment: whether it came, and what the bot did about it
+      entry: {
+        spent: e ? !e.armed : false,
+        above: e?.above ?? 0,
+        need: this.settings.confirmTicks,
+        signals: this.funnel.recent.toArray().filter((r) => r.mint === mint)
+      }
     };
   }
   health() {

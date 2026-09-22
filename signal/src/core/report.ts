@@ -3,7 +3,7 @@
  * from resolved outcome samples, with confidence intervals, plus the go-live gate.
  */
 import { breakEvenP, type ModelSpec } from "./model.js";
-import { GRID, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, type Sample } from "./outcomes.js";
 import type { Position } from "./positions.js";
 import type { Settings } from "./settings.js";
 import { meanCI, quantile, wilson } from "./util.js";
@@ -36,6 +36,7 @@ export interface LearnReport {
   samples: number;
   checkpoints: number;
   signals: number;
+  entries: number;
   spanHours: number;
   settings: { tpPct: number; slPct: number; minScore: number };
   combo: { tp: number; sl: number; exact: boolean };
@@ -43,7 +44,13 @@ export interface LearnReport {
   buckets: BucketRow[];
   signalStats: { n: number; winRate: number; winLo: number; winHi: number; avgRet: number; retLo: number; retHi: number };
   thresholds: { min: number; n: number; tokensPerHour: number; winRate: number; avgRet: number; retLo: number; retHi: number }[];
+  /**
+   * entries: each row is what happened after coins FIRST reached that score (how the bot buys);
+   * checkpoints: snapshots at fixed ages, used until enough entry outcomes exist
+   */
+  thresholdSource: "entries" | "checkpoints";
   grid: GridCell[];
+  gridSource: "signals" | "entries" | "checkpoints";
   best: GridCell | null;
   gate: { pass: boolean; verdict: string; detail: string };
   /** robustly better settings than the current ones, when the evidence supports it */
@@ -128,15 +135,36 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
   const sigAbove = signals.filter((s) => s.score >= settings.minScore);
   const signalStats = statsOf(sigAbove.map(retOf));
 
+  // Threshold comparison: prefer first-crossing entry outcomes. Snapshots of coins that are
+  // above a score are kinder than buying the moment a coin reaches it (the crossing often
+  // comes on a burst of buying), so snapshots are only a stand-in until entries accumulate.
+  const entries = samples.filter((s) => s.kind === "entry");
+  const thresholdSource: LearnReport["thresholdSource"] = entries.length >= 200 ? "entries" : "checkpoints";
+  const atLevel = (min: number) => (thresholdSource === "entries" ? entries.filter((s) => s.tag === `x${min}`) : checkpoints.filter((s) => s.score >= min));
   const thresholds = [];
   for (let min = 50; min <= 95; min += 5) {
-    const rows = checkpoints.filter((s) => s.score >= min);
+    const rows = atLevel(min);
     const st = statsOf(rows.map(retOf));
     const tokens = new Set(rows.map((s) => s.mint)).size;
     thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
   }
 
-  const pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
+  // Exit heat map for coins at the user's score: their own signals when there are enough,
+  // else entries at the nearest level at or below it, else snapshots.
+  const level = [...ENTRY_LEVELS].reverse().find((l) => l <= settings.minScore) ?? ENTRY_LEVELS[0];
+  const levelEntries = entries.filter((s) => s.tag === `x${level}`);
+  let gridSource: LearnReport["gridSource"];
+  let pool: Sample[];
+  if (sigAbove.length >= 50) {
+    gridSource = "signals";
+    pool = sigAbove;
+  } else if (levelEntries.length >= 50) {
+    gridSource = "entries";
+    pool = levelEntries;
+  } else {
+    gridSource = "checkpoints";
+    pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
+  }
   const grid: GridCell[] = GRID.map((g, i) => {
     const rets = pool.map((s) => s.grid?.[i]).filter((x): x is number => Number.isFinite(x));
     const st = statsOf(rets);
@@ -176,11 +204,11 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     const m = meanCI(xs);
     return Number.isFinite(m.lo) ? m.mean - ((m.mean - m.lo) / 1.96) * z : -Infinity;
   };
-  const cur = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)].map(retOf);
+  const cur = pool.map(retOf);
   let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
   const mid = t0 + (t1 - t0) / 2;
   for (let min = 50; min <= 95; min += 5) {
-    const rows = checkpoints.filter((s) => s.score >= min);
+    const rows = atLevel(min);
     if (rows.length < 150) continue;
     GRID.forEach((g, i) => {
       const val = (s: Sample) => s.grid?.[i];
@@ -200,7 +228,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
         avgRet: m.mean,
         retLo: lo,
         n: all.length,
-        why: `score ≥ ${min} with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`,
+        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`,
       };
     });
   }
@@ -211,6 +239,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     samples: samples.length,
     checkpoints: checkpoints.length,
     signals: signals.length,
+    entries: entries.length,
     spanHours,
     settings: { tpPct: tp, slPct: sl, minScore: settings.minScore },
     combo: { tp, sl, exact: exactCombo },
@@ -218,7 +247,9 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     buckets,
     signalStats,
     thresholds,
+    thresholdSource,
     grid,
+    gridSource,
     best,
     gate,
     paper: paperStats(closed),

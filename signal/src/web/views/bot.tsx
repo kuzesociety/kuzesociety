@@ -1,6 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Settings } from "../../core/settings";
 import { api, refreshState, toast, useApp } from "../store";
+import { ext } from "../ext";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
 
 export function Bot() {
@@ -58,7 +59,7 @@ export function Bot() {
           <div style="font-weight:760;font-size:16px">{settings.enabled ? "Auto-trading is ON" : "Auto-trading is paused"}</div>
           <div class="muted" style="font-size:13px">
             {settings.enabled
-              ? `Buying coins that score ${settings.minScore}+${settings.scoreOnly ? " (score only)" : ""} · ${settings.mode === "live" ? "LIVE money" : "paper"} · runs on the server even with this page closed`
+              ? `Buying coins that score ${settings.minScore}+${settings.scoreOnly ? " (score only)" : ""} · ${settings.mode === "live" ? "LIVE money" : "paper"} · ${ext.demo ? "demo: runs while this page is open (the real bot runs on a server 24/7)" : "runs on the server even with this page closed"}`
               : "The radar keeps scoring; no new trades. Open positions are still managed."}
           </div>
         </div>
@@ -187,7 +188,11 @@ export function Bot() {
           <Field label="Keep retrying a missed entry for" htmlFor="retry">
             <NumInput id="retry" value={draft.retryWindowSec} onChange={(v) => set("retryWindowSec", v)} suffix="s" />
           </Field>
-          <Field label="Score must hold for" htmlFor="confirm" help="Consecutive evaluations above the threshold before buying (1 = immediately).">
+          <Field
+            label="Score must hold for"
+            htmlFor="confirm"
+            help="Evaluations in a row at or above your score before buying — about one per second while the coin trades. 5 skips one-off spikes and costs a few seconds; 1 buys on the first."
+          >
             <NumInput id="confirm" value={draft.confirmTicks} onChange={(v) => set("confirmTicks", v)} min={1} max={20} />
           </Field>
           <Field label="Exit slippage (starts at)" htmlFor="xslip" help="Escalates automatically on retries — exits always go through.">
@@ -214,7 +219,11 @@ export function Bot() {
           <Field label="Max trades per hour" htmlFor="tph">
             <NumInput id="tph" value={draft.maxTradesPerHour} onChange={(v) => set("maxTradesPerHour", v)} />
           </Field>
-          <Field label="Buy the same coin again" htmlFor="reentry">
+          <Field
+            label="Buy the same coin again"
+            htmlFor="reentry"
+            help="Off: each coin gets one entry moment — the first time it reaches your score. On: it can be bought again after dipping and coming back, which in simulation lost about 40% per trade."
+          >
             <Switch id="reentry" checked={draft.reentry} label="Re-entry" onChange={(v) => set("reentry", v)} />
           </Field>
           <Field label="Auto-tune (paper only)" htmlFor="autotune" help="After each learning run, switch score/TP/SL to the combination with the best proven results (95% worst case must beat the current one). Never touches live settings.">

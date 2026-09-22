@@ -15,6 +15,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -27,6 +28,7 @@ import { createGzip, gunzipSync, gzipSync, type Gzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
+import { StringDecoder } from "node:string_decoder";
 import type { PersistedState } from "../core/engine.js";
 import type { ModelSpec } from "../core/model.js";
 import { validateModel } from "../core/model.js";
@@ -34,6 +36,33 @@ import type { Sample } from "../core/outcomes.js";
 import type { Logger } from "../core/util.js";
 
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+
+/**
+ * Most samples held in memory at once. A day of live pump.fun can record tens of thousands,
+ * and a small server has 512 MB, so reports and training use the newest ones up to these caps.
+ */
+export const SAMPLE_LIMITS = { checkpoints: 40_000, entries: 25_000 };
+
+/** Calls `fn` for every non-empty line, reading 1 MB at a time (multi-byte safe). */
+export function forEachLine(path: string, fn: (line: string) => void) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    const dec = new StringDecoder("utf8");
+    let rest = "";
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
+      rest = lines.pop() ?? "";
+      for (const l of lines) if (l) fn(l);
+    }
+    rest += dec.end();
+    if (rest) fn(rest);
+  } finally {
+    closeSync(fd);
+  }
+}
 const hour = (ts: number) => new Date(ts).toISOString().slice(0, 13);
 
 export function writeFileAtomic(path: string, data: string | Uint8Array) {
@@ -121,28 +150,59 @@ export class DataStore {
     }
   }
 
-  loadSamples(days: number, now = Date.now()): Sample[] {
-    const out: Sample[] = [];
+  /**
+   * Labelled samples from the last `days`, oldest first. Files are read newest first and
+   * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
+   * so memory stays bounded however much has been recorded.
+   */
+  loadSamples(days: number, now = Date.now(), limits = SAMPLE_LIMITS): Sample[] {
     const cutoff = day(now - days * 86_400_000);
     let files: string[] = [];
     try {
-      files = readdirSync(join(this.dir, "samples")).filter((f) => f.endsWith(".jsonl") && f.slice(0, 10) >= cutoff).sort();
+      files = readdirSync(join(this.dir, "samples"))
+        .filter((f) => f.endsWith(".jsonl") && f.slice(0, 10) >= cutoff)
+        .sort()
+        .reverse();
     } catch {
-      return out;
+      return [];
     }
+    const perFile: Sample[][] = [];
+    let nCp = 0;
+    let nEn = 0;
     for (const f of files) {
-      const text = readFileSync(join(this.dir, "samples", f), "utf8");
-      for (const line of text.split("\n")) {
-        if (!line) continue;
-        try {
-          const s = JSON.parse(line) as Sample;
-          if (Array.isArray(s.x) && (s.y === 0 || s.y === 1)) out.push(s);
-        } catch {
-          /* skip partial line */
-        }
+      const roomCp = limits.checkpoints - nCp;
+      const roomEn = limits.entries - nEn;
+      if (roomCp <= 0 && roomEn <= 0) break;
+      const cps: Sample[] = [];
+      const ens: Sample[] = [];
+      try {
+        forEachLine(join(this.dir, "samples", f), (line) => {
+          const isCp = line.includes('"kind":"checkpoint"');
+          if (isCp ? roomCp <= 0 : roomEn <= 0) return; // skip parsing what would be dropped
+          let s: Sample;
+          try {
+            s = JSON.parse(line) as Sample;
+          } catch {
+            return; // partial line
+          }
+          if (!Array.isArray(s.x) || (s.y !== 0 && s.y !== 1)) return;
+          const into = s.kind === "checkpoint" ? cps : ens;
+          const room = s.kind === "checkpoint" ? roomCp : roomEn;
+          into.push(s);
+          // lines are in time order: when over the cap, drop the oldest
+          if (into.length >= room * 2) into.splice(0, into.length - room);
+        });
+      } catch (e) {
+        this.log.warn("could not read samples", { file: f, err: String(e) });
+        continue;
       }
+      if (cps.length > roomCp) cps.splice(0, cps.length - Math.max(0, roomCp));
+      if (ens.length > roomEn) ens.splice(0, ens.length - Math.max(0, roomEn));
+      nCp += cps.length;
+      nEn += ens.length;
+      perFile.push(cps.concat(ens));
     }
-    return out;
+    return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
   }
 
   // ---- market recorder (gzip, hourly files) ----------------------------------------

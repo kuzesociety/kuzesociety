@@ -27,3 +27,39 @@ describe("memory relief", () => {
     expect(b.smartCount()).toBe(5);
   });
 });
+
+describe("bounded sample loading", () => {
+  it("keeps the newest samples up to the caps, oldest first, and survives multi-byte text", async () => {
+    const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { DataStore } = await import("../src/node/store.js");
+    const dir = mkdtempSync(join(tmpdir(), "signal-samples-"));
+    mkdirSync(join(dir, "samples"), { recursive: true });
+    const now = Date.UTC(2026, 8, 20, 12);
+    const mk = (i: number, kind: string, ts: number) =>
+      JSON.stringify({ id: `s${i}`, kind, tag: "t", mint: `m${i}`, symbol: "🐸ÉMOJI", ts, stage: "curve", score: 50, p: 0.1, x: [1, 2], y: i % 2, ret: 0.1, grid: [] });
+    for (let d = 2; d >= 0; d--) {
+      const date = new Date(now - d * 86_400_000).toISOString().slice(0, 10);
+      const lines: string[] = [];
+      for (let i = 0; i < 3000; i++) {
+        const ts = now - d * 86_400_000 + i * 1000;
+        lines.push(mk(d * 10_000 + i, i % 3 === 0 ? "entry" : "checkpoint", ts));
+      }
+      lines.push('{"id":"broken", "kind":"check'); // a torn last line must be skipped
+      writeFileSync(join(dir, "samples", `${date}.jsonl`), lines.join("\n"));
+    }
+    const store = new DataStore(dir, { debug() {}, info() {}, warn() {}, error() {} });
+    const out = store.loadSamples(7, now, { checkpoints: 2500, entries: 1200 });
+    const cps = out.filter((s) => s.kind === "checkpoint");
+    const ens = out.filter((s) => s.kind === "entry");
+    expect(cps).toHaveLength(2500);
+    expect(ens).toHaveLength(1200);
+    // today's file alone has 2000 checkpoints: the other 500 are the newest of yesterday
+    expect(cps.filter((s) => s.ts >= now).length).toBe(2000);
+    expect(Math.min(...cps.map((s) => s.ts))).toBeGreaterThan(now - 86_400_000);
+    for (let i = 1; i < out.length; i++) expect(out[i]!.ts).toBeGreaterThanOrEqual(out[i - 1]!.ts);
+    expect(out.every((s) => s.symbol === "🐸ÉMOJI")).toBe(true);
+    store.close();
+  });
+});

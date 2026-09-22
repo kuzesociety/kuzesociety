@@ -31,7 +31,8 @@ export class Scenario {
     this.engine = new Engine({
       now: this.now,
       model: { ...priorModel(T0), scaledAt: T0 },
-      settings: { enabled: true, minScore: 0, positionSol: 0.1, maxOpen: 5, maxTradesPerHour: 100, paperLatencyMs: 1000, ...settings },
+      // confirmTicks 1: these scenarios test execution mechanics on the first signal
+      settings: { enabled: true, minScore: 0, positionSol: 0.1, maxOpen: 5, maxTradesPerHour: 100, paperLatencyMs: 1000, confirmTicks: 1, ...settings },
       config: { seed: 3, ...config },
     });
   }

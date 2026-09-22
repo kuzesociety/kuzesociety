@@ -15,7 +15,7 @@ import { type RawFeatures, MarketPulse, extractFeatures, featureVector } from ".
 import { Funnel, type SignalRecord } from "./funnel.js";
 import { type ModelSpec, type ScoreResult, type StageKey, priorModel, scoreToken, validateModel } from "./model.js";
 import { NarrativeIndex } from "./narratives.js";
-import { OutcomeTracker, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, OutcomeTracker, type Sample } from "./outcomes.js";
 import {
   type CostModel,
   DEFAULT_COSTS,
@@ -203,6 +203,10 @@ interface ScoreEntry {
   above: number;
   armed: boolean;
   lastFunnelAt: number;
+  /** bit i set once the coin has reached ENTRY_LEVELS[i] */
+  reached: number;
+  /** consecutive evaluations at or above each entry level */
+  held: Uint8Array;
 }
 
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
@@ -588,7 +592,7 @@ export class Engine {
     const x = featureVector(f);
     let e = this.scores.get(t.mint);
     if (!e) {
-      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0 };
+      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
       this.scores.set(t.mint, e);
     } else {
       e.res = res;
@@ -624,13 +628,40 @@ export class Engine {
     }
   }
 
+  /**
+   * Follows the first entry at every level the way the bot would have bought it: the score
+   * reached the level and held it for the configured number of evaluations.
+   */
+  private entryLevels(t: TokenState, e: ScoreEntry, now: number) {
+    if (!this.modelReady()) return; // scores before the prior is scaled are not comparable
+    const score = e.res.score;
+    const need = this.settings.confirmTicks;
+    const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
+    for (let i = 0; i < ENTRY_LEVELS.length; i++) {
+      const level = ENTRY_LEVELS[i]!;
+      if (score < level) {
+        e.held[i] = 0;
+        continue;
+      }
+      if (e.held[i]! < 255) e.held[i]!++;
+      const bit = 1 << i;
+      if (e.reached & bit || e.held[i]! < need) continue;
+      e.reached |= bit;
+      this.outcomes.add(t, "entry", `x${level}`, now, score, e.res.p, e.x, custom);
+    }
+  }
+
   private signalLogic(t: TokenState, e: ScoreEntry, now: number) {
+    this.entryLevels(t, e, now);
     const s = this.settings;
     const score = e.res.score;
     if (score >= s.minScore) e.above++;
     else {
       e.above = 0;
-      if (score < s.minScore - 5) e.armed = true; // hysteresis: re-arm after a real dip
+      // One entry moment per coin: the first time it reaches the line and holds. Coming back
+      // after a dip is usually a fading coin whose running totals still look strong (in
+      // simulation those re-signals lost ~40% per trade), so it only re-arms with re-entry on.
+      if (s.reentry && score < s.minScore - 5) e.armed = true;
     }
     if (!e.armed || e.above < s.confirmTicks) return;
     e.armed = false;
@@ -1052,16 +1083,19 @@ export class Engine {
   // -------------------------------------------------------------------------
 
   updateSettings(patch: unknown): Settings {
-    const next = sanitizeSettings(patch, this.settings);
+    const prev = this.settings;
+    const next = sanitizeSettings(patch, prev);
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
     this.outcomes.setOptions({ latencyMs: next.paperLatencyMs, costs: this.costs });
-    // settings changed (bot switched on, threshold moved…): every coin currently at or
-    // above the threshold is a live signal again on its next evaluation
+    // A moved threshold gives coins still below it a first crossing to come; coins already
+    // above it had their moment earlier, and buying them now would be a late entry.
+    const moved = next.minScore !== prev.minScore;
     for (const e of this.scores.values()) {
-      e.armed = true;
       e.above = 0;
       e.at = 0;
+      if (next.reentry) e.armed = true;
+      else if (moved) e.armed = e.res.score < next.minScore;
     }
     this.hooks.onSettings?.(next);
     this.journal({ type: "settings", settings: next });
@@ -1418,6 +1452,7 @@ export class Engine {
       cluster: f.clusterSize,
       flags,
       held,
+      spent: !e.armed,
       createdAt: t.createdAt,
       lastTradeAt: t.lastTradeAt,
       image: t.meta.image,
@@ -1468,6 +1503,13 @@ export class Engine {
       creatorStats: t.creator ? this.wallets.creator(t.creator, this.now) : null,
       trades: t.trades.toArray().slice(-60).reverse(),
       positions: [...this.positions.values(), ...this.closed.toArray()].filter((p) => p.mint === mint),
+      // the coin's entry moment: whether it came, and what the bot did about it
+      entry: {
+        spent: e ? !e.armed : false,
+        above: e?.above ?? 0,
+        need: this.settings.confirmTicks,
+        signals: this.funnel.recent.toArray().filter((r) => r.mint === mint),
+      },
     };
   }
 
@@ -1546,6 +1588,8 @@ export interface RadarRow {
   cluster: number;
   flags: string[];
   held: boolean;
+  /** already had its entry moment (bought, blocked, or crossed before trading was on) */
+  spent: boolean;
   createdAt: number;
   lastTradeAt: number;
   image?: string;

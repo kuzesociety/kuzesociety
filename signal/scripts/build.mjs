@@ -11,6 +11,13 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const dist = join(root, "dist");
 mkdirSync(dist, { recursive: true });
 
+/** Dashboard stylesheet, shared with the demo page so both look identical. */
+function dashboardCss() {
+  const m = /<style>([\s\S]*?)<\/style>/.exec(readFileSync(join(root, "src/web/index.html"), "utf8"));
+  if (!m) throw new Error("dashboard stylesheet not found");
+  return m[1];
+}
+
 async function bundleWeb(entry, htmlTemplate, out, define = {}) {
   const res = await build({
     entryPoints: [join(root, entry)],
@@ -27,7 +34,7 @@ async function bundleWeb(entry, htmlTemplate, out, define = {}) {
   });
   const js = res.outputFiles[0].text.replace(/<\/script/gi, "<\\/script");
   const tpl = readFileSync(join(root, htmlTemplate), "utf8");
-  const html = tpl.replace("/*__APP_JS__*/", () => js);
+  const html = tpl.replace("/*__DASHBOARD_CSS__*/", () => dashboardCss()).replace("/*__APP_JS__*/", () => js);
   writeFileSync(join(dist, out), html);
   return html;
 }

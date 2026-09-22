@@ -166,10 +166,14 @@ export function scoreToken(model: ModelSpec, f: RawFeatures, explain = true): Sc
   return { score, p, calibrated: !!stage.calib && model.source === "trained", stage: stageKey, contributions };
 }
 
-/** Break-even win probability for a TP/SL pair after round-trip costs (fractions). */
-export function breakEvenP(tpPct: number, slPct: number, roundTripCost = 0.035, slSlippage = 0.1): number {
-  const win = tpPct / 100 - roundTripCost;
-  const loss = slPct / 100 + roundTripCost + slSlippage;
+/**
+ * Win rate needed to break even. TP and SL are measured on the net position value (buy costs
+ * in, sell costs out), so fees are already inside them; the extra is the stop's fill landing
+ * below the line in a fast dump (`slSlippage`, as a fraction of the stake).
+ */
+export function breakEvenP(tpPct: number, slPct: number, slSlippage = 0.1): number {
+  const win = tpPct / 100;
+  const loss = slPct / 100 + slSlippage;
   return loss / (win + loss);
 }
 

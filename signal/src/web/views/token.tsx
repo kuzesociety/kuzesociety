@@ -1,10 +1,13 @@
 import { useEffect, useState } from "preact/hooks";
 import { age, clock, mcap, pct, short, sol } from "../format";
+import { REASON_TEXT } from "../../core/funnel";
 import { api, useApp } from "../store";
+import { ext } from "../ext";
 import { Empty, Score, Tag } from "../ui";
 
 export function TokenSheet({ mint, close }: { mint: string; close: () => void }) {
   const solUsd = useApp((s) => s.solUsd);
+  const settings = useApp((s) => s.settings);
   const [d, setD] = useState<any>(null);
   const [err, setErr] = useState("");
   useEffect(() => {
@@ -51,11 +54,13 @@ export function TokenSheet({ mint, close }: { mint: string; close: () => void })
               </button>
             </div>
 
+            <EntryMoment d={d} threshold={settings?.minScore ?? 75} enabled={!!settings?.enabled} />
+
             <div class="stats">
               <div class="stat">
                 <div class="k">Market cap</div>
                 <div class="v num">{mcap(d.mcapSol, solUsd)}</div>
-                <div class="s num">{d.mcapSol.toFixed(1)} SOL</div>
+                {solUsd > 0 && <div class="s num">{d.mcapSol.toFixed(1)} SOL</div>}
               </div>
               <div class="stat">
                 <div class="k">Peak</div>
@@ -74,24 +79,30 @@ export function TokenSheet({ mint, close }: { mint: string; close: () => void })
             </div>
 
             <div class="row wrap" style="gap:8px">
-              <a class="btn sm" href={`https://pump.fun/coin/${d.mint}`} target="_blank" rel="noopener">
-                pump.fun
-              </a>
-              <a class="btn sm" href={`https://dexscreener.com/solana/${d.mint}`} target="_blank" rel="noopener">
-                DexScreener
-              </a>
-              <a class="btn sm" href={`https://solscan.io/token/${d.mint}`} target="_blank" rel="noopener">
-                Solscan
-              </a>
-              {d.meta?.twitter && (
-                <a class="btn sm" href={d.meta.twitter} target="_blank" rel="noopener">
-                  X / Twitter
-                </a>
-              )}
-              {d.meta?.telegram && (
-                <a class="btn sm" href={d.meta.telegram} target="_blank" rel="noopener">
-                  Telegram
-                </a>
+              {ext.demo ? (
+                <span class="faint" style="font-size:12.5px">Simulated coin — no explorer links in the demo.</span>
+              ) : (
+                <>
+                  <a class="btn sm" href={`https://pump.fun/coin/${d.mint}`} target="_blank" rel="noopener">
+                    pump.fun
+                  </a>
+                  <a class="btn sm" href={`https://dexscreener.com/solana/${d.mint}`} target="_blank" rel="noopener">
+                    DexScreener
+                  </a>
+                  <a class="btn sm" href={`https://solscan.io/token/${d.mint}`} target="_blank" rel="noopener">
+                    Solscan
+                  </a>
+                  {d.meta?.twitter && (
+                    <a class="btn sm" href={d.meta.twitter} target="_blank" rel="noopener">
+                      X / Twitter
+                    </a>
+                  )}
+                  {d.meta?.telegram && (
+                    <a class="btn sm" href={d.meta.telegram} target="_blank" rel="noopener">
+                      Telegram
+                    </a>
+                  )}
+                </>
               )}
               <button
                 class="btn sm"
@@ -147,7 +158,7 @@ export function TokenSheet({ mint, close }: { mint: string; close: () => void })
                         {d.holders.map((h: any) => (
                           <tr key={h.addr}>
                             <td class="mono">
-                              <a href={`https://solscan.io/account/${h.addr}`} target="_blank" rel="noopener">
+                              <a href={ext.demo ? undefined : `https://solscan.io/account/${h.addr}`} target="_blank" rel="noopener">
                                 {short(h.addr)}
                               </a>
                             </td>
@@ -187,7 +198,7 @@ export function TokenSheet({ mint, close }: { mint: string; close: () => void })
                 <dl class="kv">
                   <dt>Wallet</dt>
                   <dd class="mono">
-                    <a href={`https://solscan.io/account/${d.creator}`} target="_blank" rel="noopener">
+                    <a href={ext.demo ? undefined : `https://solscan.io/account/${d.creator}`} target="_blank" rel="noopener">
                       {short(d.creator)}
                     </a>
                   </dd>
@@ -221,6 +232,40 @@ export function TokenSheet({ mint, close }: { mint: string; close: () => void })
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/** When the coin reached the user's score and what the bot did — answers "why didn't it buy?". */
+function EntryMoment({ d, threshold, enabled }: { d: any; threshold: number; enabled: boolean }) {
+  const en = d.entry;
+  if (!en) return null;
+  const sig = en.signals?.[en.signals.length - 1]; // latest (the score scale can re-arm coins once, after calibration)
+  const score = d.score?.score ?? 0;
+  let tone = "";
+  let text: string;
+  if (sig) {
+    const what =
+      sig.decision === "entered"
+        ? "the bot bought it"
+        : sig.decision === "pending"
+          ? "the bot is buying it"
+          : sig.decision === "failed"
+          ? `the buy failed (${sig.reason ?? "no fill"})`
+          : `not bought — ${REASON_TEXT[sig.reason] ?? sig.reason}`;
+    tone = sig.decision === "entered" || sig.decision === "pending" ? "good" : "warn";
+    text = `Entry moment at ${clock(sig.ts)}, score ${Math.round(sig.score)}: ${what}. Each coin gets one entry moment.`;
+  } else if (en.spent) {
+    text = "Its entry moment has passed (before the current settings, or before this session). Each coin gets one.";
+  } else if (score >= threshold) {
+    tone = "good";
+    text = enabled ? `At your score — buying once it holds ${en.need} evaluations in a row (${en.above}/${en.need}).` : "At your score, but auto-trading is paused.";
+  } else {
+    text = `Below your score of ${threshold}. If it gets there and holds, that is its entry moment.`;
+  }
+  return (
+    <div class={`entrymoment ${tone}`} role="status">
+      {text}
     </div>
   );
 }

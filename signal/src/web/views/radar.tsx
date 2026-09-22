@@ -105,7 +105,7 @@ function CoinRow({ r, solUsd, threshold, onOpen }: { r: RadarRow; solUsd: number
           <span class="sym">${r.symbol || "?"}</span>
           <span class="name">{r.name}</span>
           {r.held && <Tag tone="flare">holding</Tag>}
-          {r.score >= threshold && !r.held && <Tag tone="good">signal</Tag>}
+          {r.score >= threshold && !r.held && (r.spent ? <Tag>passed</Tag> : <Tag tone="good">signal</Tag>)}
         </div>
         <div class="meta num">
           <span>{mcap(r.mcapSol, solUsd)}</span>

@@ -57,6 +57,8 @@ export interface AppState {
   lastUpdate: number;
   skew: number;
   toast: string;
+  /** a navigation request from outside the tab bar (tab, optional More section) */
+  nav: { tab: string; sub?: string; at: number } | null;
 }
 
 let state: AppState = {
@@ -73,6 +75,7 @@ let state: AppState = {
   lastUpdate: 0,
   skew: 0,
   toast: "",
+  nav: null,
 };
 const listeners = new Set<() => void>();
 
@@ -100,6 +103,10 @@ export function toast(msg: string) {
   setState({ toast: msg });
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => setState({ toast: "" }), 3200);
+}
+
+export function navigate(tab: string, sub?: string) {
+  setState({ nav: { tab, sub, at: Date.now() } });
 }
 
 /** How the dashboard talks to an engine: HTTP to the server, or an in-page engine (demo). */

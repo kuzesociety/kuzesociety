@@ -52,7 +52,7 @@ export class DashboardServer {
     this.session = createHmac("sha256", ctx.token).update("signal-session-v1").digest("hex");
     this.api = {
       engine: ctx.engine,
-      samples: (days) => ctx.store.loadSamples(days),
+      samples: (days) => this.cachedSamples(days),
       health: () => this.healthPayload(),
       learnRun: () => ctx.learner.run(),
       live: {
@@ -78,6 +78,22 @@ export class DashboardServer {
     this.server.headersTimeout = 70_000;
   }
 
+  private sampleCache: { days: number; at: number; data: ReturnType<DataStore["loadSamples"]> } | null = null;
+  private sampleCacheTimer: NodeJS.Timeout | null = null;
+
+  /** The Learn tab refreshes every minute; reading days of samples from disk each time is wasteful. */
+  private cachedSamples(days: number) {
+    const c = this.sampleCache;
+    if (c && c.days === days && Date.now() - c.at < 5 * 60_000) return c.data;
+    const data = this.ctx.store.loadSamples(days);
+    this.sampleCache = { days, at: Date.now(), data };
+    // let the memory go when nobody is looking at the Learn tab
+    if (this.sampleCacheTimer) clearTimeout(this.sampleCacheTimer);
+    this.sampleCacheTimer = setTimeout(() => (this.sampleCache = null), 6 * 60_000);
+    this.sampleCacheTimer.unref?.();
+    return data;
+  }
+
   listen(port: number, host: string): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       this.server.once("error", reject);
@@ -98,6 +114,7 @@ export class DashboardServer {
 
   close() {
     for (const t of this.timers) clearInterval(t);
+    if (this.sampleCacheTimer) clearTimeout(this.sampleCacheTimer);
     for (const c of this.clients) c.res.end();
     this.clients.clear();
     this.server.close();

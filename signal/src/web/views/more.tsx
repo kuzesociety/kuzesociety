@@ -1,30 +1,37 @@
 import { useEffect, useState } from "preact/hooks";
 import { REASON_TEXT } from "../../core/funnel";
 import { ago, clock, mcap, pct, short } from "../format";
+import { ext } from "../ext";
 import { api, useApp } from "../store";
 import { Empty, Tag } from "../ui";
 
 type Sub = "signals" | "narratives" | "wallets" | "health" | "setup";
 
+const BASE: [Sub, string][] = [
+  ["signals", "Signals log"],
+  ["narratives", "Narratives"],
+  ["wallets", "Smart wallets"],
+  ["health", "Health"],
+  ["setup", "Setup & help"],
+];
+
 export function More({ open }: { open: (mint: string) => void }) {
-  const [sub, setSub] = useState<Sub>("signals");
+  const nav = useApp((s) => s.nav);
+  const [sub, setSub] = useState<string>(nav?.tab === "more" && nav.sub ? nav.sub : ext.moreTabs[0]?.key ?? "signals");
+  useEffect(() => {
+    if (nav?.tab === "more" && nav.sub) setSub(nav.sub);
+  }, [nav?.at]);
+  const extra = ext.moreTabs.find((t) => t.key === sub);
   return (
     <div>
       <div class="chips" style="margin:14px 0">
-        {(
-          [
-            ["signals", "Signals log"],
-            ["narratives", "Narratives"],
-            ["wallets", "Smart wallets"],
-            ["health", "Health"],
-            ["setup", "Setup & help"],
-          ] as [Sub, string][]
-        ).map(([k, l]) => (
+        {[...ext.moreTabs.map((t) => [t.key, t.label] as [string, string]), ...BASE].map(([k, l]) => (
           <button key={k} class="chip" aria-pressed={sub === k} onClick={() => setSub(k)}>
             {l}
           </button>
         ))}
       </div>
+      {extra && extra.render()}
       {sub === "signals" && <Signals open={open} />}
       {sub === "narratives" && <Narratives open={open} />}
       {sub === "wallets" && <Wallets />}
@@ -144,9 +151,13 @@ function Wallets() {
               {d.wallets.map((w: any) => (
                 <tr key={w.address}>
                   <td class="mono">
-                    <a href={`https://solscan.io/account/${w.address}`} target="_blank" rel="noopener">
-                      {short(w.address)}
-                    </a>
+                    {ext.demo ? (
+                      <span class="mono">{short(w.address)}</span>
+                    ) : (
+                      <a href={`https://solscan.io/account/${w.address}`} target="_blank" rel="noopener">
+                        {short(w.address)}
+                      </a>
+                    )}
                   </td>
                   <td class="r num">{w.closed}</td>
                   <td class="r num">{pct(w.winRate)}</td>

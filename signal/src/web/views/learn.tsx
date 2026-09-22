@@ -113,6 +113,11 @@ export function Learn() {
 
         <div class="card">
           <h2>Pick a threshold</h2>
+          <p class="faint" style="margin:0 0 8px;font-size:12.5px">
+            {r.thresholdSource === "entries"
+              ? "What happened after coins first reached each score — the moment the bot buys — with your TP/SL, delay and costs."
+              : "For now: snapshots of coins above each score. Buying the moment a coin reaches a score usually does worse; this switches to real entry outcomes after 200 of them."}
+          </p>
           <div class="tablewrap">
             <table>
               <thead>
@@ -140,7 +145,11 @@ export function Learn() {
 
       <div class="card" style="margin-top:12px">
         <h2>Take profit × stop loss · coins scoring ≥ {r.settings.minScore}</h2>
-        <p class="faint" style="margin:0 0 8px;font-size:12.5px">Average result per trade for each exit combination, delay and costs included. Darker green = better; cells with fewer than 30 outcomes are faded.</p>
+        <p class="faint" style="margin:0 0 8px;font-size:12.5px">
+          Average result per trade for each exit combination, delay and costs included, from{" "}
+          {r.gridSource === "signals" ? "your own signals" : r.gridSource === "entries" ? "coins at the moment they first reached your score" : "snapshots of coins above your score (until entry data builds up)"}. Darker green =
+          better; cells with fewer than 30 outcomes are faded.
+        </p>
         <div class="tablewrap">
           <table class="heat">
             <thead>
