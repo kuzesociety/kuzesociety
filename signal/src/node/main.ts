@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getHeapStatistics } from "node:v8";
 import { Engine } from "../core/engine.js";
 import { priorModel } from "../core/model.js";
 import type { DecodedEvent } from "../core/decode.js";
@@ -61,7 +62,10 @@ export async function main() {
     now: Date.now(),
     model,
     log,
-    config: { paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10 },
+    config: {
+      paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10,
+      maxWallets: Math.max(5_000, Number(process.env.MAX_WALLETS ?? 150_000) || 150_000),
+    },
     hooks: {
       persist: (s) => store.saveState(s),
       journal: (j) => store.journal(j),
@@ -184,6 +188,17 @@ export async function main() {
       log.warn("wallet snapshot failed", { err: String(e) });
     }
   }, 10 * 60_000);
+  // Memory guard: small cloud instances have 512 MB–1 GB. The wallet book is the only structure
+  // that grows with market activity, so when the heap nears its limit forget the least
+  // recently active wallets (keeping ones with a track record) instead of crashing.
+  const heapLimit = getHeapStatistics().heap_size_limit;
+  const memGuard = setInterval(() => {
+    const used = process.memoryUsage().heapUsed;
+    if (used < heapLimit * 0.7) return;
+    const before = engine.wallets.size;
+    const dropped = engine.wallets.trim(0.5);
+    log.warn("memory high: trimmed wallet book", { heapMb: Math.round(used / 1e6), limitMb: Math.round(heapLimit / 1e6), before, dropped });
+  }, 30_000);
   const daily = setInterval(() => {
     store.cleanup(config.recordDays, config.sampleDays);
     store.backupState();
@@ -249,6 +264,7 @@ export async function main() {
     clearInterval(clock);
     clearInterval(hk);
     clearInterval(daily);
+    clearInterval(memGuard);
     for (const f of feeds) f.stop();
     solPrice.stop();
     learner.stop();

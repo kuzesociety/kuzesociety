@@ -11,7 +11,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "../core/engine.js";
-import { buildReport } from "../core/report.js";
+import { type ApiContext, accountSummary, handleApi } from "../core/api.js";
 import type { Logger } from "../core/util.js";
 import { type Config, describeConfig } from "./config.js";
 import type { Learner } from "./learner.js";
@@ -46,9 +46,27 @@ export class DashboardServer {
   private timers: NodeJS.Timeout[] = [];
   private session: string;
   private csp = "";
+  private api: ApiContext;
 
   constructor(private ctx: AppContext) {
     this.session = createHmac("sha256", ctx.token).update("signal-session-v1").digest("hex");
+    this.api = {
+      engine: ctx.engine,
+      samples: (days) => ctx.store.loadSamples(days),
+      health: () => this.healthPayload(),
+      learnRun: () => ctx.learner.run(),
+      live: {
+        status: () => ctx.live()?.status() ?? null,
+        resume: () => ctx.live()?.resume(),
+        allowed: () => ctx.config.liveTrading && !!ctx.live()?.ready(),
+      },
+      logs: () => ctx.log.tail.toArray().slice(-200).reverse(),
+      onSettingsChanged: () => {
+        const s = ctx.engine().settings;
+        // the engine's onSettings hook already broadcasts the change to open dashboards
+        ctx.log.info("settings updated", { minScore: s.minScore, scoreOnly: s.scoreOnly, tp: s.tpPct, sl: s.slPct, enabled: s.enabled, mode: s.mode });
+      },
+    };
     this.server = createServer((req, res) => {
       this.handle(req, res).catch((e) => {
         ctx.log.error("http handler error", { err: String(e), url: req.url });
@@ -121,9 +139,7 @@ export class DashboardServer {
   }
 
   private accountSummary() {
-    const e = this.ctx.engine();
-    const a = e.account();
-    return { ...a, closed: a.closed.slice(0, 50), equityCurve: a.equityCurve.slice(-400) };
+    return accountSummary(this.ctx.engine());
   }
 
   private healthPayload() {
@@ -260,111 +276,14 @@ export class DashboardServer {
     if (!this.authed(req)) return this.json(res, 401, { error: "login required" });
     if (method === "POST" && req.headers["x-signal"] !== "1") return this.json(res, 403, { error: "missing x-signal header" });
 
-    const e = this.ctx.engine();
-
     if (method === "GET") {
-      switch (path) {
-        case "/api/state":
-          return this.json(res, 200, {
-            settings: e.settings,
-            account: this.accountSummary(),
-            health: this.healthPayload(),
-            funnel: { hour: e.funnel.summary(e.clock, 1), day: e.funnel.summary(e.clock, 24) },
-            signals: e.funnel.recent.toArray().slice(-150).reverse(),
-            serverTime: Date.now(),
-            solUsd: e.solUsd,
-          });
-        case "/api/radar":
-          return this.json(res, 200, {
-            rows: e.radar({
-              limit: Number(url.searchParams.get("limit") ?? 80),
-              minScore: Number(url.searchParams.get("minScore") ?? 0),
-              stage: (url.searchParams.get("stage") as "curve" | "amm" | "all") ?? "all",
-              sort: (url.searchParams.get("sort") as "score" | "new" | "mcap") ?? "score",
-            }),
-          });
-        case "/api/signals":
-          return this.json(res, 200, { signals: e.funnel.recent.toArray().reverse(), hour: e.funnel.summary(e.clock, 1), day: e.funnel.summary(e.clock, 24) });
-        case "/api/learn": {
-          const days = Math.min(60, Math.max(1, Number(url.searchParams.get("days") ?? 14)));
-          const disk = this.ctx.store.loadSamples(days);
-          const samples = disk.length ? disk : e.samples.toArray();
-          return this.json(res, 200, buildReport(samples, e.settings, e.model, e.closed.toArray(), Date.now()));
-        }
-        case "/api/wallets":
-          return this.json(res, 200, { wallets: e.wallets.leaderboard(60), smart: e.wallets.smartCount(), tracked: e.wallets.size });
-        case "/api/narratives":
-          return this.json(res, 200, {
-            clusters: e.narratives.hot(40, (m) => e.tokens.get(m)?.mcapSol ?? 0).map((c) => ({
-              ...c,
-              leaderName: c.leader ? e.tokens.get(c.leader)?.name : undefined,
-              leaderSymbol: c.leader ? e.tokens.get(c.leader)?.symbol : undefined,
-              leaderScore: c.leader ? e.scoreOf(c.leader)?.res.score : undefined,
-            })),
-          });
-        case "/api/logs":
-          return this.json(res, 200, { lines: this.ctx.log.tail.toArray().slice(-200).reverse() });
-        case "/api/stream":
-          return this.stream(req, res);
-        case "/api/export/samples":
-          return this.exportFiles(res, "samples", "signal-samples.jsonl");
-        case "/api/export/journal":
-          return this.exportFiles(res, "journal", "signal-journal.jsonl");
-        default:
-          if (path.startsWith("/api/token/")) {
-            const d = e.tokenDetail(decodeURIComponent(path.slice(11)));
-            return d ? this.json(res, 200, d) : this.json(res, 404, { error: "Coin not tracked right now." });
-          }
-      }
+      if (path === "/api/stream") return this.stream(req, res);
+      if (path === "/api/export/samples") return this.exportFiles(res, "samples", "signal-samples.jsonl");
+      if (path === "/api/export/journal") return this.exportFiles(res, "journal", "signal-journal.jsonl");
     }
-
-    if (method === "POST") {
-      const b = (await this.body(req)) as Record<string, unknown>;
-      switch (path) {
-        case "/api/settings": {
-          if (b.mode === "live" && !(this.ctx.config.liveTrading && this.ctx.live()?.ready())) {
-            return this.json(res, 400, { error: "Live mode is locked: the server has no live trading enabled or the wallet is not ready. See Setup → Go live." });
-          }
-          const s = e.updateSettings(b);
-          this.ctx.log.info("settings updated", { minScore: s.minScore, scoreOnly: s.scoreOnly, tp: s.tpPct, sl: s.slPct, enabled: s.enabled, mode: s.mode });
-          this.broadcast("settings", s);
-          e.persistNow();
-          return this.json(res, 200, { settings: s });
-        }
-        case "/api/kill": {
-          e.setKill(!!b.on, !!b.sellAll);
-          e.persistNow();
-          return this.json(res, 200, { killed: e.killed });
-        }
-        case "/api/learn/run": {
-          const reports = await this.ctx.learner.run();
-          return this.json(res, 200, { reports });
-        }
-        case "/api/live/resume": {
-          this.ctx.live()?.resume();
-          return this.json(res, 200, { live: this.ctx.live()?.status() ?? null });
-        }
-        case "/api/paper/reset": {
-          if (e.positions.size > 0) return this.json(res, 400, { error: "Close open positions first." });
-          e.paperBalance = e.cfg.paperStartSol * 1e9;
-          e.stats.realized = 0;
-          e.stats.dayPnl = 0;
-          e.stats.wins = 0;
-          e.stats.losses = 0;
-          e.stats.equity = [{ t: Date.now(), v: e.paperBalance }];
-          e.closed.clear();
-          e.persistNow();
-          return this.json(res, 200, { ok: true });
-        }
-        default:
-          if (path.startsWith("/api/positions/") && path.endsWith("/close")) {
-            const id = decodeURIComponent(path.slice(15, -6));
-            const ok = e.closeManually(id, "manual");
-            return this.json(res, ok ? 200 : 400, ok ? { ok } : { error: "Position is not closable right now (no price, or an order is in flight)." });
-          }
-      }
-    }
-    return this.json(res, 404, { error: "unknown endpoint" });
+    const body = method === "POST" ? ((await this.body(req)) as Record<string, unknown>) : {};
+    const r = await handleApi(this.api, method, path, url.searchParams, body && typeof body === "object" ? body : {});
+    return this.json(res, r.status, r.json);
   }
 
   private stream(req: IncomingMessage, res: ServerResponse) {

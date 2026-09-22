@@ -63,6 +63,24 @@ var LRU = class {
   delete(k) {
     return this.map.delete(k);
   }
+  /** Drops least-recently-used entries until `target` remain, sparing those `keep` accepts while possible. */
+  shrinkTo(target, keep) {
+    let dropped = 0;
+    if (keep) {
+      for (const [k, v] of this.map) {
+        if (this.map.size <= target) break;
+        if (!keep(k, v)) {
+          this.map.delete(k);
+          dropped++;
+        }
+      }
+    }
+    while (this.map.size > target) {
+      this.map.delete(this.map.keys().next().value);
+      dropped++;
+    }
+    return dropped;
+  }
   entries() {
     return this.map.entries();
   }
@@ -3045,6 +3063,13 @@ var WalletBook = class _WalletBook {
   smartCount() {
     return this.smartSet.size;
   }
+  /** Memory relief: forget the least recently active wallets, keeping ones with a track record. */
+  trim(keepFraction) {
+    const target = Math.floor(this.wallets.size * clamp(keepFraction, 0, 1));
+    const dropped = this.wallets.shrinkTo(target, (a, w) => w.closed >= 3 || w.creates >= 1 || this.smartSet.has(a));
+    for (const a of this.smartSet) if (!this.wallets.peek(a)) this.smartSet.delete(a);
+    return dropped;
+  }
   view(addr, w) {
     const winRate = w.closed ? w.wins / w.closed : 0;
     const avgRoi = w.closed ? w.roiSum / w.closed : 0;
@@ -3096,6 +3121,7 @@ var DEFAULT_CONFIG = {
   checkpointsProgress: [0.25, 0.5, 0.75],
   checkpointsAmmSec: [60, 300, 900, 3600],
   maxSamplesInMemory: 3e4,
+  maxWallets: 15e4,
   seed: 1
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
@@ -3152,7 +3178,7 @@ var Engine = class {
     this.log = opts.log ?? silentLogger;
     this.now = opts.now;
     this.rand = rng(this.cfg.seed);
-    this.wallets = new WalletBook(opts.now);
+    this.wallets = new WalletBook(opts.now, { maxWallets: this.cfg.maxWallets });
     this.samples = new Ring(this.cfg.maxSamplesInMemory);
     this.paperBalance = this.cfg.paperStartSol * LAMPORTS_PER_SOL;
     this.stats = {

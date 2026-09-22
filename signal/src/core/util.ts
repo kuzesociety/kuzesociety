@@ -67,6 +67,24 @@ export class LRU<K, V> {
   delete(k: K) {
     return this.map.delete(k);
   }
+  /** Drops least-recently-used entries until `target` remain, sparing those `keep` accepts while possible. */
+  shrinkTo(target: number, keep?: (k: K, v: V) => boolean): number {
+    let dropped = 0;
+    if (keep) {
+      for (const [k, v] of this.map) {
+        if (this.map.size <= target) break;
+        if (!keep(k, v)) {
+          this.map.delete(k);
+          dropped++;
+        }
+      }
+    }
+    while (this.map.size > target) {
+      this.map.delete(this.map.keys().next().value as K);
+      dropped++;
+    }
+    return dropped;
+  }
   entries() {
     return this.map.entries();
   }

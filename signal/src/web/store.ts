@@ -102,19 +102,43 @@ export function toast(msg: string) {
   toastTimer = setTimeout(() => setState({ toast: "" }), 3200);
 }
 
+/** How the dashboard talks to an engine: HTTP to the server, or an in-page engine (demo). */
+export interface Transport {
+  request(path: string, body?: unknown): Promise<{ status: number; json: any }>;
+  stream(on: (event: string, data: any) => void, onOpen: () => void, onError: () => void): () => void;
+}
+
+const httpTransport: Transport = {
+  async request(path, body) {
+    const res = await fetch(path, {
+      method: body === undefined ? "GET" : "POST",
+      credentials: "same-origin",
+      headers: body === undefined ? { accept: "application/json" } : { "content-type": "application/json", "x-signal": "1" },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, json: await res.json().catch(() => ({})) };
+  },
+  stream(on, onOpen, onError) {
+    const es = new EventSource("/api/stream");
+    es.addEventListener("open", onOpen);
+    es.addEventListener("error", onError);
+    for (const ev of ["hello", "radar", "health", "settings", "signal", "position"]) es.addEventListener(ev, (e) => on(ev, JSON.parse((e as MessageEvent).data)));
+    return () => es.close();
+  },
+};
+
+let transport: Transport = httpTransport;
+export function setTransport(t: Transport) {
+  transport = t;
+}
+
 export async function api<T = any>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(path, {
-    method: body === undefined ? "GET" : "POST",
-    credentials: "same-origin",
-    headers: body === undefined ? { accept: "application/json" } : { "content-type": "application/json", "x-signal": "1" },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (res.status === 401) {
+  const { status, json } = await transport.request(path, body);
+  if (status === 401) {
     setState({ authed: false });
     throw new Error("login required");
   }
-  const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json?.error ?? `HTTP ${res.status}`);
+  if (status >= 400) throw new Error(json?.error ?? `HTTP ${status}`);
   return json as T;
 }
 
@@ -138,37 +162,41 @@ export async function refreshState() {
   }
 }
 
-let es: EventSource | null = null;
+let closeStream: (() => void) | null = null;
 export function connectStream() {
-  if (es) es.close();
-  es = new EventSource("/api/stream");
-  es.addEventListener("open", () => setState({ connected: true }));
-  es.addEventListener("error", () => {
-    setState({ connected: false });
-    // EventSource reconnects by itself; a 401 shows up on the next state refresh
-  });
-  es.addEventListener("hello", (e) => {
-    const d = JSON.parse((e as MessageEvent).data);
-    setState({ settings: d.settings, account: d.account, rows: d.rows, connected: true, lastUpdate: Date.now(), skew: Date.now() - d.serverTime });
-  });
-  es.addEventListener("radar", (e) => {
-    const d = JSON.parse((e as MessageEvent).data);
-    setState({ rows: d.rows, account: d.account, lastUpdate: Date.now(), connected: true });
-  });
-  es.addEventListener("health", (e) => setState({ health: JSON.parse((e as MessageEvent).data) }));
-  es.addEventListener("settings", (e) => setState({ settings: JSON.parse((e as MessageEvent).data) }));
-  es.addEventListener("signal", (e) => {
-    const rec = JSON.parse((e as MessageEvent).data) as SignalRecord;
-    setState({ signals: [rec, ...state.signals.filter((s) => s.id !== rec.id)].slice(0, 200) });
-  });
-  es.addEventListener("position", (e) => {
-    const { position, what } = JSON.parse((e as MessageEvent).data);
-    if (what === "fill" && position.fills?.length === 1) toast(`Bought $${position.symbol || "coin"} · score ${Math.round(position.signalScore)}`);
-    if (what === "close") toast(`Sold $${position.symbol || "coin"} · ${position.exitReason} · ${(position.pnlPct ?? 0).toFixed(1)}%`);
-  });
+  closeStream?.();
+  closeStream = transport.stream(
+    (event, d) => {
+      switch (event) {
+        case "hello":
+          setState({ settings: d.settings, account: d.account, rows: d.rows, connected: true, lastUpdate: Date.now(), skew: Date.now() - d.serverTime });
+          break;
+        case "radar":
+          setState({ rows: d.rows, account: d.account, lastUpdate: Date.now(), connected: true });
+          break;
+        case "health":
+          setState({ health: d });
+          break;
+        case "settings":
+          setState({ settings: d });
+          break;
+        case "signal":
+          setState({ signals: [d, ...state.signals.filter((s) => s.id !== d.id)].slice(0, 200) });
+          break;
+        case "position": {
+          const { position, what } = d;
+          if (what === "fill" && position.fills?.length === 1) toast(`Bought $${position.symbol || "coin"} · score ${Math.round(position.signalScore)}`);
+          if (what === "close") toast(`Sold $${position.symbol || "coin"} · ${position.exitReason} · ${(position.pnlPct ?? 0).toFixed(1)}%`);
+          break;
+        }
+      }
+    },
+    () => setState({ connected: true }),
+    () => setState({ connected: false }),
+  );
 }
 
 export function stopStream() {
-  es?.close();
-  es = null;
+  closeStream?.();
+  closeStream = null;
 }

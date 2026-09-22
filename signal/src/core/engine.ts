@@ -51,6 +51,8 @@ export interface EngineConfig {
   checkpointsProgress: number[];
   checkpointsAmmSec: number[];
   maxSamplesInMemory: number;
+  /** wallets remembered by the wallet book (each ~0.5 KB of memory) */
+  maxWallets: number;
   /** deterministic seed for paper-latency jitter */
   seed: number;
 }
@@ -71,6 +73,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   checkpointsProgress: [0.25, 0.5, 0.75],
   checkpointsAmmSec: [60, 300, 900, 3600],
   maxSamplesInMemory: 30_000,
+  maxWallets: 150_000,
   seed: 1,
 };
 
@@ -259,7 +262,7 @@ export class Engine {
     this.log = opts.log ?? silentLogger;
     this.now = opts.now;
     this.rand = rng(this.cfg.seed);
-    this.wallets = new WalletBook(opts.now);
+    this.wallets = new WalletBook(opts.now, { maxWallets: this.cfg.maxWallets });
     this.samples = new Ring<Sample>(this.cfg.maxSamplesInMemory);
     this.paperBalance = this.cfg.paperStartSol * LAMPORTS_PER_SOL;
     this.stats = {

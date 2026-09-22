@@ -149,6 +149,14 @@ export class WalletBook {
     return this.smartSet.size;
   }
 
+  /** Memory relief: forget the least recently active wallets, keeping ones with a track record. */
+  trim(keepFraction: number): number {
+    const target = Math.floor(this.wallets.size * clamp(keepFraction, 0, 1));
+    const dropped = this.wallets.shrinkTo(target, (a, w) => w.closed >= 3 || w.creates >= 1 || this.smartSet.has(a));
+    for (const a of this.smartSet) if (!this.wallets.peek(a)) this.smartSet.delete(a);
+    return dropped;
+  }
+
   view(addr: string, w: WalletStats): WalletView {
     const winRate = w.closed ? w.wins / w.closed : 0;
     const avgRoi = w.closed ? w.roiSum / w.closed : 0;
