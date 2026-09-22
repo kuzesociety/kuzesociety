@@ -1,0 +1,31 @@
+{
+  "name": "signal-engine",
+  "version": "2.0.0",
+  "description": "SIGNAL: 24/7 pump.fun meme-coin radar, scoring and paper/live trading engine with a mobile dashboard.",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node dist/engine.mjs",
+    "sim": "node dist/engine.mjs --sim",
+    "research": "node dist/research.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "preact": "^10.27.2",
+    "ws": "8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.25.10",
+    "typescript": "5.9.2",
+    "vitest": "3.2.4"
+  }
+}
