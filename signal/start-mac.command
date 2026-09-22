@@ -14,6 +14,8 @@ if [ ! -f dist/engine.mjs ]; then
 fi
 export SIGNAL_SUPERVISED=1
 export SIGNAL_OPEN_BROWSER=1
+export SIGNAL_SELF_UPDATE=1
+# the loop is read whole before it runs, so an update may replace this file meanwhile
 while true; do
   caffeinate -i node dist/engine.mjs
   code=$?

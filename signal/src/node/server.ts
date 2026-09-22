@@ -31,6 +31,7 @@ import {
   telegramTokenLooksValid,
 } from "./setup.js";
 import type { DataStore } from "./store.js";
+import type { Updater } from "./update.js";
 
 export interface AppContext {
   engine: () => Engine;
@@ -45,6 +46,8 @@ export interface AppContext {
   effective: (k: SetupKey) => string;
   /** restarts the bot to apply feed or wallet changes; false when nothing would start it again */
   restart: () => boolean;
+  /** one-tap updates (null in tests that do not need them) */
+  updater?: Updater | null;
   reloadTelegram: () => void;
   port: number;
   dashboardHtml: () => string;
@@ -384,6 +387,7 @@ export class DashboardServer {
         ready: !!this.ctx.live()?.ready(),
       },
       phoneUrl: lan ? `http://${lan}:${this.ctx.port}/?token=${this.ctx.token}` : null,
+      update: this.ctx.updater?.status() ?? null,
     };
   }
 
@@ -459,6 +463,19 @@ export class DashboardServer {
         this.ctx.setup.write({ LIVE_TRADING: "off", WALLET_PRIVATE_KEY: "" });
         const restarting = this.ctx.restart();
         return done({ restarting, ...restartNote(restarting) });
+      }
+      case "/api/setup/update-check": {
+        const u = this.ctx.updater;
+        if (!u) return fail(400, "Updates are not available here.");
+        return done({ update: await u.check() });
+      }
+      case "/api/setup/update": {
+        const u = this.ctx.updater;
+        if (!u) return fail(400, "Updates are not available here.");
+        const r = await u.apply();
+        if (!r.ok) return fail(u.can ? 502 : 400, r.error);
+        if (r.upToDate) return done({ upToDate: true, note: "SIGNAL is already up to date." });
+        return done({ version: r.version, restarting: r.restarting, ...restartNote(r.restarting) });
       }
       case "/api/restart": {
         const restarting = this.ctx.restart();

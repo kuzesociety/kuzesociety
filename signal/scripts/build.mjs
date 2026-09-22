@@ -1,7 +1,9 @@
 // Builds:
 //   dist/dashboard.html  — the dashboard as ONE self-contained HTML file (inline JS/CSS)
 //   dist/engine.mjs      — the server, bundled into a single file (dashboard embedded)
+//   dist/version.json    — a fingerprint of the bot, compared by the dashboard's Update
 //   dist/research.mjs    — the research / replay command line tool
+import { createHash } from "node:crypto";
 import { build } from "esbuild";
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -57,6 +59,16 @@ await build({
   logLevel: "warning",
 });
 console.log("dist/engine.mjs      server bundle");
+
+// the same inputs build the same bundle, so the version changes exactly when the bot or its
+// starters change
+const fingerprint = createHash("sha256");
+for (const f of ["dist/engine.mjs", "start-windows.bat", "start-mac.command", "autostart-windows.bat"]) {
+  if (existsSync(join(root, f))) fingerprint.update(readFileSync(join(root, f)));
+}
+const version = fingerprint.digest("hex").slice(0, 12);
+writeFileSync(join(dist, "version.json"), `${JSON.stringify({ version })}\n`);
+console.log(`dist/version.json    ${version}`);
 
 await build({
   entryPoints: [join(root, "src/research/cli.ts")],

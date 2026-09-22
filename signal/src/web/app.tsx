@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import { signedSol } from "./format";
 import { ext } from "./ext";
-import { api, connectStream, getState, navigate, refreshState, stopStream, useApp } from "./store";
+import { type Health, api, connectStream, getState, navigate, refreshState, stopStream, useApp } from "./store";
 import { Icon } from "./ui";
 import { Bot } from "./views/bot";
 import { Learn } from "./views/learn";
@@ -72,6 +72,33 @@ export function Logo() {
       <rect width="32" height="32" rx="7" fill="var(--ink)" />
       <path d="M6 22 L12 14 L17 18 L26 8" stroke="var(--flare)" stroke-width="3.2" fill="none" stroke-linecap="round" stroke-linejoin="round" />
     </svg>
+  );
+}
+
+/** Why the bot sees no market data, in plain words: still connecting, a refused key, or the socket's own reason. */
+function FeedBanner({ health }: { health: Health }) {
+  const critical = health.feeds.filter((f) => f.critical && f.status !== "off");
+  if (health.uptimeSec < 60 && critical.some((f) => f.status === "connecting" || (f.status === "open" && !f.msgs))) {
+    return <div class="banner sim">Connecting to the live market data…</div>;
+  }
+  const note = critical.map((f) => f.note).find((n) => !!n) ?? "";
+  const why = /\b40[13]\b/.test(note)
+    ? "The data provider refused the key: paste it again in More → Setup."
+    : /\b429\b/.test(note)
+      ? "The data provider is limiting requests (plan limit reached?)."
+      : note
+        ? `Reason: ${note}`
+        : "";
+  return (
+    <div class="banner bad">
+      <span style="flex:1">
+        Live data feed is down — the bot will not open trades until it recovers.
+        {why && <span style="font-weight:500"> {why}</span>}
+      </span>
+      <button class="btn sm" onClick={() => navigate("more", "health")}>
+        Details
+      </button>
+    </div>
   );
 }
 
@@ -158,7 +185,15 @@ export function App() {
           </button>
         </div>
       )}
-      {health && health.feedDown && !health.simulated && <div class="banner bad">Live data feed is down — the bot will not open trades until it recovers.</div>}
+      {health && health.feedDown && !health.simulated && <FeedBanner health={health} />}
+      {!ext.demo && health?.update?.available && health.update.can && (
+        <div class="banner info">
+          <span style="flex:1">A new version of SIGNAL is ready.</span>
+          <button class="btn sm" onClick={() => navigate("more", "setup")}>
+            Update
+          </button>
+        </div>
+      )}
       <nav class="tabs" aria-label="sections">
         {TABS.map(([k, label]) => (
           <button key={k} class="tab" aria-current={tab === k ? "page" : undefined} onClick={() => go(k)}>

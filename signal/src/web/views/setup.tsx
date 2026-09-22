@@ -13,6 +13,12 @@ interface SetupStatus {
   telegram: { tokenSet: boolean; linked: boolean; code: string | null };
   live: { enabled: boolean; pendingRestart: boolean; walletSet: boolean; address: string | null; maxPositionSol: number; maxDailyLossSol: number; ready: boolean };
   phoneUrl: string | null;
+  update: { current: string | null; latest: string | null; checkedAt: number; available: boolean; can: boolean; why: string | null; state: string; error: string | null } | null;
+}
+
+function ago(ts: number) {
+  const m = Math.round((Date.now() - ts) / 60_000);
+  return m < 1 ? "just now" : m < 60 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
 }
 
 /** Helius meters websocket data at about 20 credits per MB (their April 2026 rate). */
@@ -104,9 +110,66 @@ export function SetupView() {
   const feedOk = !st.rpc.isPublic && feed?.status === "open";
   const credits = feed?.mbPerDay ? feed.mbPerDay * CREDITS_PER_MB : null;
 
+  const u = st.update;
+  const updating = busy === "update";
+  const updateCard = u && (
+    <div class={`card step ${u.available ? "hot" : u.can && u.checkedAt ? "done" : ""}`}>
+      <div class="row" style="gap:10px;margin-bottom:8px">
+        <span class="stepno">{u.available ? "↑" : u.can && u.checkedAt ? "✓" : "↻"}</span>
+        <b style="flex:1;font-size:15px">{u.available ? "A new version of SIGNAL is ready" : u.can && u.checkedAt ? "SIGNAL is up to date" : "Updates"}</b>
+        {u.current && (
+          <span class="faint num" title="this bot's version">
+            v {u.current.slice(0, 7)}
+          </span>
+        )}
+      </div>
+      {u.available && u.can && (
+        <>
+          <p class="muted" style="margin:0 0 8px">
+            One tap: the bot downloads it, restarts by itself in about a minute, and keeps your keys, settings, history and open trades.
+          </p>
+          <button
+            class="btn primary"
+            disabled={!!busy}
+            onClick={() => act("update", "/api/setup/update", {}, (r) => r.version && toast(`Installed ${String(r.version).slice(0, 7)} — restarting`))}
+          >
+            {updating ? (u.state === "installing" ? "Installing…" : "Downloading…") : "Update now"}
+          </button>
+        </>
+      )}
+      {u.available && !u.can && (
+        <p class="muted" style="margin:0">
+          {u.why}
+        </p>
+      )}
+      {!u.available && (
+        <div class="row wrap" style="gap:8px">
+          <span class="faint" style="flex:1">
+            {!u.can ? u.why : u.checkedAt ? `Checked ${ago(u.checkedAt)} · checks by itself every few hours.` : "Checks by itself every few hours."}
+          </span>
+          {u.can && (
+            <button
+              class="btn sm ghost"
+              disabled={!!busy}
+              onClick={() => act("check", "/api/setup/update-check", {}, (r) => toast(r.update?.available ? "A new version is ready" : r.update?.checkedAt ? "Up to date" : "Could not reach GitHub — try later"))}
+            >
+              {busy === "check" ? "Checking…" : "Check now"}
+            </button>
+          )}
+        </div>
+      )}
+      {u.state === "failed" && u.error && !updating && (
+        <p class="note" style="color:var(--bad);margin-bottom:0">
+          Last try: {u.error}
+        </p>
+      )}
+    </div>
+  );
+
   return (
     <div class="grid setup">
       {restarting && <div class="banner sim" style="margin:0;width:100%">Restarting the bot to apply it — this page reconnects by itself in a few seconds.</div>}
+      {u?.available && updateCard}
 
       <Step n={1} title="Market data (required)" done={feedOk}>
         <p class="muted" style="margin-top:0">
@@ -259,6 +322,8 @@ export function SetupView() {
           </button>
         )}
       </Step>
+
+      {!u?.available && updateCard}
 
       {!st.supervised && (
         <p class="faint note">

@@ -23,6 +23,9 @@ export interface ReconnectingOptions {
   onHealth?: (h: FeedHealth) => void;
 }
 
+/** Hides API keys in URLs (Helius puts the key in the address) before text is shown or logged. */
+export const redactKeys = (s: string) => s.replace(/(api[-_]?key=)[^&\s"']+/gi, "$1***");
+
 export class ReconnectingWS {
   private ws: WebSocket | null = null;
   private timer: NodeJS.Timeout | null = null;
@@ -30,6 +33,8 @@ export class ReconnectingWS {
   private attempts = 0;
   private stopped = true;
   private lastAliveAt = 0;
+  /** the socket's last error, shown with the next "closed" (e.g. the server refused the key) */
+  private lastError = "";
   readonly h: FeedHealth;
 
   constructor(private o: ReconnectingOptions) {
@@ -76,7 +81,7 @@ export class ReconnectingWS {
 
   private setStatus(s: FeedHealth["status"], note?: string) {
     this.h.status = s;
-    if (note !== undefined) this.h.note = note;
+    if (note !== undefined) this.h.note = redactKeys(note);
     try {
       // the live record, not a copy: message counts and the last-message time change on every
       // message without a status change, and the engine judges "feed down" by them
@@ -107,6 +112,7 @@ export class ReconnectingWS {
     this.ws = ws;
     ws.on("open", () => {
       this.attempts = 0;
+      this.lastError = "";
       this.lastAliveAt = Date.now();
       this.setStatus("open", "");
       this.o.log.info(`${this.o.name}: connected`);
@@ -135,14 +141,16 @@ export class ReconnectingWS {
     });
     ws.on("error", (e) => {
       this.h.errors++;
-      this.o.log.warn(`${this.o.name}: socket error`, { err: String((e as Error).message ?? e) });
+      this.lastError = redactKeys(String((e as Error).message ?? e)).slice(0, 120);
+      this.o.log.warn(`${this.o.name}: socket error`, { err: this.lastError });
     });
     ws.on("close", (code, reason) => {
       if (this.ws !== ws) return;
       this.ws = null;
       if (this.heartbeat) clearInterval(this.heartbeat);
       this.heartbeat = null;
-      this.schedule(`closed ${code}${reason?.length ? " " + reason.toString().slice(0, 80) : ""}`);
+      const why = reason?.length ? reason.toString().slice(0, 80) : this.lastError;
+      this.schedule(`closed ${code}${why ? ` — ${why}` : ""}`);
     });
   }
 
@@ -182,7 +190,7 @@ export class ReconnectingWS {
     const delay = Math.round(ceil / 2 + Math.random() * (ceil / 2));
     this.attempts++;
     this.setStatus("down", why);
-    this.o.log.warn(`${this.o.name}: ${why}; retry in ${(delay / 1000).toFixed(1)}s`);
+    this.o.log.warn(`${this.o.name}: ${redactKeys(why)}; retry in ${(delay / 1000).toFixed(1)}s`);
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => this.connect(), delay);
   }

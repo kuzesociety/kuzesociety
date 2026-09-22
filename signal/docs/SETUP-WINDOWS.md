@@ -38,7 +38,7 @@ The Setup page shows how much data the feed uses per day and whether it fits the
 3. Dashboard: **More → Setup → 2. Telegram** → paste → **Connect**. A 6-digit code appears.
 4. Open your new bot in Telegram and send it that code. The Setup step turns green and the bot says **Linked**.
 
-From then on you get a message for every buy and sell, and you can control the bot from anywhere: `/status` `/pause` `/resume` `/score 75` `/tp 100` `/sl 50` `/hold 10` `/kill`.
+From then on you get a message for every buy and sell, and you can control the bot from anywhere: `/status` `/pause` `/resume` `/score 75` `/tp 100` `/sl 50` `/hold 10` `/kill` `/update`.
 
 ## 6. Start paper trading
 
@@ -56,7 +56,24 @@ From then on you get a message for every buy and sell, and you can control the b
 - **Your phone at home:** **More → Setup → 4** shows a link for your phone (same Wi-Fi). Away from home, use Telegram.
 - **Stop:** close the black window. **Start:** double-click `start-windows.bat` again. Everything is saved in `C:\SIGNAL\data`.
 
-## 8. Going live later (a few clicks, when the evidence says so)
+## 8. Updates (one tap)
+
+The bot checks for a new version every few hours. When one is ready:
+
+1. The dashboard shows a blue bar **"A new version of SIGNAL is ready"** (and Telegram tells you).
+2. Tap **Update** → **Update now**. The bot downloads it, restarts by itself in about a minute, and keeps your keys, settings, history and open trades.
+
+From your phone anywhere: send `/update` to your Telegram bot. You can see your version and check by hand in **More → Setup**.
+
+**Installed before the Update button existed?** Update by hand once:
+
+1. Close the black SIGNAL window.
+2. Download the ZIP again (same link as step 2) → right-click → **Extract All…** → **Extract**.
+3. Open the extracted folder, then the **signal** folder inside it. Press **Ctrl+A** (select all), then **Ctrl+C** (copy).
+4. Open `C:\SIGNAL`, press **Ctrl+V** (paste) → **Replace the files in the destination**. Your `data` folder (keys, settings, history) is not in the download, so it stays as it is.
+5. Double-click **start-windows.bat**.
+
+## 9. Going live later (a few clicks, when the evidence says so)
 
 Only when **Learn → go-live check** is green for your strategy:
 
@@ -71,5 +88,6 @@ The key is saved only in `C:\SIGNAL\data\config.json` on your PC and is never sh
 
 - **The black window closes immediately:** Node.js is not installed — do step 1, then start again.
 - **"Setup needed" banner stays:** the Helius key did not work — paste it again in Setup (the page says why).
+- **Red bar "Live data feed is down":** the bar says why. *Refused the key* → paste your Helius key again in **More → Setup**. *Limiting requests* → the free Helius plan's limit was reached (Setup shows your daily use). Anything else is usually the internet connection: the bot reconnects by itself. Right after starting, "Connecting to the live market data…" for a few seconds is normal.
 - **No trades after hours:** Bot tab → *Why no trades?* lists exactly what blocked each signal.
 - **Dashboard won't open:** make sure the black window is open, then go to http://localhost:8787.

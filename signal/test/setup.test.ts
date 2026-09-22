@@ -53,6 +53,8 @@ describe("setup from the dashboard", () => {
     expect(isPrivateChannel(req("192.168.1.20", { host: "192.168.1.10:8787" }))).toBe(false); // phone on Wi-Fi, plain http
   });
 
+  const silent = { debug() {}, info() {}, warn() {}, error() {} };
+
   it("links Telegram to whoever sends the dashboard's code", () => {
     let linked = "";
     const e = new Engine({ now: Date.now(), model: priorModel() });
@@ -65,6 +67,13 @@ describe("setup from the dashboard", () => {
     expect(t.enabled).toBe(true);
     expect(t.linking).toBe(false);
     expect(new Telegram({ token: "off", chatId: "1", log: { debug() {}, info() {}, warn() {}, error() {} }, engine: () => e }).enabled).toBe(false);
+    // /update from the phone: handed to the updater, or a plain refusal where there is none
+    let asked = 0;
+    const withUpdate = new Telegram({ token: "t", chatId: "1", log: silent, engine: () => e, update: () => (++asked, "⬇️ Downloading the update") });
+    expect(withUpdate.command("/update")).toMatch(/Downloading/);
+    expect(asked).toBe(1);
+    expect(new Telegram({ token: "t", chatId: "1", log: silent, engine: () => e }).command("/update")).toMatch(/cannot update/);
+    expect(withUpdate.command("/help")).toContain("/update");
   });
 
   it("switches the whole rule with a preset, time limit included", () => {

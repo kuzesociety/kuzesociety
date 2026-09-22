@@ -202,6 +202,12 @@ describe("built server end-to-end", () => {
     expect(st.rpc.host).toBe(`127.0.0.1:${rpcPort}`);
     expect(st.local).toBe(true);
     expect(st.supervised).toBe(false);
+    // the bot knows its version; without its starter script it does not update itself
+    const version = JSON.parse(readFileSync(join(ROOT, "dist/version.json"), "utf8")).version;
+    expect(st.update).toMatchObject({ current: version, can: false, available: false, state: "idle" });
+    const upd = await api("/api/setup/update", post({}));
+    expect(upd.status).toBe(400);
+    expect((await upd.json()).error).toMatch(/start-windows\.bat/);
 
     const seed = new Uint8Array(32).fill(7);
     const wallet = walletFromSeed(seed);

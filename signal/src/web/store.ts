@@ -41,6 +41,9 @@ export type Health = Record<string, any> & {
   feeds: { name: string; status: string; lastMsgAt: number; msgs: number; reconnects: number; errors: number; note?: string; critical: boolean }[];
   feedDown: boolean;
   simulated?: boolean;
+  uptimeSec: number;
+  /** one-tap updates (real bot only) */
+  update?: { current: string | null; available: boolean; can: boolean } | null;
 };
 
 export interface AppState {

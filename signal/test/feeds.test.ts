@@ -12,6 +12,7 @@ import { pairToQuote } from "../src/node/feeds/dexscreener.js";
 import { candidateUrls } from "../src/node/feeds/metadata.js";
 import { parsePoolAccount } from "../src/node/feeds/pools.js";
 import { RpcLogsFeed } from "../src/node/feeds/rpc.js";
+import { redactKeys } from "../src/node/ws.js";
 import { EventRouter } from "../src/node/router.js";
 import { key } from "./helpers.js";
 
@@ -103,6 +104,7 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     await waitFor(() => connections >= 2 && subs >= 4, 10_000);
     expect(feed.health.reconnects).toBeGreaterThanOrEqual(1);
     expect(statuses).toContain("down");
+    expect(redactKeys("Invalid URL: wss://mainnet.helius-rpc.com/?api-key=1a2b3c4d-5e6f&x=1")).toBe("Invalid URL: wss://mainnet.helius-rpc.com/?api-key=***&x=1");
     feed.stop();
   });
 });

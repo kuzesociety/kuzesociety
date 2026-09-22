@@ -29,6 +29,8 @@ With Docker instead: `cd signal && cp .env.example .env && docker compose up -d`
 ### Option C: your Windows PC (free) — step-by-step guide: [`docs/SETUP-WINDOWS.md`](docs/SETUP-WINDOWS.md)
 Install [Node.js LTS](https://nodejs.org), [download the bot](https://github.com/kuzesociety/kuzesociety/archive/refs/heads/claude/signal-meme-trading-bot-o142hw.zip), then double-click **`signal/start-windows.bat`**. The dashboard opens in your browser (on the PC itself no token is needed) and the bot restarts automatically if it stops. Everything else — the data-feed key, Telegram, and later the wallet — is done with buttons in **More → Setup**. `autostart-windows.bat` makes it start with Windows. On a Mac, use `start-mac.command` (it also keeps the Mac awake).
 
+**Updates:** a copy started this way checks for a new version every few hours. When one is ready the dashboard shows a blue bar (and Telegram tells you): **More → Setup → Update now**, or send `/update`. It downloads the new version, checks it, installs it over the folder — never touching `data/` (keys, settings, history) or `.env` — and restarts by itself. Servers update by redeploying (Railway/Render) or `git pull && npm run build` (VPS).
+
 ### Try it in your browser first
 `dist/companion.html` (built by `npm run build`) is a single page that runs the real engine on a simulated market, with a research tab and a setup wizard that generates your server settings. Nothing in it touches real coins or money, and it stops when the page closes.
 

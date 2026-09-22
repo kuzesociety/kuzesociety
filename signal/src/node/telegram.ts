@@ -28,6 +28,8 @@ export class Telegram {
       /** no chat yet: whoever sends this code to the bot becomes the owner chat */
       linkCode?: string;
       onLinked?: (chatId: string) => void;
+      /** installs the newest version; returns the reply */
+      update?: () => string;
     },
   ) {}
 
@@ -142,6 +144,7 @@ export class Telegram {
           "/size 0.1 — SOL per trade",
           "/scoreonly on|off — trade on score alone",
           "/kill — stop entries and sell everything · /unkill",
+          "/update — install the newest version of SIGNAL",
         ].join("\n");
       case "/status": {
         const a = e.account();
@@ -198,6 +201,8 @@ export class Telegram {
       case "/unkill":
         e.setKill(false);
         return "Kill switch off.";
+      case "/update":
+        return this.o.update?.() ?? "This bot cannot update itself.";
       default:
         return "Unknown command. /help";
     }

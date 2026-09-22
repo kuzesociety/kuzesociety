@@ -27,6 +27,7 @@ import { DashboardServer } from "./server.js";
 import { type SetupKey, SetupStore, lanAddress, openBrowser } from "./setup.js";
 import { DataStore } from "./store.js";
 import { Telegram } from "./telegram.js";
+import { Updater, findInstallDir } from "./update.js";
 
 declare const __DASHBOARD_HTML__: string | undefined;
 
@@ -63,6 +64,7 @@ export async function main() {
   let pumpportal: PumpPortalFeed | null = null;
   let metadata: MetadataFetcher | null = null;
   let pools: PoolResolver | null = null;
+  let updater: Updater | null = null;
 
   const engine = new Engine({
     now: Date.now(),
@@ -250,6 +252,16 @@ export async function main() {
         setup.write({ TELEGRAM_CHAT_ID: id, TELEGRAM_LINK_CODE: "" });
         log.info("telegram chat linked");
       },
+      update: () => {
+        const st = updater?.status();
+        if (!updater || !st?.can) return st?.why ?? "This bot cannot update itself.";
+        void updater.apply().then((r) => {
+          if (!r.ok) telegram?.send(`⚠️ ${r.error}`);
+          else if (r.upToDate) telegram?.send("✅ SIGNAL is already up to date.");
+          else if (!r.restarting) telegram?.send("✅ Update installed. Close the bot window and start it again to use it.");
+        });
+        return "⬇️ Downloading the update. The bot restarts by itself in about a minute and says hello when it is back.";
+      },
       log,
       engine: () => engine,
     });
@@ -266,6 +278,21 @@ export async function main() {
     return true;
   };
 
+  // one-tap updates for copies installed from the ZIP download (the Windows and Mac starters)
+  updater = new Updater({
+    installDir: findInstallDir(dirname(fileURLToPath(import.meta.url))),
+    selfUpdate: process.env.SIGNAL_SELF_UPDATE === "1" && process.env.SIGNAL_SUPERVISED === "1",
+    log,
+    restart,
+    notedFile: join(config.dataDir, "update-noted"),
+    // the official download unless overridden (tests)
+    zipUrl: process.env.SIGNAL_UPDATE_ZIP_URL || undefined,
+    versionUrl: process.env.SIGNAL_UPDATE_VERSION_URL || undefined,
+    onAvailable: () =>
+      telegram?.send("⬆️ <b>A SIGNAL update is ready.</b>\nSend /update to install it, or tap Update in the dashboard (More → Setup). The bot restarts by itself in about a minute."),
+  });
+  updater.start();
+
   server = new DashboardServer({
     engine: () => engine,
     store,
@@ -277,6 +304,7 @@ export async function main() {
     setup,
     effective,
     restart,
+    updater,
     reloadTelegram: startTelegram,
     port: config.port,
     dashboardHtml,
@@ -288,6 +316,7 @@ export async function main() {
       metadata: metadata ? { fetched: metadata.fetched, failed: metadata.failed } : null,
       pools: pools ? { resolved: pools.resolved } : null,
       simulated: config.feeds.has("sim"),
+      update: updater ? { current: updater.current, available: updater.available, can: updater.can } : null,
     }),
   });
   await server.listen(config.port, config.host);
@@ -323,6 +352,7 @@ export async function main() {
     for (const f of feeds) f.stop();
     solPrice.stop();
     learner.stop();
+    updater?.stop();
     telegram?.stop();
     live?.stop();
     server?.close();

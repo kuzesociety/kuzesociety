@@ -222,6 +222,10 @@ export function Deploy() {
             <li>
               Double-click <code>autostart-windows.bat</code> once so it starts with Windows, and set Windows <b>Settings → System → Power → Sleep</b> to <b>Never</b>.
             </li>
+            <li>
+              Updates: when a new version is ready the dashboard shows a blue bar — tap <b>Update</b>, or send <code>/update</code> in Telegram. It installs and restarts by
+              itself, keeping your keys, settings and history.
+            </li>
           </ol>
         )}
         <p class="faint note">
