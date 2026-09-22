@@ -321,23 +321,18 @@ function EdgeFinder({ mode }: { mode: string }) {
             {hrs(r.holdoutHours)}: <b>{r.survivors.length} held up</b>. On shuffled data, where no rule can work, the same search "found" {r.placebo.avgSurvivors.toFixed(1)} per
             run — that is its rate of fooling itself.
           </p>
-          {r.survivors.map((s) => (
-            <div class="edge" key={s.text}>
-              <div class="edge-rule">{s.text}</div>
-              <div class="num" style="font-size:13px">
-                <b class={s.holdout.mean > 0 ? "good" : "bad"}>{pct(s.holdout.mean, 1, true)}</b> per trade on the newest data · worst case {pct(s.holdout.lo, 1, true)} ·{" "}
-                {s.holdout.n} trades · {pct(s.holdout.winRate)} winners · ~{s.tradesPerDay.toFixed(0)} coins/day
-              </div>
-              <div class="faint num" style="font-size:12.5px">
-                In the search data {pct(s.discovery.mean, 1, true)} · every coin reaching {s.level}, same exit: {pct(s.baseline, 1, true)}
-              </div>
-              {mode === "paper" && (
-                <button class="btn sm primary" style="justify-self:start;margin-top:4px" onClick={() => apply(s)}>
-                  Paper-trade this rule
-                </button>
-              )}
-            </div>
+          {r.survivors.slice(0, 5).map((s) => (
+            <EdgeRow key={s.text} s={s} mode={mode} apply={apply} />
           ))}
+          {r.survivors.length > 5 && (
+            <details class="more">
+              <summary>{r.survivors.length - 5} more variations</summary>
+              {r.survivors.slice(5).map((s) => (
+                <EdgeRow key={s.text} s={s} mode={mode} apply={apply} />
+              ))}
+            </details>
+          )}
+          {r.survivors.length > 0 && <p class="faint note">Coins/day counts every coin that qualified; your size, open-position and hourly limits decide how many the bot actually takes.</p>}
           {!r.survivors.length && <p class="note">{r.note}</p>}
           {r.failed.length > 0 && (
             <details class="more">
@@ -353,6 +348,26 @@ function EdgeFinder({ mode }: { mode: string }) {
             </details>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+function EdgeRow({ s, mode, apply }: { s: EdgeFound; mode: string; apply: (s: EdgeFound) => void }) {
+  return (
+    <div class="edge">
+      <div class="edge-rule">{s.text}</div>
+      <div class="num" style="font-size:13px">
+        <b class={s.holdout.mean > 0 ? "good" : "bad"}>{pct(s.holdout.mean, 1, true)}</b> per trade on the newest data · worst case {pct(s.holdout.lo, 1, true)} · {s.holdout.n}{" "}
+        trades · {pct(s.holdout.winRate)} winners · ~{s.tradesPerDay.toFixed(0)} coins/day
+      </div>
+      <div class="faint num" style="font-size:12.5px">
+        In the search data {pct(s.discovery.mean, 1, true)} · every coin reaching {s.level}, same exit: {pct(s.baseline, 1, true)}
+      </div>
+      {mode === "paper" && (
+        <button class="btn sm primary" style="justify-self:start;margin-top:4px" onClick={() => apply(s)}>
+          Paper-trade this rule
+        </button>
       )}
     </div>
   );

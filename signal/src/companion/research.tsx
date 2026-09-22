@@ -329,6 +329,11 @@ export function Research() {
             It reruns everything on shuffled data, where nothing can work. Across 40 such runs it “found” something 3 times — about the 1-in-20 rate it is designed for.
           </li>
           <li>Rules that survive get a button to paper-trade them. It never switches your settings by itself.</li>
+          <li>
+            Tested end to end on 36 simulated hours: it found that this demo's market has strong short-term momentum (buy at 95, tight stop, sell after 10 minutes) and
+            proved it on hours it never saw. That is a quirk of the simulator, which is more generous than pump.fun — it shows the search finds what is there, not what the real
+            market pays.
+          </li>
         </ul>
         <p class="faint note">It needs about a day of real recorded market to start and a couple of weeks to be confident, and it re-checks every few hours because edges fade.</p>
       </div>

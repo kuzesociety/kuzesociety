@@ -459,6 +459,18 @@ var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
 var GRID_VERSION = 2;
 var PATH_MIN = [5, 10, 30, 60, 120];
 var ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
+var SLOT = 5;
+var STATE = 0;
+var KIND = 1;
+var EXIT_AT = 2;
+var TIME = 3;
+var RET = 4;
+var KINDS = ["timeout", "tp", "sl", "dead"];
+var K_TP = 1;
+var K_SL = 2;
+var COMBOS = 1 + GRID.length;
+var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
+var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
 var r4 = (v) => Math.round(v * 1e4) / 1e4;
 var OutcomeTracker = class {
   constructor(opts, sink) {
@@ -483,8 +495,6 @@ var OutcomeTracker = class {
       this.dropped++;
       return false;
     }
-    const combos = [{ tp: custom.tp, sl: custom.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 }];
-    for (const g of GRID) combos.push({ tp: g.tp, sl: g.sl, state: 0, exitAt: 0, t: -1, kind: "timeout", ret: 0 });
     const h = {
       id: newId("h"),
       kind,
@@ -504,8 +514,10 @@ var OutcomeTracker = class {
       maxMult: 1,
       minMult: 1,
       maxAt: now,
-      combos,
-      open: combos.length,
+      ctp: custom.tp,
+      csl: custom.sl,
+      c: new Float64Array(COMBOS * SLOT),
+      open: COMBOS,
       path: PATH_MIN.map(() => null),
       pathNext: 0,
       f: facts
@@ -539,8 +551,13 @@ var OutcomeTracker = class {
   mult(h, mcap) {
     return h.a * mcap - h.b;
   }
-  /** Records the value at each time-exit horizon that has passed. */
+  /** Records the value at each time-exit horizon that has passed (and keeps the extremes in step). */
   capturePath(h, now, m) {
+    if (m > h.maxMult) {
+      h.maxMult = m;
+      h.maxAt = now;
+    }
+    if (m < h.minMult) h.minMult = m;
     while (h.pathNext < PATH_MIN.length && now - h.ts >= PATH_MIN[h.pathNext] * 6e4) h.path[h.pathNext++] = Math.max(-1, m - 1);
   }
   /** Price update for a token (call after every applied trade / quote). */
@@ -561,51 +578,65 @@ var OutcomeTracker = class {
       }
       if (m < h.minMult) h.minMult = m;
       this.capturePath(h, now, m);
-      for (const c of h.combos) {
-        if (c.state === 2) continue;
-        if (c.state === 1) {
-          if (now >= c.exitAt) this.resolveCombo(h, c, m);
+      const c = h.c;
+      for (let i2 = 0; i2 < COMBOS; i2++) {
+        const o = i2 * SLOT;
+        const state = c[o + STATE];
+        if (state === 2) continue;
+        if (state === 1) {
+          if (now >= c[o + EXIT_AT]) this.resolveCombo(h, i2, m);
           continue;
         }
-        if (m >= 1 + c.tp / 100) this.trigger(h, c, "tp", now, m);
-        else if (m <= 1 - c.sl / 100) this.trigger(h, c, "sl", now, m);
+        if (m >= (i2 === 0 ? 1 + h.ctp / 100 : TP_UP[i2 - 1])) this.trigger(h, i2, K_TP, now, m);
+        else if (m <= (i2 === 0 ? 1 - h.csl / 100 : SL_DOWN[i2 - 1])) this.trigger(h, i2, K_SL, now, m);
       }
       if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
       else if (h.open === 0) this.emit(h, now);
     }
   }
-  trigger(h, c, kind, now, m) {
-    c.kind = kind;
-    c.t = (now - h.ts) / 1e3;
-    if (this.opts.latencyMs <= 0) this.resolveCombo(h, c, m);
+  trigger(h, i, kind, now, m) {
+    const o = i * SLOT;
+    h.c[o + KIND] = kind;
+    h.c[o + TIME] = (now - h.ts) / 1e3;
+    if (this.opts.latencyMs <= 0) this.resolveCombo(h, i, m);
     else {
-      c.state = 1;
-      c.exitAt = now + this.opts.latencyMs;
+      h.c[o + STATE] = 1;
+      h.c[o + EXIT_AT] = now + this.opts.latencyMs;
     }
   }
-  resolveCombo(h, c, m) {
-    if (c.state === 2) return;
-    c.state = 2;
-    c.ret = Math.max(-1, m - 1);
+  resolveCombo(h, i, m) {
+    const o = i * SLOT;
+    if (h.c[o + STATE] === 2) return;
+    h.c[o + STATE] = 2;
+    h.c[o + RET] = Math.max(-1, m - 1);
     h.open--;
   }
   finish(h, m, kind, now) {
     const end = Math.min(now, h.ts + this.opts.horizonMs);
     this.capturePath(h, end, m);
-    for (const c of h.combos) {
-      if (c.state === 2) continue;
-      if (c.state === 0) {
-        c.kind = kind;
-        c.t = (end - h.ts) / 1e3;
+    for (let i = 0; i < COMBOS; i++) {
+      const o = i * SLOT;
+      const state = h.c[o + STATE];
+      if (state === 2) continue;
+      if (state === 0) {
+        h.c[o + KIND] = KINDS.indexOf(kind);
+        h.c[o + TIME] = (end - h.ts) / 1e3;
       }
-      this.resolveCombo(h, c, m);
+      this.resolveCombo(h, i, m);
     }
     this.emit(h, h.ts + this.opts.horizonMs);
   }
   emit(h, now) {
     this.remove(h);
     if (!h.entered) return;
-    const c0 = h.combos[0];
+    const c = h.c;
+    const kind0 = KINDS[c[KIND]];
+    const grid = [];
+    const gridT = [];
+    for (let i = 1; i < COMBOS; i++) {
+      grid.push(r4(c[i * SLOT + RET]));
+      gridT.push(Math.round(Math.max(0, c[i * SLOT + TIME]) * 10) / 10);
+    }
     this.resolvedCount++;
     this.sink({
       id: h.id,
@@ -619,14 +650,14 @@ var OutcomeTracker = class {
       p: h.p,
       x: h.x,
       entryMcap: h.entryMcap,
-      tp: c0.tp,
-      sl: c0.sl,
-      y: c0.kind === "tp" ? 1 : 0,
-      ret: c0.ret,
-      exit: c0.kind,
-      grid: h.combos.slice(1).map((c) => r4(c.ret)),
+      tp: h.ctp,
+      sl: h.csl,
+      y: kind0 === "tp" ? 1 : 0,
+      ret: c[RET],
+      exit: kind0,
+      grid,
       gv: GRID_VERSION,
-      gridT: h.combos.slice(1).map((c) => Math.round(Math.max(0, c.t) * 10) / 10),
+      gridT,
       path: h.path.map((v) => v === null ? null : r4(v)),
       f: h.f,
       maxMult: h.maxMult,
@@ -669,7 +700,7 @@ var OutcomeTracker = class {
         }
         const m = t ? this.mult(h, t.mcapSol) : h.minMult;
         this.capturePath(h, now, m);
-        for (const c of h.combos) if (c.state === 1 && now >= c.exitAt) this.resolveCombo(h, c, m);
+        for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1 && now >= h.c[i * SLOT + EXIT_AT]) this.resolveCombo(h, i, m);
         if (h.open === 0) this.emit(h, now);
         else if (now - h.ts >= this.opts.horizonMs) this.finish(h, m, "timeout", now);
       }
@@ -3335,7 +3366,7 @@ var WalletBook = class _WalletBook {
   startedAt;
   constructor(now, opts = {}) {
     this.startedAt = now;
-    this.wallets = new LRU(opts.maxWallets ?? 25e4);
+    this.wallets = new LRU(opts.maxWallets ?? 8e4);
     this.creators = new LRU(opts.maxCreators ?? 6e4);
   }
   get size() {
@@ -3474,12 +3505,12 @@ var DEFAULT_CONFIG = {
   outcomeLatencyMs: 1500,
   outcomeSizeSol: 0.1,
   outcomeHorizonMs: 6 * 36e5,
-  outcomeMaxOpen: 6e4,
+  outcomeMaxOpen: 3e4,
   checkpointsCurveSec: [20, 45, 90, 180, 360, 720],
   checkpointsProgress: [0.25, 0.5, 0.75],
   checkpointsAmmSec: [60, 300, 900, 3600],
   maxSamplesInMemory: 3e4,
-  maxWallets: 15e4,
+  maxWallets: 8e4,
   seed: 1
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);

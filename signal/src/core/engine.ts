@@ -51,7 +51,7 @@ export interface EngineConfig {
   checkpointsProgress: number[];
   checkpointsAmmSec: number[];
   maxSamplesInMemory: number;
-  /** wallets remembered by the wallet book (each ~0.5 KB of memory) */
+  /** wallets remembered by the wallet book (each ~1 KB of memory) */
   maxWallets: number;
   /** deterministic seed for paper-latency jitter */
   seed: number;
@@ -68,12 +68,12 @@ export const DEFAULT_CONFIG: EngineConfig = {
   outcomeLatencyMs: 1_500,
   outcomeSizeSol: 0.1,
   outcomeHorizonMs: 6 * 3_600_000,
-  outcomeMaxOpen: 60_000,
+  outcomeMaxOpen: 30_000,
   checkpointsCurveSec: [20, 45, 90, 180, 360, 720],
   checkpointsProgress: [0.25, 0.5, 0.75],
   checkpointsAmmSec: [60, 300, 900, 3600],
   maxSamplesInMemory: 30_000,
-  maxWallets: 150_000,
+  maxWallets: 80_000,
   seed: 1,
 };
 

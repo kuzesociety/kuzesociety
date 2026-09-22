@@ -64,7 +64,9 @@ export async function main() {
     log,
     config: {
       paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10,
-      maxWallets: Math.max(5_000, Number(process.env.MAX_WALLETS ?? 150_000) || 150_000),
+      maxWallets: Math.max(5_000, Number(process.env.MAX_WALLETS ?? 80_000) || 80_000),
+      // every resolved sample is on disk; memory only keeps a recent window
+      maxSamplesInMemory: 10_000,
     },
     hooks: {
       persist: (s) => store.saveState(s),
@@ -188,16 +190,19 @@ export async function main() {
       log.warn("wallet snapshot failed", { err: String(e) });
     }
   }, 10 * 60_000);
-  // Memory guard: small cloud instances have 512 MB–1 GB. The wallet book is the only structure
-  // that grows with market activity, so when the heap nears its limit forget the least
-  // recently active wallets (keeping ones with a track record) instead of crashing.
+  // Memory guard: small cloud instances have 512 MB–1 GB. The wallet book is the one structure
+  // that keeps growing with market activity, so when memory runs short forget the least
+  // recently active wallets (keeping ones with a track record) instead of crashing. Two
+  // limits count: V8's heap limit, and the container's own limit, which V8 may not know about.
   const heapLimit = getHeapStatistics().heap_size_limit;
+  const boxed = (process as { constrainedMemory?: () => number | undefined }).constrainedMemory?.() ?? 0;
+  const boxLimit = boxed > 0 && boxed < 64e9 ? boxed : 0;
   const memGuard = setInterval(() => {
-    const used = process.memoryUsage().heapUsed;
-    if (used < heapLimit * 0.7) return;
+    const { heapUsed, rss } = process.memoryUsage();
+    if (heapUsed < heapLimit * 0.7 && !(boxLimit && rss > boxLimit * 0.8)) return;
     const before = engine.wallets.size;
     const dropped = engine.wallets.trim(0.5);
-    log.warn("memory high: trimmed wallet book", { heapMb: Math.round(used / 1e6), limitMb: Math.round(heapLimit / 1e6), before, dropped });
+    log.warn("memory high: trimmed wallet book", { heapMb: Math.round(heapUsed / 1e6), rssMb: Math.round(rss / 1e6), limitMb: Math.round((boxLimit || heapLimit) / 1e6), before, dropped });
   }, 30_000);
   const daily = setInterval(() => {
     store.cleanup(config.recordDays, config.sampleDays);

@@ -110,7 +110,9 @@ Only complete outcomes are used (entries older than the 6-hour follow-up), so th
 
 What it cannot do: find an edge that is not in the data, or guarantee that one found in the past continues. pump.fun is adversarial and changes; the search reruns every few hours, and the go-live check keeps judging whatever rule is live.
 
-<!-- EDGE_SIM -->
+**End-to-end test on the simulator** (*sim*; 36 simulated hours at 8 launches per minute, about 112,000–115,000 entry outcomes per world). The finder scored about 30,000 rules on the first 28.6 hours and re-checked the best 20 on the last 14.3 hours. In both worlds 19–20 rules held up, and the placebo found 0 in 5 shuffled runs. The survivors were variations of one idea: buy when a coin first reaches 90–95, keep a tight stop (−20% to −30%) and sell after 10 minutes (the +500% target almost never triggers). On the unseen hours they averaged +86% per trade in the low-predictability world and +111% to +124% in the other, against +12% to +24% for the plain 2× / −50% exit on the same entries.
+
+Results that good were checked for a bug before being believed. The recorded 10-minute values match the coins' true price moves minus about 5% of costs (median ratio 0.953 over 54,883 values), and the 2× / −50% exit reproduces the earlier runs. So the finder found a real property **of the simulator**: strong short-term momentum. Its coins keep attracting buyers after a burst (self-exciting order flow), far more than real pump.fun coins can on average — if holding ten minutes after a strong score paid +80% on the real market, everyone would be doing it. The test shows the search works end to end and finds what is in the data; it says nothing about the size of any edge on pump.fun. That comes only from the server's recordings.
 
 ## 7. Method
 

@@ -48,7 +48,7 @@ export class WalletBook {
 
   constructor(now: number, opts: { maxWallets?: number; maxCreators?: number } = {}) {
     this.startedAt = now;
-    this.wallets = new LRU(opts.maxWallets ?? 250_000);
+    this.wallets = new LRU(opts.maxWallets ?? 80_000);
     this.creators = new LRU(opts.maxCreators ?? 60_000);
   }
 
