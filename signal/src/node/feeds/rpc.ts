@@ -5,7 +5,8 @@
  * PumpSwap is not streamed whole: every swap on every PumpSwap pool is about nine tenths
  * of the data (most of those pools never came from pump.fun), which is what made a metered
  * key run out in hours. Instead the pools that matter are followed one by one: coins we
- * hold, and coins that just graduated (for an hour). `ammFirehose` restores the whole stream.
+ * hold, coins that just graduated (for an hour), and graduated coins whose would-be trades
+ * are still being measured. `ammFirehose` restores the whole stream.
  *
  * Through a metered key (Helius and others charge per MB) the stream stays within a daily
  * budget; past it, the free public feed takes over until 00:00 UTC.
@@ -32,8 +33,9 @@ export interface RpcFeedOptions {
   onBudgetSpent?: (limitMb: number) => void;
   /** stream every PumpSwap swap instead of following pools one by one */
   ammFirehose?: boolean;
-  /** pools of the coins we hold (asked every `poolCheckMs`, 5 s by default) */
-  heldPools?: () => string[];
+  /** pools the engine needs: coins held, and graduates whose would-be trades are still followed
+   * (asked every `poolCheckMs`, 5 s by default) */
+  followPools?: () => string[];
   poolCheckMs?: number;
   commitment?: "processed" | "confirmed";
   log: Logger;
@@ -133,7 +135,7 @@ export class RpcLogsFeed {
     for (const [pool, until] of this.graduates) if (until < now) this.graduates.delete(pool);
     let held: string[] = [];
     try {
-      held = this.o.heldPools?.() ?? [];
+      held = this.o.followPools?.() ?? [];
     } catch {
       held = [];
     }

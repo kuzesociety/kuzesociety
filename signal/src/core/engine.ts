@@ -215,6 +215,8 @@ interface ScoreEntry {
   reached: number;
   /** consecutive evaluations at or above each entry level */
   held: Uint8Array;
+  /** fixed points (checkpoint tags) this coin has already reached: each counts once */
+  cps: string[];
 }
 
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
@@ -616,7 +618,7 @@ export class Engine {
     const x = featureVector(f);
     let e = this.scores.get(t.mint);
     if (!e) {
-      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
+      e = { res, f, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length), cps: [] };
       this.scores.set(t.mint, e);
     } else {
       e.res = res;
@@ -634,10 +636,18 @@ export class Engine {
     return e;
   }
 
+  /**
+   * Fixed points in a coin's life (an age, a share of the curve, a time after graduation):
+   * each is followed once per coin as a would-be entry, with the facts the filters see, and
+   * is the entry itself when the settings trade at that point.
+   */
   private checkpoints(t: TokenState, e: ScoreEntry, now: number) {
     const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
     const add = (tag: string) => {
-      if (!this.outcomes.has(t.mint, tag)) this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom);
+      if (e.cps.includes(tag)) return;
+      e.cps.push(tag);
+      this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
+      if (this.settings.entryAt === tag) this.fire(t, e, now, true);
     };
     if (t.stage === "curve") {
       const age = (now - t.createdAt) / 1000;
@@ -678,6 +688,8 @@ export class Engine {
   private signalLogic(t: TokenState, e: ScoreEntry, now: number) {
     this.entryLevels(t, e, now);
     const s = this.settings;
+    // entries at a fixed point in a coin's life come from checkpoints() instead
+    if (s.entryAt !== "score") return;
     const score = e.res.score;
     if (score >= s.minScore) e.above++;
     else {
@@ -689,6 +701,13 @@ export class Engine {
     }
     if (!e.armed || e.above < s.confirmTicks) return;
     e.armed = false;
+    this.fire(t, e, now, false);
+  }
+
+  /** A signal: recorded, checked against every limit and filter, and entered if nothing blocks it. */
+  private fire(t: TokenState, e: ScoreEntry, now: number, structural: boolean) {
+    const s = this.settings;
+    const score = e.res.score;
     const rec: SignalRecord = {
       id: newId("s"),
       ts: now,
@@ -704,7 +723,7 @@ export class Engine {
     };
     const custom = { tp: s.tpPct, sl: s.slPct };
     this.outcomes.add(t, "signal", `sig${Math.floor(now / 1000)}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
-    const blocked = this.entryBlock(t, e);
+    const blocked = this.entryBlock(t, e, structural);
     if (blocked) {
       rec.decision = "blocked";
       rec.reason = blocked;
@@ -718,7 +737,7 @@ export class Engine {
   }
 
   /** Account-level limits always apply; token filters only when "score only" is off. */
-  private entryBlock(t: TokenState, e: ScoreEntry): string | null {
+  private entryBlock(t: TokenState, e: ScoreEntry, structural = false): string | null {
     const s = this.settings;
     if (!s.enabled) return "bot_off";
     if (this.killed) return "kill_switch";
@@ -736,7 +755,8 @@ export class Engine {
     this.stats.entryTimes = this.stats.entryTimes.filter((x) => x > hourAgo);
     if (this.stats.entryTimes.length >= s.maxTradesPerHour) return "rate_limit";
     if (this.feedDown()) return "feed_down";
-    if (!this.modelReady()) return "warming_up";
+    // the score is not what triggers an entry at a fixed point, so its warm-up does not matter
+    if (!structural && !this.modelReady()) return "warming_up";
     if (s.mode === "live") {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
@@ -1349,12 +1369,26 @@ export class Engine {
   /** When settings and positions last reached the disk, and failed saves in a row since. */
   saved = { at: 0, failures: 0, error: "" };
 
-  /** Pools of the coins we hold that trade on PumpSwap: their swaps must reach us. */
-  heldPools(): string[] {
+  /**
+   * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
+   * would-be trades are still being followed (without their swaps, a coin that keeps trading
+   * would look dead and bias the results), newest first, `max` in all.
+   */
+  poolsToFollow(max = 40): string[] {
     const out = new Set<string>();
     for (const p of this.positions.values()) {
       const pool = this.tokens.get(p.mint)?.pool;
       if (pool) out.add(pool);
+    }
+    const followed: { pool: string; at: number }[] = [];
+    for (const mint of this.outcomes.openMints()) {
+      const t = this.tokens.get(mint);
+      if (t?.stage === "amm" && t.pool && !out.has(t.pool)) followed.push({ pool: t.pool, at: t.migrateAt ?? 0 });
+    }
+    followed.sort((a, b) => b.at - a.at);
+    for (const f of followed) {
+      if (out.size >= max) break;
+      out.add(f.pool);
     }
     return [...out];
   }

@@ -58,6 +58,34 @@ describe("entries", () => {
     expect(s.positions().map((p) => p.mint)).toEqual([OTHER]);
   });
 
+  it("enters at a fixed point of a coin's life when a proven rule says so — once, and not on the score", () => {
+    const s = new Scenario({ entryAt: "prog50", minScore: 0, scoreOnly: true });
+    const A = key(900);
+    s.create(A, key(901));
+    s.crowd(A, 10, 0.5, 910); // the score is above 0 all along: a score entry would have bought here
+    s.advance(2_000);
+    expect(s.positions()).toHaveLength(0);
+    let at = -1;
+    for (let i = 0; i < 200 && at < 0; i++) {
+      s.buy(A, key(1_000 + i), 0.3, 400);
+      if (s.positions().length) at = s.engine.tokens.get(A)!.progress;
+    }
+    // bought as the coin crossed the halfway mark
+    expect(at).toBeGreaterThanOrEqual(0.5);
+    expect(at).toBeLessThan(0.62);
+    // the coin keeps trading through the window: still one position
+    for (let i = 0; i < 10; i++) s.buy(A, key(1_300 + i), 0.2, 400);
+    s.advance(3_000);
+    expect(s.positions().filter((p) => p.mint === A)).toHaveLength(1);
+    // switching back to score entries: a new coin is bought on its score, early
+    s.engine.updateSettings({ entryAt: "score" });
+    const B = key(902);
+    s.create(B, key(903));
+    s.crowd(B, 10, 0.5, 950);
+    s.advance(2_000);
+    expect(s.positions().some((p) => p.mint === B)).toBe(true);
+  });
+
   it("fills at the price when the order LANDS (latency), not when it was decided", () => {
     const s = new Scenario({ scoreOnly: true, paperLatencyMs: 2000, slippagePct: 50 });
     s.create(MINT, DEV);

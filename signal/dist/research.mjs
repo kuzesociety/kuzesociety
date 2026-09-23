@@ -490,6 +490,10 @@ var OutcomeTracker = class {
   has(mint, tag) {
     return this.byMint.get(mint)?.some((h) => h.tag === tag) ?? false;
   }
+  /** Coins with would-be trades still being followed. */
+  openMints() {
+    return this.byMint.keys();
+  }
   add(t, kind, tag, now, score, p, x, custom, facts) {
     if (this.openCount >= this.opts.maxOpen) {
       this.dropped++;
@@ -708,6 +712,141 @@ var OutcomeTracker = class {
   }
 };
 
+// src/core/settings.ts
+var ENTRY_POINTS = {
+  age20: "20 s after launch",
+  age45: "45 s after launch",
+  age90: "90 s after launch",
+  age180: "3 min after launch",
+  age360: "6 min after launch",
+  age720: "12 min after launch",
+  prog25: "a quarter of the way to graduation",
+  prog50: "halfway to graduation",
+  prog75: "three quarters of the way to graduation",
+  mig60: "1 min after graduating",
+  mig300: "5 min after graduating",
+  mig900: "15 min after graduating",
+  mig3600: "1 h after graduating"
+};
+var DEFAULT_SETTINGS = {
+  enabled: false,
+  mode: "paper",
+  minScore: 75,
+  entryAt: "score",
+  scoreOnly: false,
+  tradeCurve: true,
+  tradeAmm: true,
+  tpPct: 100,
+  slPct: 50,
+  trailPct: 0,
+  takeInitials: false,
+  maxHoldMin: 240,
+  staleExitMin: 10,
+  positionSol: 0.1,
+  maxOpen: 3,
+  maxDailyLossSol: 0.5,
+  maxTradesPerHour: 12,
+  slippagePct: 20,
+  exitSlippagePct: 25,
+  priorityFeeSol: 5e-4,
+  platformFeePct: 0.5,
+  // hold ~5 s (one evaluation per second while the coin trades): in simulation, buying on the
+  // first tick above the line caught more one-off spikes and did 2–6 points worse per trade
+  confirmTicks: 5,
+  retryWindowSec: 20,
+  reentry: false,
+  paperLatencyMs: 1500,
+  autoTune: false,
+  filters: {
+    minMcapSol: 0,
+    maxMcapSol: 0,
+    maxDevPct: 20,
+    maxTop10Pct: 60,
+    maxBundlePct: 25,
+    minBuyers: 5,
+    minAgeSec: 0,
+    maxAgeMin: 0,
+    requireSocials: false,
+    maxDevLaunches24h: 5,
+    maxDevSoldPct: 100
+  }
+};
+var LIMITS = {
+  positionSol: [1e-3, 100],
+  maxOpen: [1, 50],
+  tpPct: [1, 1e4],
+  slPct: [1, 99],
+  slippagePct: [0.5, 99],
+  exitSlippagePct: [1, 99],
+  priorityFeeSol: [0, 0.1],
+  platformFeePct: [0, 5],
+  maxHoldMin: [0, 10080],
+  paperLatencyMs: [0, 3e4]
+};
+function bool(v, d) {
+  return typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : d;
+}
+function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
+  const i = input && typeof input === "object" ? input : {};
+  const f2 = i.filters && typeof i.filters === "object" ? i.filters : {};
+  const b = base;
+  const bf = base.filters;
+  const out = {
+    enabled: bool(i.enabled, b.enabled),
+    mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
+    minScore: clamp(num(i.minScore, b.minScore), 0, 100),
+    entryAt: i.entryAt === "score" || typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS ? i.entryAt : b.entryAt,
+    scoreOnly: bool(i.scoreOnly, b.scoreOnly),
+    tradeCurve: bool(i.tradeCurve, b.tradeCurve),
+    tradeAmm: bool(i.tradeAmm, b.tradeAmm),
+    tpPct: clamp(num(i.tpPct, b.tpPct), ...LIMITS.tpPct),
+    slPct: clamp(num(i.slPct, b.slPct), ...LIMITS.slPct),
+    trailPct: clamp(num(i.trailPct, b.trailPct), 0, 95),
+    takeInitials: bool(i.takeInitials, b.takeInitials),
+    maxHoldMin: clamp(num(i.maxHoldMin, b.maxHoldMin), ...LIMITS.maxHoldMin),
+    staleExitMin: clamp(num(i.staleExitMin, b.staleExitMin), 0, 1440),
+    positionSol: clamp(num(i.positionSol, b.positionSol), ...LIMITS.positionSol),
+    maxOpen: Math.round(clamp(num(i.maxOpen, b.maxOpen), ...LIMITS.maxOpen)),
+    maxDailyLossSol: clamp(num(i.maxDailyLossSol, b.maxDailyLossSol), 0, 1e3),
+    maxTradesPerHour: Math.round(clamp(num(i.maxTradesPerHour, b.maxTradesPerHour), 1, 500)),
+    slippagePct: clamp(num(i.slippagePct, b.slippagePct), ...LIMITS.slippagePct),
+    exitSlippagePct: clamp(num(i.exitSlippagePct, b.exitSlippagePct), ...LIMITS.exitSlippagePct),
+    priorityFeeSol: clamp(num(i.priorityFeeSol, b.priorityFeeSol), ...LIMITS.priorityFeeSol),
+    platformFeePct: clamp(num(i.platformFeePct, b.platformFeePct), ...LIMITS.platformFeePct),
+    confirmTicks: Math.round(clamp(num(i.confirmTicks, b.confirmTicks), 1, 20)),
+    retryWindowSec: clamp(num(i.retryWindowSec, b.retryWindowSec), 0, 600),
+    reentry: bool(i.reentry, b.reentry),
+    paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
+    autoTune: bool(i.autoTune, b.autoTune),
+    filters: {
+      minMcapSol: clamp(num(f2.minMcapSol, bf.minMcapSol), 0, 1e7),
+      maxMcapSol: clamp(num(f2.maxMcapSol, bf.maxMcapSol), 0, 1e7),
+      maxDevPct: clamp(num(f2.maxDevPct, bf.maxDevPct), 0, 100),
+      maxTop10Pct: clamp(num(f2.maxTop10Pct, bf.maxTop10Pct), 0, 100),
+      maxBundlePct: clamp(num(f2.maxBundlePct, bf.maxBundlePct), 0, 100),
+      minBuyers: Math.round(clamp(num(f2.minBuyers, bf.minBuyers), 0, 1e4)),
+      minAgeSec: clamp(num(f2.minAgeSec, bf.minAgeSec), 0, 86400),
+      maxAgeMin: clamp(num(f2.maxAgeMin, bf.maxAgeMin), 0, 1e5),
+      requireSocials: bool(f2.requireSocials, bf.requireSocials),
+      maxDevLaunches24h: Math.round(clamp(num(f2.maxDevLaunches24h, bf.maxDevLaunches24h), 0, 1e3)),
+      maxDevSoldPct: clamp(num(f2.maxDevSoldPct, bf.maxDevSoldPct), 0, 100)
+    }
+  };
+  if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
+  return out;
+}
+function exitPlanFrom(s) {
+  return {
+    tpPct: s.tpPct,
+    slPct: s.slPct,
+    trailPct: s.trailPct,
+    takeInitials: s.takeInitials,
+    maxHoldMin: s.maxHoldMin,
+    staleExitMin: s.staleExitMin,
+    exitSlippagePct: s.exitSlippagePct
+  };
+}
+
 // src/core/edges.ts
 var HOLDS_MIN = [0, 10, 30, 60];
 var EXITS = GRID.length * HOLDS_MIN.length;
@@ -778,12 +917,14 @@ function describe(r) {
   const cond = CONDITIONS.find((c) => c.key === r.cond);
   const when = r.cond === "any" ? "" : ` \xB7 ${cond.label}`;
   const time = r.hold ? `, or after ${r.hold} min` : "";
-  return `Buy when a coin first reaches ${r.level}${when} \xB7 sell at +${r.tp}% or \u2212${r.sl}%${time}`;
+  const entry = r.at ? `Buy every coin ${ENTRY_POINTS[r.at] ?? r.at}` : `Buy when a coin first reaches ${r.level}`;
+  return `${entry}${when} \xB7 sell at +${r.tp}% or \u2212${r.sl}%${time}`;
 }
 function settingsFor(r) {
   const cond = CONDITIONS.find((c) => c.key === r.cond);
   const out = {
-    minScore: r.level,
+    entryAt: r.at ?? "score",
+    minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,
     maxHoldMin: r.hold || 360,
@@ -865,7 +1006,7 @@ function* steps(samples, opts) {
   for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
   const cutoff = lastResolved - o.horizonMs;
   const rows = samples.filter(
-    (s) => s.kind === "entry" && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
+    (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS) && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
   );
   rows.sort((a, b) => a.ts - b.ts);
   const n = rows.length;
@@ -875,7 +1016,7 @@ function* steps(samples, opts) {
   base.samples = n;
   base.hours = hours;
   if (n < o.minSamples || hours < o.minHours) {
-    base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished entry outcomes (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 36e5)} hours after its entry.`;
+    base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished would-be trades (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 36e5)} hours after its entry.`;
     return base;
   }
   const R = new Float32Array(n * EXITS);
@@ -884,39 +1025,46 @@ function* steps(samples, opts) {
     for (let c = 0; c < GRID.length; c++) for (let h = 0; h < HOLDS_MIN.length; h++) R[i * EXITS + c * HOLDS_MIN.length + h] = exitReturn(s, c, h);
     if (i % 2e3 === 0) yield;
   }
-  const split = t0 + (t1 - t0) * 2 / 3;
   const groups = [];
-  const byLevel = /* @__PURE__ */ new Map();
+  const byEntry = /* @__PURE__ */ new Map();
   rows.forEach((s, i) => {
-    const level = Number(s.tag.slice(1));
-    let list = byLevel.get(level);
-    if (!list) byLevel.set(level, list = []);
+    let list = byEntry.get(s.tag);
+    if (!list) byEntry.set(s.tag, list = []);
     list.push(i);
   });
-  for (const level of ENTRY_LEVELS) {
-    const idx = byLevel.get(level) ?? [];
+  const families = [
+    ...ENTRY_LEVELS.map((level) => ({ tag: `x${level}`, level })),
+    ...Object.keys(ENTRY_POINTS).map((at) => ({ tag: at, level: 0, at }))
+  ];
+  for (const fam of families) {
+    const idx = byEntry.get(fam.tag) ?? [];
+    if (!idx.length) continue;
+    const f0 = rows[idx[0]].ts;
+    const f1 = rows[idx[idx.length - 1]].ts;
+    const split = f0 + (f1 - f0) * 2 / 3;
+    const holdDays = Math.max(1 / 24, (f1 - split) / 864e5);
     CONDITIONS.forEach((cond, ci) => {
       const disc = [];
       const hold = [];
       for (const i of idx) if (cond.test(rows[i])) (rows[i].ts < split ? disc : hold).push(i);
-      groups.push({ level, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold) });
+      groups.push({ level: fam.level, at: fam.at, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold), holdDays });
     });
   }
   const zero = new Float64Array(EXITS);
   const real = { R, row: (i) => i, shift: zero, wins: (v) => v > 0 };
   const run = yield* search(real, groups, o);
-  const holdDays = Math.max(1 / 24, (t1 - split) / 864e5);
   const toFound = (c, holdSt) => {
     const combo = Math.floor(c.e / HOLDS_MIN.length);
     const rule = { level: c.g.level, cond: CONDITIONS[c.g.cond].key, tp: GRID[combo].tp, sl: GRID[combo].sl, hold: HOLDS_MIN[c.e % HOLDS_MIN.length] };
-    const all = groups.find((g) => g.level === c.g.level && g.cond === 0);
+    if (c.g.at) rule.at = c.g.at;
+    const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0);
     return {
       ...rule,
       text: describe(rule),
       discovery: c.disc,
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
-      tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i].mint)).size / holdDays,
+      tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i].mint)).size / c.g.holdDays,
       settings: settingsFor(rule)
     };
   };
@@ -938,7 +1086,7 @@ function* steps(samples, opts) {
     }
     counts.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0 }, groups, o)).passed.length);
   }
-  const discHours = (split - t0) / 36e5;
+  const discHours = hours * (2 / 3);
   return {
     ...base,
     status: "ok",
@@ -1780,124 +1928,6 @@ function buildReport(samples, settings, model, closed, now) {
   };
 }
 
-// src/core/settings.ts
-var DEFAULT_SETTINGS = {
-  enabled: false,
-  mode: "paper",
-  minScore: 75,
-  scoreOnly: false,
-  tradeCurve: true,
-  tradeAmm: true,
-  tpPct: 100,
-  slPct: 50,
-  trailPct: 0,
-  takeInitials: false,
-  maxHoldMin: 240,
-  staleExitMin: 10,
-  positionSol: 0.1,
-  maxOpen: 3,
-  maxDailyLossSol: 0.5,
-  maxTradesPerHour: 12,
-  slippagePct: 20,
-  exitSlippagePct: 25,
-  priorityFeeSol: 5e-4,
-  platformFeePct: 0.5,
-  // hold ~5 s (one evaluation per second while the coin trades): in simulation, buying on the
-  // first tick above the line caught more one-off spikes and did 2–6 points worse per trade
-  confirmTicks: 5,
-  retryWindowSec: 20,
-  reentry: false,
-  paperLatencyMs: 1500,
-  autoTune: false,
-  filters: {
-    minMcapSol: 0,
-    maxMcapSol: 0,
-    maxDevPct: 20,
-    maxTop10Pct: 60,
-    maxBundlePct: 25,
-    minBuyers: 5,
-    minAgeSec: 0,
-    maxAgeMin: 0,
-    requireSocials: false,
-    maxDevLaunches24h: 5,
-    maxDevSoldPct: 100
-  }
-};
-var LIMITS = {
-  positionSol: [1e-3, 100],
-  maxOpen: [1, 50],
-  tpPct: [1, 1e4],
-  slPct: [1, 99],
-  slippagePct: [0.5, 99],
-  exitSlippagePct: [1, 99],
-  priorityFeeSol: [0, 0.1],
-  platformFeePct: [0, 5],
-  maxHoldMin: [0, 10080],
-  paperLatencyMs: [0, 3e4]
-};
-function bool(v, d) {
-  return typeof v === "boolean" ? v : v === "true" ? true : v === "false" ? false : d;
-}
-function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
-  const i = input && typeof input === "object" ? input : {};
-  const f2 = i.filters && typeof i.filters === "object" ? i.filters : {};
-  const b = base;
-  const bf = base.filters;
-  const out = {
-    enabled: bool(i.enabled, b.enabled),
-    mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
-    minScore: clamp(num(i.minScore, b.minScore), 0, 100),
-    scoreOnly: bool(i.scoreOnly, b.scoreOnly),
-    tradeCurve: bool(i.tradeCurve, b.tradeCurve),
-    tradeAmm: bool(i.tradeAmm, b.tradeAmm),
-    tpPct: clamp(num(i.tpPct, b.tpPct), ...LIMITS.tpPct),
-    slPct: clamp(num(i.slPct, b.slPct), ...LIMITS.slPct),
-    trailPct: clamp(num(i.trailPct, b.trailPct), 0, 95),
-    takeInitials: bool(i.takeInitials, b.takeInitials),
-    maxHoldMin: clamp(num(i.maxHoldMin, b.maxHoldMin), ...LIMITS.maxHoldMin),
-    staleExitMin: clamp(num(i.staleExitMin, b.staleExitMin), 0, 1440),
-    positionSol: clamp(num(i.positionSol, b.positionSol), ...LIMITS.positionSol),
-    maxOpen: Math.round(clamp(num(i.maxOpen, b.maxOpen), ...LIMITS.maxOpen)),
-    maxDailyLossSol: clamp(num(i.maxDailyLossSol, b.maxDailyLossSol), 0, 1e3),
-    maxTradesPerHour: Math.round(clamp(num(i.maxTradesPerHour, b.maxTradesPerHour), 1, 500)),
-    slippagePct: clamp(num(i.slippagePct, b.slippagePct), ...LIMITS.slippagePct),
-    exitSlippagePct: clamp(num(i.exitSlippagePct, b.exitSlippagePct), ...LIMITS.exitSlippagePct),
-    priorityFeeSol: clamp(num(i.priorityFeeSol, b.priorityFeeSol), ...LIMITS.priorityFeeSol),
-    platformFeePct: clamp(num(i.platformFeePct, b.platformFeePct), ...LIMITS.platformFeePct),
-    confirmTicks: Math.round(clamp(num(i.confirmTicks, b.confirmTicks), 1, 20)),
-    retryWindowSec: clamp(num(i.retryWindowSec, b.retryWindowSec), 0, 600),
-    reentry: bool(i.reentry, b.reentry),
-    paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
-    autoTune: bool(i.autoTune, b.autoTune),
-    filters: {
-      minMcapSol: clamp(num(f2.minMcapSol, bf.minMcapSol), 0, 1e7),
-      maxMcapSol: clamp(num(f2.maxMcapSol, bf.maxMcapSol), 0, 1e7),
-      maxDevPct: clamp(num(f2.maxDevPct, bf.maxDevPct), 0, 100),
-      maxTop10Pct: clamp(num(f2.maxTop10Pct, bf.maxTop10Pct), 0, 100),
-      maxBundlePct: clamp(num(f2.maxBundlePct, bf.maxBundlePct), 0, 100),
-      minBuyers: Math.round(clamp(num(f2.minBuyers, bf.minBuyers), 0, 1e4)),
-      minAgeSec: clamp(num(f2.minAgeSec, bf.minAgeSec), 0, 86400),
-      maxAgeMin: clamp(num(f2.maxAgeMin, bf.maxAgeMin), 0, 1e5),
-      requireSocials: bool(f2.requireSocials, bf.requireSocials),
-      maxDevLaunches24h: Math.round(clamp(num(f2.maxDevLaunches24h, bf.maxDevLaunches24h), 0, 1e3)),
-      maxDevSoldPct: clamp(num(f2.maxDevSoldPct, bf.maxDevSoldPct), 0, 100)
-    }
-  };
-  if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
-  return out;
-}
-function exitPlanFrom(s) {
-  return {
-    tpPct: s.tpPct,
-    slPct: s.slPct,
-    trailPct: s.trailPct,
-    takeInitials: s.takeInitials,
-    maxHoldMin: s.maxHoldMin,
-    staleExitMin: s.staleExitMin,
-    exitSlippagePct: s.exitSlippagePct
-  };
-}
-
 // src/core/codec.ts
 var B58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 var B58_MAP = (() => {
@@ -2405,7 +2435,7 @@ import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
 import { StringDecoder } from "node:string_decoder";
 var day = (ts) => new Date(ts).toISOString().slice(0, 10);
-var SAMPLE_LIMITS = { checkpoints: 4e4, entries: 25e3 };
+var SAMPLE_LIMITS = { checkpoints: 4e4, structural: 2e4, entries: 25e3 };
 function forEachLine(path, fn) {
   const fd = openSync(path, "r");
   try {
@@ -2524,18 +2554,17 @@ var DataStore = class {
       return [];
     }
     const perFile = [];
-    let nCp = 0;
-    let nEn = 0;
+    const cap = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
+    const used = { cp: 0, st: 0, en: 0 };
+    const bucketOf = (line) => !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
     for (const f2 of files) {
-      const roomCp = limits.checkpoints - nCp;
-      const roomEn = limits.entries - nEn;
-      if (roomCp <= 0 && roomEn <= 0) break;
-      const cps = [];
-      const ens = [];
+      const room = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
+      if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;
+      const got = { cp: [], st: [], en: [] };
       try {
         forEachLine(join(this.dir, "samples", f2), (line) => {
-          const isCp = line.includes('"kind":"checkpoint"');
-          if (isCp ? roomCp <= 0 : roomEn <= 0) return;
+          const b = bucketOf(line);
+          if (room[b] <= 0) return;
           let s;
           try {
             s = JSON.parse(line);
@@ -2543,20 +2572,19 @@ var DataStore = class {
             return;
           }
           if (!Array.isArray(s.x) || s.y !== 0 && s.y !== 1) return;
-          const into = s.kind === "checkpoint" ? cps : ens;
-          const room = s.kind === "checkpoint" ? roomCp : roomEn;
+          const into = got[b];
           into.push(s);
-          if (into.length >= room * 2) into.splice(0, into.length - room);
+          if (into.length >= room[b] * 2) into.splice(0, into.length - room[b]);
         });
       } catch (e) {
         this.log.warn("could not read samples", { file: f2, err: String(e) });
         continue;
       }
-      if (cps.length > roomCp) cps.splice(0, cps.length - Math.max(0, roomCp));
-      if (ens.length > roomEn) ens.splice(0, ens.length - Math.max(0, roomEn));
-      nCp += cps.length;
-      nEn += ens.length;
-      perFile.push(cps.concat(ens));
+      for (const b of ["cp", "st", "en"]) {
+        if (got[b].length > room[b]) got[b].splice(0, got[b].length - Math.max(0, room[b]));
+        used[b] += got[b].length;
+      }
+      perFile.push(got.cp.concat(got.st, got.en));
     }
     return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
   }
@@ -3894,7 +3922,7 @@ var Engine = class {
     const x = featureVector(f2);
     let e = this.scores.get(t.mint);
     if (!e) {
-      e = { res, f: f2, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length) };
+      e = { res, f: f2, x, at: now, above: 0, armed: true, lastFunnelAt: 0, reached: 0, held: new Uint8Array(ENTRY_LEVELS.length), cps: [] };
       this.scores.set(t.mint, e);
     } else {
       e.res = res;
@@ -3911,10 +3939,18 @@ var Engine = class {
     this.signalLogic(t, e, now);
     return e;
   }
+  /**
+   * Fixed points in a coin's life (an age, a share of the curve, a time after graduation):
+   * each is followed once per coin as a would-be entry, with the facts the filters see, and
+   * is the entry itself when the settings trade at that point.
+   */
   checkpoints(t, e, now) {
     const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
     const add = (tag) => {
-      if (!this.outcomes.has(t.mint, tag)) this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom);
+      if (e.cps.includes(tag)) return;
+      e.cps.push(tag);
+      this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
+      if (this.settings.entryAt === tag) this.fire(t, e, now, true);
     };
     if (t.stage === "curve") {
       const age = (now - t.createdAt) / 1e3;
@@ -3953,6 +3989,7 @@ var Engine = class {
   signalLogic(t, e, now) {
     this.entryLevels(t, e, now);
     const s = this.settings;
+    if (s.entryAt !== "score") return;
     const score = e.res.score;
     if (score >= s.minScore) e.above++;
     else {
@@ -3961,6 +3998,12 @@ var Engine = class {
     }
     if (!e.armed || e.above < s.confirmTicks) return;
     e.armed = false;
+    this.fire(t, e, now, false);
+  }
+  /** A signal: recorded, checked against every limit and filter, and entered if nothing blocks it. */
+  fire(t, e, now, structural) {
+    const s = this.settings;
+    const score = e.res.score;
     const rec = {
       id: newId("s"),
       ts: now,
@@ -3976,7 +4019,7 @@ var Engine = class {
     };
     const custom = { tp: s.tpPct, sl: s.slPct };
     this.outcomes.add(t, "signal", `sig${Math.floor(now / 1e3)}`, now, score, e.res.p, e.x, custom, entryFacts(t, e.f));
-    const blocked = this.entryBlock(t, e);
+    const blocked = this.entryBlock(t, e, structural);
     if (blocked) {
       rec.decision = "blocked";
       rec.reason = blocked;
@@ -3989,7 +4032,7 @@ var Engine = class {
     this.hooks.onSignal?.(rec);
   }
   /** Account-level limits always apply; token filters only when "score only" is off. */
-  entryBlock(t, e) {
+  entryBlock(t, e, structural = false) {
     const s = this.settings;
     if (!s.enabled) return "bot_off";
     if (this.killed) return "kill_switch";
@@ -4007,7 +4050,7 @@ var Engine = class {
     this.stats.entryTimes = this.stats.entryTimes.filter((x) => x > hourAgo);
     if (this.stats.entryTimes.length >= s.maxTradesPerHour) return "rate_limit";
     if (this.feedDown()) return "feed_down";
-    if (!this.modelReady()) return "warming_up";
+    if (!structural && !this.modelReady()) return "warming_up";
     if (s.mode === "live") {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
@@ -4567,12 +4610,26 @@ var Engine = class {
   }
   /** When settings and positions last reached the disk, and failed saves in a row since. */
   saved = { at: 0, failures: 0, error: "" };
-  /** Pools of the coins we hold that trade on PumpSwap: their swaps must reach us. */
-  heldPools() {
+  /**
+   * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
+   * would-be trades are still being followed (without their swaps, a coin that keeps trading
+   * would look dead and bias the results), newest first, `max` in all.
+   */
+  poolsToFollow(max = 40) {
     const out = /* @__PURE__ */ new Set();
     for (const p of this.positions.values()) {
       const pool = this.tokens.get(p.mint)?.pool;
       if (pool) out.add(pool);
+    }
+    const followed = [];
+    for (const mint of this.outcomes.openMints()) {
+      const t = this.tokens.get(mint);
+      if (t?.stage === "amm" && t.pool && !out.has(t.pool)) followed.push({ pool: t.pool, at: t.migrateAt ?? 0 });
+    }
+    followed.sort((a, b) => b.at - a.at);
+    for (const f2 of followed) {
+      if (out.size >= max) break;
+      out.add(f2.pool);
     }
     return [...out];
   }
@@ -4958,6 +5015,16 @@ async function pipelineSelfTest(opts = {}) {
 }
 
 // src/research/cli.ts
+var USAGE = `SIGNAL research CLI
+
+  node dist/research.mjs report   [--data ./data] [--days 14]
+  node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
+  node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
+  node dist/research.mjs train    [--data ./data] [--days 14] [--adopt]
+  node dist/research.mjs edges    [--data ./data] [--days 30] [--placebo 5]   (searches for rules that made money on their own)
+  node dist/research.mjs sim      [--hours 6] [--out ./simdata] [--predictability 0.7] [--seed 1]
+  node dist/research.mjs selftest            (proves the learning pipeline on known worlds)
+`;
 function args(argv) {
   const out = {};
   for (let i = 0; i < argv.length; i++) {
@@ -5066,12 +5133,12 @@ Go-live gate: ${r.gate.verdict} \u2014 ${r.gate.detail}`);
       console.log(r.note);
       if (r.status === "ok") {
         console.log(`
-${r.samples.toLocaleString("en-US")} entry outcomes over ${r.hours.toFixed(1)} h: searched the first ${r.discoveryHours.toFixed(1)} h, checked on the last ${r.holdoutHours.toFixed(1)} h`);
+${r.samples.toLocaleString("en-US")} would-be trades over ${r.hours.toFixed(1)} h: searched the first ${r.discoveryHours.toFixed(1)} h, checked on the last ${r.holdoutHours.toFixed(1)} h`);
         console.log(`${r.tested.toLocaleString("en-US")} rules scored, ${r.candidates} re-tested, ${r.survivors.length} held up. Placebo (shuffled data): ${r.placebo.avgSurvivors.toFixed(2)} per run, max ${r.placebo.maxSurvivors}
 `);
         for (const s of r.survivors)
           console.log(`\u2714 ${s.text}
-   newest data ${pct2(s.holdout.mean)} per trade (worst case ${pct2(s.holdout.lo)}, ${s.holdout.n} trades, ${pct2(s.holdout.winRate)} winners) \xB7 search data ${pct2(s.discovery.mean)} \xB7 every coin at ${s.level}: ${pct2(s.baseline)} \xB7 ${s.tradesPerDay.toFixed(0)} coins/day`);
+   newest data ${pct2(s.holdout.mean)} per trade (worst case ${pct2(s.holdout.lo)}, ${s.holdout.n} trades, ${pct2(s.holdout.winRate)} winners) \xB7 search data ${pct2(s.discovery.mean)} \xB7 every coin at the same entry: ${pct2(s.baseline)} \xB7 ${s.tradesPerDay.toFixed(0)} coins/day`);
         for (const s of r.failed) console.log(`\u2718 ${s.text}: ${pct2(s.discovery.mean)} in the search data, ${pct2(s.holdout.mean)} on the newest data`);
       }
       break;
@@ -5082,7 +5149,7 @@ ${r.samples.toLocaleString("en-US")} entry outcomes over ${r.hours.toFixed(1)} h
       break;
     }
     default:
-      console.log(readFileSync2(new URL(import.meta.url)).toString().split("*/")[0]);
+      console.log(USAGE);
   }
 }
 main().catch((e) => {

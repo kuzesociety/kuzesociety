@@ -36,6 +36,11 @@ export interface Settings {
   /** enter when score ≥ this (0–100) */
   minScore: number;
   /**
+   * What triggers an entry: "score" (the score reaches minScore), or a fixed point in a
+   * coin's life (see ENTRY_POINTS) — for rules the edge finder proves on recorded data.
+   */
+  entryAt: string;
+  /**
    * Score only: ignore every token filter below and enter on the score alone.
    * Account limits (budget, max positions, one entry per coin) still apply —
    * they protect the wallet, not judge the token.
@@ -83,10 +88,31 @@ export interface Settings {
   filters: Filters;
 }
 
+/**
+ * Fixed points in a coin's life where every coin is followed as a would-be entry (the bot
+ * records them all), in plain words. Keys match the engine's checkpoint tags.
+ */
+export const ENTRY_POINTS: Record<string, string> = {
+  age20: "20 s after launch",
+  age45: "45 s after launch",
+  age90: "90 s after launch",
+  age180: "3 min after launch",
+  age360: "6 min after launch",
+  age720: "12 min after launch",
+  prog25: "a quarter of the way to graduation",
+  prog50: "halfway to graduation",
+  prog75: "three quarters of the way to graduation",
+  mig60: "1 min after graduating",
+  mig300: "5 min after graduating",
+  mig900: "15 min after graduating",
+  mig3600: "1 h after graduating",
+};
+
 export const DEFAULT_SETTINGS: Settings = {
   enabled: false,
   mode: "paper",
   minScore: 75,
+  entryAt: "score",
   scoreOnly: false,
   tradeCurve: true,
   tradeAmm: true,
@@ -154,6 +180,7 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     enabled: bool(i.enabled, b.enabled),
     mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
     minScore: clamp(num(i.minScore, b.minScore), 0, 100),
+    entryAt: i.entryAt === "score" || (typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS) ? i.entryAt : b.entryAt,
     scoreOnly: bool(i.scoreOnly, b.scoreOnly),
     tradeCurve: bool(i.tradeCurve, b.tradeCurve),
     tradeAmm: bool(i.tradeAmm, b.tradeAmm),

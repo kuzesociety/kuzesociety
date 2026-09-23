@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 import { CONDITIONS, type EdgeFound, type EdgeReport, HOLDS_MIN } from "../../core/edges";
 import { ENTRY_LEVELS, GRID, GRID_SL, GRID_TP } from "../../core/outcomes";
 import type { LearnReport } from "../../core/report";
+import { ENTRY_POINTS } from "../../core/settings";
 import { pct } from "../format";
 import { api, toast, useApp } from "../store";
 import { Empty, Tag } from "../ui";
@@ -309,7 +310,8 @@ function EdgeFinder({ mode }: { mode: string }) {
         <div style="flex:1">
           <h2 style="margin-bottom:4px">Edge finder</h2>
           <div class="muted" style="font-size:13px">
-            Looks for profitable rules on its own: {ENTRY_LEVELS.length} score levels × {CONDITIONS.length} coin conditions × {GRID.length * HOLDS_MIN.length} exits (take
+            Looks for profitable rules on its own: {ENTRY_LEVELS.length + Object.keys(ENTRY_POINTS).length} kinds of entry ({ENTRY_LEVELS.length} score levels, and{" "}
+            {Object.keys(ENTRY_POINTS).length} fixed points in a coin's life such as halfway to graduation) × {CONDITIONS.length} coin conditions × {GRID.length * HOLDS_MIN.length} exits (take
             profit {GRID_TP[0]}–{GRID_TP[GRID_TP.length - 1]}%, stop {GRID_SL[0]}–{GRID_SL[GRID_SL.length - 1]}%, optional time limit). The best are re-checked on newer data
             the search never saw.
           </div>
@@ -318,7 +320,7 @@ function EdgeFinder({ mode }: { mode: string }) {
           {busy || r?.running ? "Searching…" : "Search now"}
         </button>
       </div>
-      {!r && <p class="faint note">Runs after every learning cycle, every few hours. Needs about a day of recorded market first.</p>}
+      {!r && <p class="faint note">Runs every 2 hours (Telegram: /edges). Needs about a day of recorded market first.</p>}
       {r?.status === "not_enough_data" && <p class="faint note">{r.note}</p>}
       {r?.status === "ok" && (
         <>

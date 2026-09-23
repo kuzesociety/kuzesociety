@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { EdgeReport } from "../../core/edges";
 import { type Preset, followsPreset, ruleSummary, strategyList } from "../../core/presets";
-import { type Settings, rebaseSettings, settingsChanges } from "../../core/settings";
+import { ENTRY_POINTS, type Settings, rebaseSettings, settingsChanges } from "../../core/settings";
 import { ext } from "../ext";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
@@ -109,6 +109,14 @@ export function Bot() {
       <div class="grid two" style="margin-top:12px">
         <div class="card">
           <h2>Entry</h2>
+          {draft.entryAt !== "score" && (
+            <div class="note" style="margin:0 0 10px;padding:10px 12px;border-radius:var(--r-sm);background:var(--flare-soft)">
+              <b>Buying every coin {ENTRY_POINTS[draft.entryAt] ?? draft.entryAt}</b> (a rule the edge finder proved), filters below applied — the score is not used.{" "}
+              <button class="btn sm" disabled={busy} onClick={() => save({ entryAt: "score" })}>
+                Enter by score instead
+              </button>
+            </div>
+          )}
           <Field
             label={`Minimum score: ${draft.minScore}`}
             htmlFor="minScore"

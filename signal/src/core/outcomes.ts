@@ -163,6 +163,11 @@ export class OutcomeTracker {
     return this.byMint.get(mint)?.some((h) => h.tag === tag) ?? false;
   }
 
+  /** Coins with would-be trades still being followed. */
+  openMints(): IterableIterator<string> {
+    return this.byMint.keys();
+  }
+
   add(
     t: TokenState,
     kind: SampleKind,

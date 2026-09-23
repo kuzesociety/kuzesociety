@@ -209,7 +209,7 @@ export async function main() {
       onBudgetSpent: (mb) =>
         telegram?.send(`📉 Today's ${mb} MB of streaming through your RPC key is used. SIGNAL switched to the free public feed until 00:00 UTC, so your key's credits stop here.`),
       ammFirehose: config.ammFirehose,
-      heldPools: () => engine.heldPools(),
+      followPools: () => engine.poolsToFollow(),
       log,
       onEvent: (ev) => router.push(ev),
       onHealth,
@@ -316,6 +316,7 @@ export async function main() {
       },
       about: () => ({ version, update: !!updater?.available, data: dataSource() }),
       strategies: () => strategyList(learner.lastEdges),
+      edges: () => ({ report: learner.lastEdges, running: learner.edgesRunning }),
       links: () => {
         const out: { label: string; url: string }[] = [];
         const lanIp = lanAddress();

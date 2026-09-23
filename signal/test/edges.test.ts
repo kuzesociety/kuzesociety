@@ -12,14 +12,15 @@ const T0 = Date.UTC(2026, 8, 1);
  * Entry outcomes over `days`: every exit loses on average (like most of pump.fun), except
  * where `edge` says otherwise.
  */
-function makeEntries(n: number, days: number, seed: number, edge?: (s: Sample, c: number) => number | null): Sample[] {
+function makeEntries(n: number, days: number, seed: number, edge?: (s: Sample, c: number) => number | null, tags?: string[], fromDay = 0): Sample[] {
   const r = rng(seed);
   const out: Sample[] = [];
   for (let i = 0; i < n; i++) {
-    const ts = T0 + r() * days * 86_400_000;
+    const ts = T0 + (fromDay + r() * (days - fromDay)) * 86_400_000;
     const level = ENTRY_LEVELS[Math.floor(r() * ENTRY_LEVELS.length)]!;
+    const tag = tags ? tags[Math.floor(r() * tags.length)]! : `x${level}`;
     const s: Sample = {
-      id: `e${i}`, kind: "entry", tag: `x${level}`, mint: `m${i}`, symbol: "X", ts, stage: r() < 0.4 ? "amm" : "curve",
+      id: `e${i}${tag}`, kind: tag.startsWith("x") ? "entry" : "checkpoint", tag, mint: `m${i}`, symbol: "X", ts, stage: tag.startsWith("mig") || (tag.startsWith("x") && r() < 0.4) ? "amm" : "curve",
       score: level, p: 0.1, x: [], entryMcap: 50, tp: 100, sl: 50, y: 0, ret: 0, exit: "timeout", grid: [], maxMult: 1, minMult: 1, secToMax: 0,
       resolvedAt: ts + 3_600_000, gv: GRID_VERSION, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
       f: { mcap: 20 + r() * 600, age: 10 + r() * 1800, buyers: Math.floor(3 + r() * 300), top10: 0.1 + r() * 0.7, bundle: r() * 0.4, devShare: r() * 0.3, devSold: r() < 0.5 ? 0 : r(), socials: Math.floor(r() * 4), launches24h: 1 + Math.floor(r() * 6) },
@@ -60,6 +61,24 @@ describe("edge finder", () => {
     // the rule is directly runnable: graduated coins only, score-only (no filter needed)
     expect(top.settings).toMatchObject({ minScore: top.level, tpPct: 50, slPct: 20, tradeCurve: false, tradeAmm: true, scoreOnly: true });
     expect(rep.placebo.avgSurvivors).toBeLessThanOrEqual(1);
+  });
+
+  it("finds an edge at a fixed point in coins' lives, checked on its own unseen days, and makes it tradable", () => {
+    const target = GRID.findIndex((g) => g.tp === 75 && g.sl === 30);
+    // score entries over 10 days; the fixed points were only recorded for the last 3 days —
+    // one time split for everything (at day 6.7) would put them all in the holdout and never
+    // search them
+    const entries = makeEntries(10_000, 10, 21);
+    const points = makeEntries(6_000, 10, 22, (s, c) => (c === target && s.tag === "prog50" ? 0.55 : null), ["prog25", "prog50", "prog75", "mig300", "age180"], 7);
+    const rep = findEdges([...entries, ...points], { now: T0 + 11 * 86_400_000 });
+    expect(rep.status).toBe("ok");
+    const top = rep.survivors[0]!;
+    expect(top).toBeDefined();
+    expect(top.at).toBe("prog50");
+    expect([top.tp, top.sl]).toEqual([75, 30]);
+    expect(top.text).toContain("Buy every coin halfway to graduation");
+    expect(top.settings).toMatchObject({ entryAt: "prog50", minScore: 0, tpPct: 75, slPct: 30 });
+    expect(rep.survivors.every((x) => x.at === "prog50")).toBe(true);
   });
 
   it("finds nothing in pure noise, and the placebo agrees", () => {

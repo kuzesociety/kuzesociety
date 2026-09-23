@@ -11,7 +11,7 @@
  *      how often it "finds" one there shows how often it fools itself.
  */
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "./outcomes.js";
-import type { Settings } from "./settings.js";
+import { ENTRY_POINTS, type Settings } from "./settings.js";
 import { rng } from "./util.js";
 
 /** Time limits tried with every take-profit/stop-loss pair (minutes, 0 = none). */
@@ -72,7 +72,10 @@ export interface EdgeStats {
 }
 
 export interface EdgeRule {
+  /** entry when the score first reaches this level (0 when `at` is set) */
   level: number;
+  /** or entry at a fixed point in every coin's life (a key of ENTRY_POINTS) */
+  at?: string;
   cond: string;
   tp: number;
   sl: number;
@@ -83,7 +86,7 @@ export interface EdgeFound extends EdgeRule {
   text: string;
   discovery: EdgeStats;
   holdout: EdgeStats;
-  /** holdout average for every coin reaching the same score with the same exit */
+  /** holdout average for every coin at the same entry (score level or fixed point) with the same exit */
   baseline: number;
   tradesPerDay: number;
   /** settings that make the bot trade exactly this rule */
@@ -165,13 +168,15 @@ function describe(r: EdgeRule): string {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const when = r.cond === "any" ? "" : ` · ${cond.label}`;
   const time = r.hold ? `, or after ${r.hold} min` : "";
-  return `Buy when a coin first reaches ${r.level}${when} · sell at +${r.tp}% or −${r.sl}%${time}`;
+  const entry = r.at ? `Buy every coin ${ENTRY_POINTS[r.at] ?? r.at}` : `Buy when a coin first reaches ${r.level}`;
+  return `${entry}${when} · sell at +${r.tp}% or −${r.sl}%${time}`;
 }
 
 function settingsFor(r: EdgeRule): Partial<Settings> {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const out: Partial<Settings> = {
-    minScore: r.level,
+    entryAt: r.at ?? "score",
+    minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,
     maxHoldMin: r.hold || 360,
@@ -188,9 +193,12 @@ function settingsFor(r: EdgeRule): Partial<Settings> {
 
 interface Group {
   level: number;
+  at?: string;
   cond: number;
   disc: Int32Array;
   hold: Int32Array;
+  /** days covered by this entry family's holdout (for trades per day) */
+  holdDays: number;
 }
 
 interface Scored {
@@ -297,12 +305,19 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     placebo: { runs: 0, avgSurvivors: 0, maxSurvivors: 0 },
   };
 
-  // Entry outcomes in the current layout, complete (older than the follow-up horizon).
+  // Would-be entries in the current layout, complete (older than the follow-up horizon): the
+  // first time a coin reached each score level, and every coin at each fixed point in its life.
   let lastResolved = 0;
   for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
   const cutoff = lastResolved - o.horizonMs;
   const rows = samples.filter(
-    (s) => s.kind === "entry" && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff,
+    (s) =>
+      (s.kind === "entry" || (s.kind === "checkpoint" && s.tag in ENTRY_POINTS)) &&
+      s.gv === GRID_VERSION &&
+      s.f &&
+      s.gridT?.length === GRID.length &&
+      s.path?.length === PATH_MIN.length &&
+      s.ts <= cutoff,
   );
   rows.sort((a, b) => a.ts - b.ts);
   const n = rows.length;
@@ -312,7 +327,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   base.samples = n;
   base.hours = hours;
   if (n < o.minSamples || hours < o.minHours) {
-    base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished entry outcomes (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 3_600_000)} hours after its entry.`;
+    base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished would-be trades (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 3_600_000)} hours after its entry.`;
     return base;
   }
 
@@ -324,22 +339,31 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     if (i % 2_000 === 0) yield;
   }
 
-  const split = t0 + ((t1 - t0) * 2) / 3;
+  // Each entry family is split on its own time span (older two thirds to search, newest third
+  // to check), so families recorded over different spans are all checked on unseen data.
   const groups: Group[] = [];
-  const byLevel = new Map<number, number[]>();
+  const byEntry = new Map<string, number[]>();
   rows.forEach((s, i) => {
-    const level = Number(s.tag.slice(1));
-    let list = byLevel.get(level);
-    if (!list) byLevel.set(level, (list = []));
+    let list = byEntry.get(s.tag);
+    if (!list) byEntry.set(s.tag, (list = []));
     list.push(i);
   });
-  for (const level of ENTRY_LEVELS) {
-    const idx = byLevel.get(level) ?? [];
+  const families: { tag: string; level: number; at?: string }[] = [
+    ...ENTRY_LEVELS.map((level) => ({ tag: `x${level}`, level })),
+    ...Object.keys(ENTRY_POINTS).map((at) => ({ tag: at, level: 0, at })),
+  ];
+  for (const fam of families) {
+    const idx = byEntry.get(fam.tag) ?? [];
+    if (!idx.length) continue;
+    const f0 = rows[idx[0]!]!.ts;
+    const f1 = rows[idx[idx.length - 1]!]!.ts;
+    const split = f0 + ((f1 - f0) * 2) / 3;
+    const holdDays = Math.max(1 / 24, (f1 - split) / 86_400_000);
     CONDITIONS.forEach((cond, ci) => {
       const disc: number[] = [];
       const hold: number[] = [];
       for (const i of idx) if (cond.test(rows[i]!)) (rows[i]!.ts < split ? disc : hold).push(i);
-      groups.push({ level, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold) });
+      groups.push({ level: fam.level, at: fam.at, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold), holdDays });
     });
   }
 
@@ -347,18 +371,18 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   const real: Data = { R, row: (i) => i, shift: zero, wins: (v) => v > 0 };
   const run = yield* search(real, groups, o);
 
-  const holdDays = Math.max(1 / 24, (t1 - split) / 86_400_000);
   const toFound = (c: Scored, holdSt: EdgeStats): EdgeFound => {
     const combo = Math.floor(c.e / HOLDS_MIN.length);
     const rule: EdgeRule = { level: c.g.level, cond: CONDITIONS[c.g.cond]!.key, tp: GRID[combo]!.tp, sl: GRID[combo]!.sl, hold: HOLDS_MIN[c.e % HOLDS_MIN.length]! };
-    const all = groups.find((g) => g.level === c.g.level && g.cond === 0)!;
+    if (c.g.at) rule.at = c.g.at;
+    const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0)!;
     return {
       ...rule,
       text: describe(rule),
       discovery: c.disc,
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
-      tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i]!.mint)).size / holdDays,
+      tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i]!.mint)).size / c.g.holdDays,
       settings: settingsFor(rule),
     };
   };
@@ -386,7 +410,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     counts.push((yield* search({ R, row: (i) => perm[i]!, shift: colMean, wins: (v) => v > 0 }, groups, o)).passed.length);
   }
 
-  const discHours = (split - t0) / 3_600_000;
+  const discHours = hours * (2 / 3);
   return {
     ...base,
     status: "ok",

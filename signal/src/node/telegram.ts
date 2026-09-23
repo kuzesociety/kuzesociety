@@ -3,6 +3,7 @@
  * control the bot with commands — works with the dashboard closed. Only messages from
  * the configured chat id are obeyed.
  */
+import type { EdgeReport } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import type { Position } from "../core/positions.js";
 import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
@@ -37,6 +38,8 @@ export class Telegram {
       strategies?: () => Preset[];
       /** dashboard links that open from the phone (home Wi-Fi, anywhere with Tailscale) */
       links?: () => { label: string; url: string }[];
+      /** the edge finder's latest answer, and whether it is running now */
+      edges?: () => { report: EdgeReport | null; running: boolean };
     },
   ) {}
 
@@ -158,6 +161,7 @@ export class Telegram {
           "<b>SIGNAL commands</b>",
           "/status — bot, P&amp;L, market data, version",
           "/strategy — list the strategies · /strategy 2 — switch to one",
+          "/edges — has the bot found an edge? (checked every 2 h)",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -208,6 +212,10 @@ export class Telegram {
         if (e.settings.mode === "live" && extra?.toLowerCase() !== "yes") return `You are trading LIVE. Send /strategy ${pick} yes to switch to ${esc(p.name)}.`;
         e.updateSettings(p.settings);
         return `${e.settings.enabled ? "▶️ Now trading" : "Strategy set (auto-trading is paused — /resume to start)"}: <b>${esc(p.name)}</b> · ${ruleSummary(e.settings)}`;
+      }
+      case "/edges": {
+        const x = this.o.edges?.();
+        return edgesMessage(x?.report ?? null, x?.running ?? false);
       }
       case "/link": {
         const links = this.o.links?.() ?? [];
@@ -282,4 +290,32 @@ export class Telegram {
       this.send(`⚠️ Entry failed ${name}: ${esc(p.exitReason ?? "?")}`);
     }
   }
+}
+
+const signedPct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
+
+/** The edge finder's latest answer, for the phone. */
+export function edgesMessage(r: EdgeReport | null, running: boolean, now = Date.now()): string {
+  if (!r) {
+    return running
+      ? "🔎 The edge finder is running for the first time — ask again in a few minutes."
+      : "🔎 The edge finder has not run yet: it runs after the first learning round (20 min after start), then every 2 hours.";
+  }
+  const ago = Math.max(0, Math.round((now - r.generatedAt) / 60_000));
+  const head = `🔎 <b>Edge finder</b> · checked ${ago < 120 ? `${ago} min` : `${Math.round(ago / 60)} h`} ago${running ? " · running again now" : ""}`;
+  if (r.status === "not_enough_data") return `${head}\nStill collecting: ${esc(r.note)}`;
+  const lines = [head, `${r.hours.toFixed(0)} h of market · ${r.samples.toLocaleString("en-US")} would-be trades · ${r.tested.toLocaleString("en-US")} rules tried`];
+  if (r.survivors.length) {
+    lines.push(`✅ <b>${r.survivors.length} rule${r.survivors.length > 1 ? "s" : ""} held up on data the search never saw:</b>`);
+    r.survivors.slice(0, 3).forEach((x, i) =>
+      lines.push(`${i + 1}. ${esc(x.text)}\n    ${signedPct(x.holdout.mean)} per trade on ${x.holdout.n} unseen trades · about ${x.tradesPerDay.toFixed(1)} a day`),
+    );
+    lines.push("Send /strategy to paper-trade one.");
+  } else {
+    lines.push("No rule has held up on unseen data yet. That is a real answer: it keeps the money out of rules that only looked good by luck.");
+    const near = r.failed[0];
+    if (near) lines.push(`Closest try: ${esc(near.text)} — ${signedPct(near.discovery.mean)} while searching, ${signedPct(near.holdout.mean)} on unseen data.`);
+  }
+  lines.push(`Luck check: on shuffled data the same search "finds" ${r.placebo.avgSurvivors.toFixed(1)} rules on average.`);
+  return lines.join("\n");
 }

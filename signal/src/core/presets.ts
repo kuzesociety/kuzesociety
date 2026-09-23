@@ -4,7 +4,7 @@
  * never leaves a mix of the old and the new strategy behind.
  */
 import type { EdgeReport } from "./edges.js";
-import type { Settings } from "./settings.js";
+import { ENTRY_POINTS, type Settings } from "./settings.js";
 
 export interface Preset {
   key: string;
@@ -16,7 +16,7 @@ export interface Preset {
 }
 
 /** Settings every strategy sets, so a switch replaces the whole rule. */
-const BASE: Partial<Settings> = { trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+const BASE: Partial<Settings> = { entryAt: "score", trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
 
 export const PRESETS: Preset[] = [
   {
@@ -45,10 +45,11 @@ export function followsPreset(s: Settings, p: Partial<Settings>): boolean {
   return true;
 }
 
-/** "score ≥ 95 · +500% / −20% · 10 min" */
-export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin">): string {
+/** "score ≥ 95 · +500% / −20% · 10 min", or "halfway to graduation · +50% / −30% · 30 min" */
+export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin"> & { entryAt?: string }): string {
   const time = s.maxHoldMin > 0 ? (s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min`) : "no time limit";
-  return `score ≥ ${s.minScore} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
+  const entry = s.entryAt && s.entryAt !== "score" ? (ENTRY_POINTS[s.entryAt] ?? s.entryAt) : `score ≥ ${s.minScore}`;
+  return `${entry} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
 }
 
 const signedPct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;

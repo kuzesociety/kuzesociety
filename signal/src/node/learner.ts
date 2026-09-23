@@ -17,6 +17,7 @@ export class Learner {
   lastEdges: EdgeReport | null = null;
   edgesRunning = false;
   private timer: NodeJS.Timeout | null = null;
+  private edgeTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private o: {
@@ -39,10 +40,14 @@ export class Learner {
     this.timer.unref?.();
     // first attempt 20 minutes after start (enough fresh data to validate on)
     setTimeout(() => void this.run(), 20 * 60_000).unref?.();
+    // the edge search runs more often than learning: its answer is what people check
+    this.edgeTimer = setInterval(() => void this.findEdges(), 2 * 3_600_000);
+    this.edgeTimer.unref?.();
   }
 
   stop() {
     if (this.timer) clearInterval(this.timer);
+    if (this.edgeTimer) clearInterval(this.edgeTimer);
   }
 
   /** Searches the recorded outcomes for rules that made money on their own (see core/edges). */

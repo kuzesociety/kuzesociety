@@ -47,6 +47,7 @@ From then on you get a message for every buy and sell, and you can run the bot f
 |---|---|
 | `/status` | trading or paused, your rule, today's result, market data, version |
 | `/strategy` | lists the strategies; `/strategy 2` switches the whole rule at once |
+| `/edges` | has the bot found an edge? The edge finder's latest answer (it checks every 2 hours once it has a day of data) |
 | `/pause` · `/resume` | auto-trading off / on |
 | `/score 75` `/tp 100` `/sl 50` `/hold 10` | change one part of the rule (saved at once) |
 | `/update` | installs the newest version; the bot says hello with the new version number when it is back |

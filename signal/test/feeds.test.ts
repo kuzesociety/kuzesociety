@@ -119,7 +119,7 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     });
     const port = (wss.address() as AddressInfo).port;
     const held: string[] = [];
-    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, heldPools: () => held, poolCheckMs: 50, log: silentLogger, onEvent: () => {}, onHealth: () => {} });
+    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, followPools: () => held, poolCheckMs: 50, log: silentLogger, onEvent: () => {}, onHealth: () => {} });
     feed.start();
     const mentions = () => calls.filter((c) => c.method === "logsSubscribe").map((c) => (c.params[0] as { mentions: string[] }).mentions[0]);
     await waitFor(() => mentions().length === 1);

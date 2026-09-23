@@ -8,7 +8,7 @@ import { PRESETS, followsPreset, ruleSummary, strategyList } from "../src/core/p
 import type { EdgeReport } from "../src/core/edges.js";
 import { DEFAULT_SETTINGS, rebaseSettings, sanitizeSettings, settingsChanges } from "../src/core/settings.js";
 import { SetupStore, isLocalRequest, isPrivateChannel, lanAddress, rpcFromInput, tailscaleAddress, telegramTokenLooksValid } from "../src/node/setup.js";
-import { Telegram } from "../src/node/telegram.js";
+import { Telegram, edgesMessage } from "../src/node/telegram.js";
 import { Engine } from "../src/core/engine.js";
 import { PUBLIC_RPC_WS, loadConfig } from "../src/node/config.js";
 
@@ -120,6 +120,23 @@ describe("setup from the dashboard", () => {
     expect(e.settings.minScore).toBe(75);
     expect(t.command("/link")).toContain("http://100.101.2.3:8787/?token=x");
     expect(t.command("/help")).toContain("/strategy");
+  });
+
+  it("answers /edges from the phone: still collecting, found, or honestly nothing yet", () => {
+    const now = Date.UTC(2026, 8, 23, 12);
+    expect(edgesMessage(null, false, now)).toMatch(/has not run yet/);
+    const base = { generatedAt: now - 30 * 60_000, note: "", samples: 18_000, hours: 30, discoveryHours: 20, holdoutHours: 10, tested: 97_000, candidates: 20, failed: [], placebo: { runs: 5, avgSurvivors: 0.2, maxSurvivors: 1 } };
+    const waiting = { ...base, status: "not_enough_data" as const, note: "Needs at least 24 hours of recorded market (so far: 9.5 h).", survivors: [] };
+    expect(edgesMessage(waiting as unknown as EdgeReport, false, now)).toMatch(/Still collecting: Needs at least 24 hours/);
+    const rule = { text: "Buy every coin halfway to graduation · sell at +75% or −30%", holdout: { n: 212, mean: 0.083, lo: 0.01, winRate: 0.5 }, discovery: { n: 400, mean: 0.1, lo: 0.04, winRate: 0.5 }, tradesPerDay: 7.3 };
+    const found = edgesMessage({ ...base, status: "ok", survivors: [rule] } as unknown as EdgeReport, true, now);
+    expect(found).toContain("held up on data the search never saw");
+    expect(found).toContain("+8.3% per trade on 212 unseen trades");
+    expect(found).toContain("/strategy");
+    expect(found).toContain("running again now");
+    const none = edgesMessage({ ...base, status: "ok", survivors: [], failed: [rule] } as unknown as EdgeReport, false, now);
+    expect(none).toContain("No rule has held up");
+    expect(none).toContain("Closest try");
   });
 
   it("tells the Tailscale address from the home network's", () => {

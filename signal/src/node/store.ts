@@ -41,7 +41,12 @@ const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
  * Most samples held in memory at once. A day of live pump.fun can record tens of thousands,
  * and a small server has 512 MB, so reports and training use the newest ones up to these caps.
  */
-export const SAMPLE_LIMITS = { checkpoints: 40_000, entries: 25_000 };
+/**
+ * Samples kept in memory when loading, newest first. Fixed points late in a coin's life (a
+ * share of the curve, after graduation) are rare next to the age snapshots every coin gets,
+ * so they have their own room and are not crowded out.
+ */
+export const SAMPLE_LIMITS = { checkpoints: 40_000, structural: 20_000, entries: 25_000 };
 
 /** Calls `fn` for every non-empty line, reading 1 MB at a time (multi-byte safe). */
 export function forEachLine(path: string, fn: (line: string) => void) {
@@ -178,18 +183,19 @@ export class DataStore {
       return [];
     }
     const perFile: Sample[][] = [];
-    let nCp = 0;
-    let nEn = 0;
+    type Bucket = "cp" | "st" | "en";
+    const cap: Record<Bucket, number> = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
+    const used: Record<Bucket, number> = { cp: 0, st: 0, en: 0 };
+    const bucketOf = (line: string): Bucket =>
+      !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
     for (const f of files) {
-      const roomCp = limits.checkpoints - nCp;
-      const roomEn = limits.entries - nEn;
-      if (roomCp <= 0 && roomEn <= 0) break;
-      const cps: Sample[] = [];
-      const ens: Sample[] = [];
+      const room: Record<Bucket, number> = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
+      if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;
+      const got: Record<Bucket, Sample[]> = { cp: [], st: [], en: [] };
       try {
         forEachLine(join(this.dir, "samples", f), (line) => {
-          const isCp = line.includes('"kind":"checkpoint"');
-          if (isCp ? roomCp <= 0 : roomEn <= 0) return; // skip parsing what would be dropped
+          const b = bucketOf(line);
+          if (room[b] <= 0) return; // skip parsing what would be dropped
           let s: Sample;
           try {
             s = JSON.parse(line) as Sample;
@@ -197,21 +203,20 @@ export class DataStore {
             return; // partial line
           }
           if (!Array.isArray(s.x) || (s.y !== 0 && s.y !== 1)) return;
-          const into = s.kind === "checkpoint" ? cps : ens;
-          const room = s.kind === "checkpoint" ? roomCp : roomEn;
+          const into = got[b];
           into.push(s);
           // lines are in time order: when over the cap, drop the oldest
-          if (into.length >= room * 2) into.splice(0, into.length - room);
+          if (into.length >= room[b] * 2) into.splice(0, into.length - room[b]);
         });
       } catch (e) {
         this.log.warn("could not read samples", { file: f, err: String(e) });
         continue;
       }
-      if (cps.length > roomCp) cps.splice(0, cps.length - Math.max(0, roomCp));
-      if (ens.length > roomEn) ens.splice(0, ens.length - Math.max(0, roomEn));
-      nCp += cps.length;
-      nEn += ens.length;
-      perFile.push(cps.concat(ens));
+      for (const b of ["cp", "st", "en"] as const) {
+        if (got[b].length > room[b]) got[b].splice(0, got[b].length - Math.max(0, room[b]));
+        used[b] += got[b].length;
+      }
+      perFile.push(got.cp.concat(got.st, got.en));
     }
     return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
   }
