@@ -33,6 +33,28 @@ What will still differ:
 
 I compiled this file against a stand-in of the NinjaTrader API, because NinjaTrader only runs on Windows. If the NinjaScript Editor shows any error, send me the text and I'll fix it.
 
+## Backtest in the Strategy Analyzer
+
+1. **Connect to a data feed first.** Use your prop firm or broker connection (Rithmic, Tradovate…), not *Kinetick – End of Day*, which only has daily data. Without a connection, NinjaTrader has no 1-minute futures history to download.
+2. Check **Tools → Options → Market data → Merge policy = Merge back adjusted** (the default). NinjaTrader then stitches older contracts behind the current one, like TradingView's `MNQ1!`.
+3. Open **New → Strategy Analyzer** and set:
+
+| Setting | Value |
+|---|---|
+| Strategy | RutaCryptoPROP |
+| Instrument | Type `MNQ` and pick the **front month**, e.g. **MNQ 12-26**. Not `MNQ1!`, which is TradingView's name. |
+| Type / Value | Minute / 1 |
+| Price based on | Last |
+| Trading hours | CME US Index Futures ETH |
+| Start / End date | e.g. 2026-04-01 → 2026-09-01 (the period of my test) |
+| Order fill resolution | High, Tick, 1 (most realistic; the first download is slower) |
+| Include commission | ticked, with your commission template |
+| Slippage | 1 |
+
+4. Click **Run**.
+
+If **MNQ doesn't show up** when you type it, open **Tools → Instruments**, search for `MNQ` and add it. NinjaTrader names futures by expiry month (`MNQ 12-26` = December 2026). The front month changes roughly one week before each quarterly expiry (March, June, September, December).
+
 ## Settings
 
 Same groups and defaults as TradingView:
