@@ -293,5 +293,32 @@ describe("robustness", () => {
     const start = e.cfg.paperStartSol * 1e9;
     expect(Math.abs(acc.paperBalance + openCost - (start + acc.realized))).toBeLessThan(10);
     expect(e.stats.errors).toBe(0);
+    // topping up paper money is a deposit: the books still balance, and results do not move
+    const before = { realized: acc.realized, wins: acc.wins, losses: acc.losses };
+    e.addPaperMoney(1000);
+    const after = e.account();
+    expect(after.deposits).toBe(1000e9);
+    expect(after.paperBalance).toBe(acc.paperBalance + 1000e9);
+    expect({ realized: after.realized, wins: after.wins, losses: after.losses }).toEqual(before);
+    expect(Math.abs(after.paperBalance + openCost - (start + after.deposits + after.realized))).toBeLessThan(10);
+    expect(e.addPaperMoney(-5)).toBe(after.paperBalance); // nothing for nonsense
+  });
+
+  it("paper top-ups are checked and survive a restart", async () => {
+    const { handleApi } = await import("../src/core/api.js");
+    const e = new Engine({ now: Date.now(), settings: { enabled: false } });
+    const ctx = { engine: () => e } as unknown as import("../src/core/api.js").ApiContext;
+    const add = (sol: unknown) => handleApi(ctx, "POST", "/api/paper/add", new URLSearchParams(), { sol });
+    expect((await add(0)).status).toBe(400);
+    expect((await add(-3)).status).toBe(400);
+    expect((await add(5_000_000)).status).toBe(400);
+    expect((await add("abc")).status).toBe(400);
+    const ok = await add(1000);
+    expect(ok.status).toBe(200);
+    expect((ok.json as { paperBalance: number }).paperBalance).toBe((e.cfg.paperStartSol + 1000) * 1e9);
+    const restored = new Engine({ now: Date.now() });
+    restored.restore(e.exportState());
+    expect(restored.paperBalance).toBe((e.cfg.paperStartSol + 1000) * 1e9);
+    expect(restored.stats.deposits).toBe(1000e9);
   });
 });

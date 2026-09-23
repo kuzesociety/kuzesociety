@@ -14,6 +14,8 @@ export type Account = {
   openValue: number;
   exposure: number;
   realized: number;
+  /** paper money added after the start */
+  deposits?: number;
   dayPnl: number;
   wins: number;
   losses: number;

@@ -109,6 +109,13 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
       case "/api/live/resume":
         ctx.live?.resume();
         return ok({ live: ctx.live?.status() ?? null });
+      case "/api/paper/add": {
+        const amount = Number(body.sol);
+        if (!(amount > 0 && amount <= 1_000_000)) return err(400, "Add between 0 and 1,000,000 paper SOL.");
+        e.addPaperMoney(amount);
+        e.persistNow();
+        return ok({ ok: true, paperBalance: e.paperBalance });
+      }
       case "/api/paper/reset": {
         if (e.positions.size > 0) return err(400, "Close open positions first.");
         e.paperBalance = e.cfg.paperStartSol * 1e9;
@@ -117,6 +124,7 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         e.stats.wins = 0;
         e.stats.losses = 0;
         e.stats.equity = [{ t: Date.now(), v: e.paperBalance }];
+        e.stats.deposits = 0;
         e.closed.clear();
         e.persistNow();
         return ok({ ok: true });

@@ -1,6 +1,7 @@
+import { useState } from "preact/hooks";
 import type { Position } from "../../core/positions";
 import { ago, age, mcap, sol } from "../format";
-import { api, toast, useApp } from "../store";
+import { api, refreshState, toast, useApp } from "../store";
 import { Empty, Spark, Stat, Tag } from "../ui";
 
 const REASON: Record<string, string> = {
@@ -29,7 +30,11 @@ export function Trades({ open }: { open: (mint: string) => void }) {
       </div>
       <div class="card">
         <div class="stats">
-          <Stat k={a.mode === "live" ? "Realized" : "Paper equity"} v={a.mode === "live" ? `${sol(a.realized)} SOL` : `${sol(a.equity)} SOL`} s={a.mode === "live" ? undefined : `cash ${sol(a.paperBalance)} + open ${sol(a.openValue)}`} />
+          <Stat
+            k={a.mode === "live" ? "Realized" : "Paper equity"}
+            v={a.mode === "live" ? `${sol(a.realized)} SOL` : `${sol(a.equity)} SOL`}
+            s={a.mode === "live" ? undefined : `cash ${sol(a.paperBalance)} + open ${sol(a.openValue)}${a.deposits ? ` · you added ${sol(a.deposits)}` : ""}`}
+          />
           <Stat k="Today" v={`${a.dayPnl >= 0 ? "+" : ""}${sol(a.dayPnl)} SOL`} tone={a.dayPnl > 0 ? "good" : a.dayPnl < 0 ? "bad" : ""} />
           <Stat k="All time" v={`${a.realized >= 0 ? "+" : ""}${sol(a.realized)} SOL`} tone={a.realized > 0 ? "good" : a.realized < 0 ? "bad" : ""} s={`fees paid ${sol(a.fees)} SOL`} />
           <Stat k="Win rate" v={Number.isFinite(winRate) ? `${(winRate * 100).toFixed(0)}%` : "—"} s={`${a.wins} won · ${a.losses} lost`} />
@@ -37,6 +42,7 @@ export function Trades({ open }: { open: (mint: string) => void }) {
         <div style="margin-top:10px">
           <Spark points={a.equityCurve} />
         </div>
+        {a.mode !== "live" && <AddPaper />}
       </div>
 
       <div class="section-title">
@@ -148,6 +154,35 @@ function OpenCard({ p, solUsd, open }: { p: Position; solUsd: number; open: (m: 
         </span>
         <button class="btn sm" disabled={p.status !== "open"} onClick={close}>
           Sell now
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Tops up the paper balance: history stays, and the money counts as added, not as profit. */
+function AddPaper() {
+  const [amount, setAmount] = useState("1000");
+  const [busy, setBusy] = useState(false);
+  const add = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ paperBalance: number }>("/api/paper/add", { sol: Number(amount) });
+      toast(`Added ${Number(amount).toLocaleString("en-US")} paper SOL — cash now ${sol(r.paperBalance)} SOL`);
+      void refreshState();
+    } catch (e) {
+      toast(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div style="margin-top:10px">
+      <p class="muted" style="margin:0 0 6px;font-size:13px">Paper money running low? Top it up — your history and results stay (the chart shows results only).</p>
+      <div class="row" style="gap:8px">
+        <input class="inp" style="max-width:110px" inputMode="decimal" aria-label="paper SOL to add" value={amount} onInput={(e) => setAmount((e.target as HTMLInputElement).value)} />
+        <button class="btn sm" disabled={busy || !(Number(amount) > 0)} onClick={add}>
+          {busy ? "Adding…" : "Add paper SOL"}
         </button>
       </div>
     </div>

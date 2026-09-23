@@ -2748,7 +2748,7 @@ var REASON_TEXT = {
   rate_limit: "Max trades per hour reached",
   feed_down: "Live data feed is down \u2014 not trading blind",
   warming_up: "Learning this market's score scale (first minutes after install)",
-  insufficient_balance: "Not enough SOL in the wallet",
+  insufficient_balance: "Not enough SOL \u2014 paper: Trades tab \u2192 Add paper SOL; live: fund the wallet",
   slippage: "Price moved more than your slippage before the buy landed",
   migrating: "Coin is migrating to PumpSwap (not tradable for a moment)",
   no_price: "No tradable price yet",
@@ -3641,7 +3641,8 @@ var Engine = class {
       dayKey: dayKey(opts.now),
       dayPnl: 0,
       entryTimes: [],
-      equity: [{ t: opts.now, v: this.paperBalance }]
+      equity: [{ t: opts.now, v: this.paperBalance }],
+      deposits: 0
     };
     this.outcomes = new OutcomeTracker(
       {
@@ -4334,7 +4335,7 @@ var Engine = class {
     this.stats.exits++;
     if (pos.pnl > 0) this.stats.wins++;
     else this.stats.losses++;
-    this.stats.equity.push({ t: ts, v: this.paperBalance });
+    this.stats.equity.push({ t: ts, v: this.paperBalance - this.stats.deposits });
     if (this.stats.equity.length > 2e3) this.stats.equity.splice(0, this.stats.equity.length - 2e3);
     this.hooks.watchMint?.(pos.mint, false);
     this.hooks.onPosition?.(pos, "close");
@@ -4856,6 +4857,19 @@ var Engine = class {
       model: { version: this.model.version, source: this.model.source, training: this.model.training ?? null }
     };
   }
+  /**
+   * Adds paper money (the paper balance ran low). History stays; the amount is booked as a
+   * deposit, so results and win rates are unchanged and it never shows up as profit.
+   */
+  addPaperMoney(sol) {
+    const lamports = Math.round(sol * LAMPORTS_PER_SOL);
+    if (!(lamports > 0)) return this.paperBalance;
+    this.paperBalance += lamports;
+    this.stats.deposits += lamports;
+    this.journal({ type: "paper_deposit", sol, balance: this.paperBalance });
+    this.markDirty();
+    return this.paperBalance;
+  }
   account() {
     const open = [...this.positions.values()];
     const openValue = open.reduce((s, p) => s + p.value, 0);
@@ -4869,6 +4883,7 @@ var Engine = class {
       openValue,
       exposure,
       realized: this.stats.realized,
+      deposits: this.stats.deposits,
       dayPnl: this.stats.dayPnl,
       wins: this.stats.wins,
       losses: this.stats.losses,

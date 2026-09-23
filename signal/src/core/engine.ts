@@ -201,6 +201,8 @@ export interface EngineStats {
   dayPnl: number;
   entryTimes: number[];
   equity: { t: number; v: number }[];
+  /** paper money added after the start (lamports): a deposit, never counted as profit */
+  deposits: number;
 }
 
 interface ScoreEntry {
@@ -316,6 +318,7 @@ export class Engine {
       dayPnl: 0,
       entryTimes: [],
       equity: [{ t: opts.now, v: this.paperBalance }],
+      deposits: 0,
     };
     this.outcomes = new OutcomeTracker(
       {
@@ -1058,7 +1061,8 @@ export class Engine {
     this.stats.exits++;
     if (pos.pnl > 0) this.stats.wins++;
     else this.stats.losses++;
-    this.stats.equity.push({ t: ts, v: this.paperBalance });
+    // performance, not deposits: paper money added later would look like a jump in profit
+    this.stats.equity.push({ t: ts, v: this.paperBalance - this.stats.deposits });
     if (this.stats.equity.length > 2000) this.stats.equity.splice(0, this.stats.equity.length - 2000);
     this.hooks.watchMint?.(pos.mint, false);
     this.hooks.onPosition?.(pos, "close");
@@ -1618,6 +1622,20 @@ export class Engine {
     };
   }
 
+  /**
+   * Adds paper money (the paper balance ran low). History stays; the amount is booked as a
+   * deposit, so results and win rates are unchanged and it never shows up as profit.
+   */
+  addPaperMoney(sol: number): number {
+    const lamports = Math.round(sol * LAMPORTS_PER_SOL);
+    if (!(lamports > 0)) return this.paperBalance;
+    this.paperBalance += lamports;
+    this.stats.deposits += lamports;
+    this.journal({ type: "paper_deposit", sol, balance: this.paperBalance });
+    this.markDirty();
+    return this.paperBalance;
+  }
+
   account() {
     const open = [...this.positions.values()];
     const openValue = open.reduce((s, p) => s + p.value, 0);
@@ -1631,6 +1649,7 @@ export class Engine {
       openValue,
       exposure,
       realized: this.stats.realized,
+      deposits: this.stats.deposits,
       dayPnl: this.stats.dayPnl,
       wins: this.stats.wins,
       losses: this.stats.losses,
