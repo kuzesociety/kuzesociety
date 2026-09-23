@@ -1,6 +1,6 @@
 # NinjaTrader 8 bots
 
-- [`RutaPullback.cs`](#rutapullback--15001-2000-bracket-bot): fixed-contract $1,500 / $2,000 bracket bot on 5-minute candles
+- [`RutaPullback.cs`](#rutapullback--1500--2000-bracket-bot): fixed-contract $1,500 / $2,000 bracket bot on 5-minute candles
 - [`RutaCryptoPROP.cs`](#rutacrypto-prop): port of the TradingView strategy
 
 ## RutaPullback — $1,500 / $2,000 bracket bot
