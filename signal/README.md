@@ -76,7 +76,7 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 **Why no trade?** The Bot tab shows, for the last hour, how many coins were scored, how many reached your score, what was bought, and exactly why the rest were blocked.
 
-Telegram commands: `/status /positions /pause /resume /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill`.
+Telegram commands: `/status /positions /pause /resume /strategy /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
 
 ## 5. Is it making money?
 

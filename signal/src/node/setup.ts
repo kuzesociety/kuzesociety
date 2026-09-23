@@ -112,11 +112,27 @@ export function isPrivateChannel(req: IncomingMessage): boolean {
   return isLocalRequest(req) || req.headers["x-forwarded-proto"] === "https" || !!(req.socket as { encrypted?: boolean }).encrypted;
 }
 
+type Interfaces = ReturnType<typeof networkInterfaces>;
+
+function ipv4(ifaces: Interfaces): string[] {
+  return Object.values(ifaces)
+    .flat()
+    .filter((i): i is NonNullable<typeof i> => !!i && i.family === "IPv4" && !i.internal)
+    .map((i) => i.address);
+}
+
+/** Tailscale gives every device an address in 100.64.0.0/10. */
+const isTailscale = (a: string) => /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(a);
+
 /** This computer's address on the home network, for opening the dashboard from a phone. */
-export function lanAddress(): string | null {
-  const all = Object.values(networkInterfaces()).flat();
-  const v4 = all.filter((i): i is NonNullable<typeof i> => !!i && i.family === "IPv4" && !i.internal).map((i) => i.address);
+export function lanAddress(ifaces: Interfaces = networkInterfaces()): string | null {
+  const v4 = ipv4(ifaces).filter((a) => !isTailscale(a));
   return v4.find((a) => /^(192\.168|10\.|172\.(1[6-9]|2\d|3[01]))/.test(a)) ?? v4[0] ?? null;
+}
+
+/** This computer's Tailscale address: the phone reaches it from anywhere once both run Tailscale. */
+export function tailscaleAddress(ifaces: Interfaces = networkInterfaces()): string | null {
+  return ipv4(ifaces).find(isTailscale) ?? null;
 }
 
 /** Opens the dashboard in the default browser (desktop installs), at most once per 10 minutes. */

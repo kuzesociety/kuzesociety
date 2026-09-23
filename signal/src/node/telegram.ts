@@ -5,6 +5,7 @@
  */
 import type { Engine } from "../core/engine.js";
 import type { Position } from "../core/positions.js";
+import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
 import type { Logger } from "../core/util.js";
 import { getJson, postJson } from "./http.js";
 
@@ -30,6 +31,12 @@ export class Telegram {
       onLinked?: (chatId: string) => void;
       /** installs the newest version; returns the reply */
       update?: () => string;
+      /** this bot's version, whether a newer one is ready, and where market data comes from */
+      about?: () => { version: string | null; update: boolean; data: string };
+      /** the strategies /strategy offers */
+      strategies?: () => Preset[];
+      /** dashboard links that open from the phone (home Wi-Fi, anywhere with Tailscale) */
+      links?: () => { label: string; url: string }[];
     },
   ) {}
 
@@ -46,7 +53,7 @@ export class Telegram {
     if (!this.enabled && !this.linking) return;
     this.stopped = false;
     void this.poll();
-    if (this.enabled) this.send("🟢 <b>SIGNAL started</b>\nSend /help for commands.");
+    if (this.enabled) this.send(this.startedMessage());
   }
 
   stop() {
@@ -125,17 +132,32 @@ export class Telegram {
     });
   }
 
+  /** The greeting after every start: after an update it shows the new version at once. */
+  startedMessage(): string {
+    const a = this.o.about?.();
+    const s = this.o.engine().settings;
+    return [
+      `🟢 <b>SIGNAL started</b>${a?.version ? ` · v ${esc(a.version.slice(0, 7))}` : ""}`,
+      a?.data ? `Market data: ${esc(a.data)}` : "",
+      `${s.enabled ? "▶️ Trading" : "⏸ Paused"} · ${s.mode} · ${ruleSummary(s)}`,
+      "Send /help for commands.",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+
   /** Execute a chat command and return the reply (exported behaviour is tested). */
   command(text: string): string {
     const e = this.o.engine();
-    const [cmd, arg] = text.split(/\s+/, 2) as [string, string | undefined];
+    const [cmd, arg, extra] = text.split(/\s+/) as [string, string | undefined, string | undefined];
     const n = arg !== undefined ? Number(arg) : NaN;
     switch (cmd.toLowerCase().replace(/@.*/, "")) {
       case "/start":
       case "/help":
         return [
           "<b>SIGNAL commands</b>",
-          "/status — bot, P&amp;L, feeds",
+          "/status — bot, P&amp;L, market data, version",
+          "/strategy — list the strategies · /strategy 2 — switch to one",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -145,19 +167,52 @@ export class Telegram {
           "/scoreonly on|off — trade on score alone",
           "/kill — stop entries and sell everything · /unkill",
           "/update — install the newest version of SIGNAL",
+          "/link — open the dashboard on this phone",
         ].join("\n");
       case "/status": {
         const a = e.account();
         const h = e.health();
         const s = e.settings;
-        const feeds = h.feeds.map((f) => `${f.status === "open" ? "🟢" : "🔴"} ${f.name}`).join("  ");
+        const about = this.o.about?.();
+        const main = h.feeds.find((f) => f.critical && f.status !== "off");
+        const data = h.feedDown
+          ? `🔴 Market data down${main?.note ? `: ${esc(main.note)}` : ""} — no new trades until it is back`
+          : `🟢 Market data${about?.data ? `: ${esc(about.data)}` : ""}${main?.lastMsgAt ? ` · last message ${Math.max(0, Math.round((Date.now() - main.lastMsgAt) / 1000))} s ago` : ""}`;
         return [
           `<b>${s.enabled ? "▶️ Trading" : "⏸ Paused"}</b> · ${s.mode.toUpperCase()}${e.killed ? " · KILL SWITCH" : ""}`,
           `Score ≥ ${s.minScore}${s.scoreOnly ? " (score only)" : ""} · TP ${s.tpPct}% · SL ${s.slPct}% · ${s.maxHoldMin > 0 ? `sell after ${s.maxHoldMin} min` : "no time limit"} · ${s.positionSol} SOL`,
           `Today ${sol(a.dayPnl)} SOL · total ${sol(a.realized)} SOL · ${a.wins}W/${a.losses}L`,
           `Open ${a.open.length}/${s.maxOpen}`,
-          feeds,
-        ].join("\n");
+          data,
+          about?.version ? `v ${esc(about.version.slice(0, 7))}${about.update ? " · ⬆️ update ready — send /update" : ""}` : "",
+        ]
+          .filter(Boolean)
+          .join("\n");
+      }
+      case "/strategy":
+      case "/strategies": {
+        const list = this.o.strategies?.() ?? [];
+        if (!list.length) return "No strategies here.";
+        if (arg === undefined) {
+          return [
+            "<b>Strategies</b> — each sets the whole rule. Send /strategy 1, /strategy 2… to switch:",
+            ...list.map(
+              (p, i) =>
+                `${i + 1}. ${followsPreset(e.settings, p.settings) ? "✅ " : ""}<b>${esc(p.name)}</b>${p.proof === "unproven" ? " (unproven)" : ""} — ${ruleSummary({ ...e.settings, ...p.settings })}`,
+            ),
+          ].join("\n");
+        }
+        const pick = Number(arg);
+        if (!Number.isInteger(pick) || pick < 1 || pick > list.length) return `Send a number from 1 to ${list.length}, or /strategy to see them.`;
+        const p = list[pick - 1]!;
+        if (e.settings.mode === "live" && extra?.toLowerCase() !== "yes") return `You are trading LIVE. Send /strategy ${pick} yes to switch to ${esc(p.name)}.`;
+        e.updateSettings(p.settings);
+        return `${e.settings.enabled ? "▶️ Now trading" : "Strategy set (auto-trading is paused — /resume to start)"}: <b>${esc(p.name)}</b> · ${ruleSummary(e.settings)}`;
+      }
+      case "/link": {
+        const links = this.o.links?.() ?? [];
+        if (!links.length) return "No dashboard link found on this computer's networks.";
+        return links.map((l) => `${esc(l.label)}:\n${esc(l.url)}`).join("\n\n");
       }
       case "/positions": {
         const open = e.account().open;

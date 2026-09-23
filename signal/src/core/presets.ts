@@ -3,6 +3,7 @@
  * settings that define the rule (entry score, which coins, exits, time limit), so switching
  * never leaves a mix of the old and the new strategy behind.
  */
+import type { EdgeReport } from "./edges.js";
 import type { Settings } from "./settings.js";
 
 export interface Preset {
@@ -48,4 +49,21 @@ export function followsPreset(s: Settings, p: Partial<Settings>): boolean {
 export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin">): string {
   const time = s.maxHoldMin > 0 ? (s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min`) : "no time limit";
   return `score ≥ ${s.minScore} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
+}
+
+const signedPct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
+
+/** The strategies to choose from: the ready-made ones, then up to three rules the edge finder proved on data it never saw. */
+export function strategyList(report: EdgeReport | null | undefined): Preset[] {
+  const found = report?.survivors?.slice(0, 3) ?? [];
+  return [
+    ...PRESETS,
+    ...found.map((e) => ({
+      key: `edge:${e.text}`,
+      name: "Found in your data",
+      note: `${e.text}. ${signedPct(e.holdout.mean)} per trade on ${e.holdout.n} trades the search never saw.`,
+      proof: "data" as const,
+      settings: e.settings,
+    })),
+  ];
 }

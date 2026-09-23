@@ -27,6 +27,7 @@ interface SetupStatus {
   telegram: { tokenSet: boolean; linked: boolean; code: string | null };
   live: { enabled: boolean; pendingRestart: boolean; walletSet: boolean; address: string | null; maxPositionSol: number; maxDailyLossSol: number; ready: boolean };
   phoneUrl: string | null;
+  anywhereUrl: string | null;
   update: { current: string | null; latest: string | null; checkedAt: number; available: boolean; can: boolean; why: string | null; state: string; error: string | null } | null;
 }
 
@@ -290,10 +291,37 @@ export function SetupView() {
         </button>
       </Step>
 
-      <Step n={4} title="Your phone at home" done={false}>
-        {st.phoneUrl ? (
+      <Step n={4} title="Your phone" done={!!st.anywhereUrl}>
+        <p class="muted" style="margin:0 0 8px">
+          Telegram works anywhere with nothing more to set up: /status, /strategy, /score 75, /pause, /update… For the full dashboard on your phone:
+        </p>
+        {st.anywhereUrl ? (
           <>
-            <p class="muted" style="margin:0 0 6px">On the same Wi-Fi, open this link on your phone and add it to your home screen. Away from home, use Telegram.</p>
+            <b style="display:block;margin-bottom:4px">Anywhere (Tailscale)</b>
+            <div class="copyline">
+              <code>{st.anywhereUrl}</code>
+              <button class="btn sm" onClick={() => copy(st.anywhereUrl!, "Link")}>
+                Copy
+              </button>
+            </div>
+            <p class="faint note">Open it on your phone and add it to your home screen. Telegram's /link sends it to you too.</p>
+          </>
+        ) : (
+          <ol class="steps" style="margin:0 0 8px">
+            <li>
+              Install{" "}
+              <a href="https://tailscale.com/download" target="_blank" rel="noopener">
+                Tailscale
+              </a>{" "}
+              (free) on this computer and sign in (Google works).
+            </li>
+            <li>Install the Tailscale app on your phone and sign in with the same account.</li>
+            <li>A link that works anywhere appears here in a minute — and Telegram's /link sends it to your phone.</li>
+          </ol>
+        )}
+        {st.phoneUrl && (
+          <>
+            <b style="display:block;margin:10px 0 4px">At home (same Wi-Fi)</b>
             <div class="copyline">
               <code>{st.phoneUrl}</code>
               <button class="btn sm" onClick={() => copy(st.phoneUrl!, "Link")}>
@@ -301,8 +329,6 @@ export function SetupView() {
               </button>
             </div>
           </>
-        ) : (
-          <p class="muted" style="margin:0">No home network found on this computer.</p>
         )}
       </Step>
 

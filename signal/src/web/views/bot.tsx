@@ -1,9 +1,8 @@
 import { useEffect, useState } from "preact/hooks";
-import type { EdgeFound, EdgeReport } from "../../core/edges";
-import { PRESETS, type Preset, followsPreset, ruleSummary } from "../../core/presets";
+import type { EdgeReport } from "../../core/edges";
+import { type Preset, followsPreset, ruleSummary, strategyList } from "../../core/presets";
 import { type Settings, rebaseSettings, settingsChanges } from "../../core/settings";
 import { ext } from "../ext";
-import { pct } from "../format";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
 
@@ -409,24 +408,15 @@ function WhyNot({ funnel, threshold, scoreOnly, enabled, open, maxOpen }: { funn
 
 /** One tap switches the whole rule: your plan, a simulator finding, or a rule proven on your data. */
 function Strategies({ settings, onApplied }: { settings: Settings; onApplied: () => void }) {
-  const [found, setFound] = useState<EdgeFound[]>([]);
+  const [report, setReport] = useState<EdgeReport | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   useEffect(() => {
     api<{ report: EdgeReport | null }>("/api/edges")
-      .then((r) => setFound(r.report?.survivors?.slice(0, 3) ?? []))
+      .then((r) => setReport(r.report))
       .catch(() => {});
   }, []);
-  const rows: Preset[] = [
-    ...PRESETS,
-    ...found.map((e) => ({
-      key: `edge:${e.text}`,
-      name: "Found in your data",
-      note: `${e.text}. ${pct(e.holdout.mean, 1, true)} per trade on ${e.holdout.n} trades the search never saw.`,
-      proof: "data" as const,
-      settings: e.settings,
-    })),
-  ];
+  const rows: Preset[] = strategyList(report);
   const live = settings.mode === "live";
   const use = async (p: Preset) => {
     if (live && confirm !== p.key) {

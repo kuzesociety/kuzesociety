@@ -28,6 +28,7 @@ import {
   lanAddress,
   newLinkCode,
   rpcFromInput,
+  tailscaleAddress,
   telegramTokenLooksValid,
 } from "./setup.js";
 import type { DataStore } from "./store.js";
@@ -362,6 +363,7 @@ export class DashboardServer {
       }
     }
     const lan = lanAddress();
+    const tailnet = tailscaleAddress();
     const num = (k: SetupKey, d: number) => (Number.isFinite(Number(eff(k))) && eff(k) !== "" ? Number(eff(k)) : d);
     return {
       supervised: process.env.SIGNAL_SUPERVISED === "1",
@@ -404,6 +406,7 @@ export class DashboardServer {
         ready: !!this.ctx.live()?.ready(),
       },
       phoneUrl: lan ? `http://${lan}:${this.ctx.port}/?token=${this.ctx.token}` : null,
+      anywhereUrl: tailnet ? `http://${tailnet}:${this.ctx.port}/?token=${this.ctx.token}` : null,
       update: this.ctx.updater?.status() ?? null,
     };
   }

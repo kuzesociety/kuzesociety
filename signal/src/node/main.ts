@@ -25,10 +25,11 @@ import { LiveExecutor } from "./live/executor.js";
 import { ServerLog } from "./log.js";
 import { EventRouter } from "./router.js";
 import { DashboardServer } from "./server.js";
-import { type SetupKey, SetupStore, lanAddress, openBrowser } from "./setup.js";
+import { type SetupKey, SetupStore, lanAddress, openBrowser, tailscaleAddress } from "./setup.js";
 import { DataStore } from "./store.js";
 import { Telegram } from "./telegram.js";
-import { Updater, findInstallDir } from "./update.js";
+import { Updater, findInstallDir, readVersion } from "./update.js";
+import { strategyList } from "../core/presets.js";
 
 declare const __DASHBOARD_HTML__: string | undefined;
 
@@ -168,6 +169,16 @@ export async function main() {
 
   // ---- feeds ------------------------------------------------------------------------
   let rpc: RpcLogsFeed | null = null;
+  const version = readVersion(findInstallDir(dirname(fileURLToPath(import.meta.url))) ?? ".");
+  /** Where market data comes from right now, in plain words. */
+  const dataSource = () => {
+    if (config.feeds.has("sim")) return "simulated market";
+    if (!config.feeds.has("rpc")) return [...config.feeds].join(", ");
+    if (config.streamSource !== "rpc") return "free public Solana feed";
+    return rpc?.health.budget?.onFree
+      ? `free public feed (your key's ${config.streamBudgetMb} MB for today are used)`
+      : `your RPC key (up to ${config.streamBudgetMb} MB a day)`;
+  };
   const rpcHealthy = () => !!rpc && rpc.health.status === "open" && Date.now() - rpc.health.lastMsgAt < 20_000;
   const router = new EventRouter((ev) => {
     engine.ingest(ev as MarketEvent);
@@ -303,6 +314,16 @@ export async function main() {
         setup.write({ TELEGRAM_CHAT_ID: id, TELEGRAM_LINK_CODE: "" });
         log.info("telegram chat linked");
       },
+      about: () => ({ version, update: !!updater?.available, data: dataSource() }),
+      strategies: () => strategyList(learner.lastEdges),
+      links: () => {
+        const out: { label: string; url: string }[] = [];
+        const lanIp = lanAddress();
+        const tail = tailscaleAddress();
+        if (tail) out.push({ label: "Anywhere (Tailscale on)", url: `http://${tail}:${config.port}/?token=${token}` });
+        if (lanIp) out.push({ label: "At home (same Wi-Fi)", url: `http://${lanIp}:${config.port}/?token=${token}` });
+        return out;
+      },
       update: () => {
         const st = updater?.status();
         if (!updater || !st?.can) return st?.why ?? "This bot cannot update itself.";
@@ -379,6 +400,8 @@ export async function main() {
   log.info(`SIGNAL running — dashboard on port ${config.port}`);
   log.info(`On this computer: http://localhost:${config.port}  (no token needed)`);
   if (lan) log.info(`On your phone at home (same Wi-Fi): http://${lan}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
+  const tailnet = tailscaleAddress();
+  if (tailnet) log.info(`On your phone anywhere (Tailscale): http://${tailnet}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
   log.info(`Access token ${shown}`);
   log.info(`Feeds: ${[...config.feeds].join(", ")} · mode ${engine.settings.mode} · auto-trading ${engine.settings.enabled ? "ON" : "off"}`);
   if (config.feeds.has("rpc")) {

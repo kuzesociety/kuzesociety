@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { priorModel } from "../src/core/model.js";
-import { PRESETS, followsPreset, ruleSummary } from "../src/core/presets.js";
+import { PRESETS, followsPreset, ruleSummary, strategyList } from "../src/core/presets.js";
+import type { EdgeReport } from "../src/core/edges.js";
 import { DEFAULT_SETTINGS, rebaseSettings, sanitizeSettings, settingsChanges } from "../src/core/settings.js";
-import { SetupStore, isLocalRequest, isPrivateChannel, rpcFromInput, telegramTokenLooksValid } from "../src/node/setup.js";
+import { SetupStore, isLocalRequest, isPrivateChannel, lanAddress, rpcFromInput, tailscaleAddress, telegramTokenLooksValid } from "../src/node/setup.js";
 import { Telegram } from "../src/node/telegram.js";
 import { Engine } from "../src/core/engine.js";
 import { PUBLIC_RPC_WS, loadConfig } from "../src/node/config.js";
@@ -83,6 +84,51 @@ describe("setup from the dashboard", () => {
     const merged = sanitizeSettings(settingsChanges(rebased, latest), latest);
     expect(merged).toMatchObject({ enabled: true, minScore: 95, tpPct: 300 });
     expect(merged.filters).toEqual({ ...latest.filters, maxDevPct: 10 });
+  });
+
+  it("runs from the phone through Telegram: status, strategies, links, and the version after a start", () => {
+    const e = new Engine({ now: Date.now(), model: priorModel() });
+    const found = { survivors: [{ text: "score ≥ 90 · +300% / −30% · 20 min", holdout: { mean: 0.12, n: 41 }, settings: { minScore: 90, tpPct: 300, slPct: 30, maxHoldMin: 20 } }] } as unknown as EdgeReport;
+    const t = new Telegram({
+      token: "t",
+      chatId: "1",
+      log: silent,
+      engine: () => e,
+      about: () => ({ version: "d3fb90189464", update: true, data: "free public Solana feed" }),
+      strategies: () => strategyList(found),
+      links: () => [{ label: "Anywhere (Tailscale on)", url: "http://100.101.2.3:8787/?token=x" }],
+    });
+    expect(t.startedMessage()).toContain("v d3fb901");
+    expect(t.startedMessage()).toContain("Market data: free public Solana feed");
+    const status = t.command("/status");
+    expect(status).toMatch(/Market data/);
+    expect(status).toContain("update ready — send /update");
+    // the list shows every strategy, the found rule included, and marks the active one
+    const list = t.command("/strategy");
+    expect(list).toContain("1. ");
+    expect(list).toContain("3. ");
+    expect(list).toContain("Found in your data");
+    expect(t.command("/strategy 3")).toContain("score ≥ 90 · +300% / −30% · 20 min");
+    expect(e.settings).toMatchObject({ minScore: 90, tpPct: 300, slPct: 30, maxHoldMin: 20 });
+    expect(t.command("/strategy")).toContain("3. ✅");
+    expect(t.command("/strategy 9")).toMatch(/number from 1 to 3/);
+    // live: a switch needs a second word
+    e.updateSettings({ mode: "live" });
+    expect(t.command("/strategy 1")).toMatch(/LIVE/);
+    expect(e.settings.minScore).toBe(90);
+    expect(t.command("/strategy 1 yes")).toContain("Your plan");
+    expect(e.settings.minScore).toBe(75);
+    expect(t.command("/link")).toContain("http://100.101.2.3:8787/?token=x");
+    expect(t.command("/help")).toContain("/strategy");
+  });
+
+  it("tells the Tailscale address from the home network's", () => {
+    const nic = (address: string) => ({ address, family: "IPv4", internal: false, netmask: "", mac: "", cidr: null }) as never;
+    const ifaces = { Ethernet: [nic("192.168.1.20")], Tailscale: [nic("100.101.2.3")], lo: [{ ...(nic("127.0.0.1") as object), internal: true } as never] };
+    expect(lanAddress(ifaces)).toBe("192.168.1.20");
+    expect(tailscaleAddress(ifaces)).toBe("100.101.2.3");
+    expect(tailscaleAddress({ Ethernet: [nic("192.168.1.20")] })).toBeNull();
+    expect(tailscaleAddress({ x: [nic("100.63.0.1"), nic("100.128.0.1")] })).toBeNull(); // outside 100.64.0.0/10
   });
 
   it("links Telegram to whoever sends the dashboard's code", () => {

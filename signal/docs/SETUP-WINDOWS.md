@@ -41,7 +41,17 @@ The trade stream stays on the free feed even with a key saved. Streaming every t
 3. Dashboard: **More → Setup → 2. Telegram** → paste → **Connect**. A 6-digit code appears.
 4. Open your new bot in Telegram and send it that code. The Setup step turns green and the bot says **Linked**.
 
-From then on you get a message for every buy and sell, and you can control the bot from anywhere: `/status` `/pause` `/resume` `/score 75` `/tp 100` `/sl 50` `/hold 10` `/kill` `/update`.
+From then on you get a message for every buy and sell, and you can run the bot from your phone, anywhere:
+
+| Send | What it does |
+|---|---|
+| `/status` | trading or paused, your rule, today's result, market data, version |
+| `/strategy` | lists the strategies; `/strategy 2` switches the whole rule at once |
+| `/pause` · `/resume` | auto-trading off / on |
+| `/score 75` `/tp 100` `/sl 50` `/hold 10` | change one part of the rule (saved at once) |
+| `/update` | installs the newest version; the bot says hello with the new version number when it is back |
+| `/link` | the dashboard link for your phone |
+| `/kill` | stop entries and sell everything |
 
 ## 6. Start paper trading
 
@@ -56,7 +66,7 @@ From then on you get a message for every buy and sell, and you can control the b
 
 - **No sleep:** Windows **Settings → System → Power** (Windows 10: *Power & sleep*) → *When plugged in, put my device to sleep after* → **Never**. The screen may turn off; the PC must not sleep. If it does, Telegram tells you how long the bot was asleep.
 - **Start with Windows:** double-click **autostart-windows.bat** once. After a restart (for example Windows Update), sign in and the bot starts by itself. Run it again to undo.
-- **Your phone at home:** **More → Setup → 4** shows a link for your phone (same Wi-Fi). Away from home, use Telegram.
+- **The dashboard on your phone, anywhere (free):** install [Tailscale](https://tailscale.com/download) on the PC (sign in with Google), then the Tailscale app on your phone with the same account. **More → Setup → 4** and Telegram's `/link` then give a link that opens the full dashboard from anywhere — add it to your home screen. Without Tailscale the link works on your home Wi-Fi only; Telegram works everywhere either way.
 - **Stop:** close the black window. **Start:** double-click `start-windows.bat` again. Everything is saved in `C:\SIGNAL\data`.
 
 ## 8. Updates (one tap)
