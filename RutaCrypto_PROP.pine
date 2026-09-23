@@ -32,6 +32,11 @@ TZ          = "America/New_York"
 GLOBEX_OPEN = 18 * 60                       // CME re-opens 18:00 NY = new trading day
 M_ATR       = "ATR stop + auto contracts"
 M_USD       = "Fixed $ stop/target + fixed contracts"
+P_ACTIVE    = "Active: RSI 30/70, memory 2 (1-min chart)"
+P_STRICT    = "Strict: original RSI 20/71, no memory"
+P_CUSTOM    = "Custom: use the values below"
+B_NEW       = "Start a new account (keep testing)"
+B_STOP      = "Stop trading (like a failed eval)"
 
 C_GREEN  = #089981
 C_RED    = #f23645
@@ -72,12 +77,14 @@ minStopTicks = input.int(8, "Min stop (ticks, ATR mode)", minval = 1, group = G_
 // ─── ② Account guard ────────────────────────────────────────────────────────
 useDD        = input.bool(true, "Trailing max drawdown", group = G_ACCT, inline = "dd")
 ddUsd        = input.float(5000, "$", minval = 1, step = 100, group = G_ACCT, inline = "dd",
-     tooltip = "Simulates the firm's trailing drawdown. Trades are sized so a stop-out can never break it; if it is broken anyway (gap) the strategy flattens and stops trading for good, like a failed account.")
+     tooltip = "Simulates the firm's trailing drawdown. Trades are sized so a stop-out can't break it. The account counts as blown when the drawdown is hit, or when there is not enough room left for even 1 contract.")
 ddType       = input.string("End of day", "Drawdown trails", options = ["End of day", "Intraday (open P/L)"], group = G_ACCT,
      tooltip = "End of day: the high-water mark updates once per trading day (closing balance).\nIntraday: it follows the highest open equity reached inside each bar (stricter).")
 ddLock       = input.bool(true, "Stop trailing at start balance +", group = G_ACCT, inline = "lock")
 ddLockOffset = input.float(100, "$", minval = 0, step = 50, group = G_ACCT, inline = "lock",
      tooltip = "Most firms freeze the drawdown floor once it reaches the starting balance (+ a small amount). Set 0 to freeze exactly at the starting balance.")
+ddOnBlow     = input.string(B_NEW, "When the account is blown", options = [B_NEW, B_STOP], group = G_ACCT,
+     tooltip = "Start a new account: resets the drawdown from the current balance and keeps trading, so the backtest covers the whole period. The dashboard counts how many accounts were blown.\nStop trading: the strategy stops for good, like a failed evaluation.")
 useDLL       = input.bool(false, "Daily loss limit", group = G_ACCT, inline = "dll")
 dllUsd       = input.float(3000, "$", minval = 1, step = 100, group = G_ACCT, inline = "dll",
      tooltip = "Includes open P/L. Next trades are downsized so a stop-out can't break it; if hit, the strategy flattens and stops for the day.")
@@ -97,18 +104,24 @@ flatHHMM   = input.int(1555, "HHMM", minval = 0, maxval = 1759, group = G_SESS, 
      tooltip = "New York time (00:00–17:59). Any open position is closed on the bar that closes at/after this time; no new trades until the next session (18:00).")
 
 // ─── ④ Signal ───────────────────────────────────────────────────────────────
+sigPreset = input.string(P_ACTIVE, "Signal preset", options = [P_ACTIVE, P_STRICT, P_CUSTOM], group = G_SIG,
+     tooltip = "Active: about 5 trades per session on a 1-min MNQ chart (busiest days ~10).\nStrict: the original rules. On the exact candle where RSI crosses back through 20, price is almost never above the 10 SMA yet, so it trades less than once per session.\nCustom: uses the RSI levels and signal memory below.")
 useHA     = input.bool(true, "Require Heikin-Ashi candle colour", group = G_SIG)
 rsiSrc    = input.source(close, "RSI source", group = G_SIG)
 rsiLen    = input.int(12, "RSI length", minval = 1, group = G_SIG)
-rsiLower  = input.float(20, "RSI lower (long trigger)", minval = 1, maxval = 99, group = G_SIG)
-rsiUpper  = input.float(71, "RSI upper (short trigger)", minval = 1, maxval = 99, group = G_SIG)
+rsiLowerIn = input.float(20, "RSI lower (long trigger)", minval = 1, maxval = 99, group = G_SIG, tooltip = "Only used when the preset is Custom.")
+rsiUpperIn = input.float(71, "RSI upper (short trigger)", minval = 1, maxval = 99, group = G_SIG, tooltip = "Only used when the preset is Custom.")
 volFastL  = input.int(5, "Volume osc fast", minval = 1, group = G_SIG, inline = "vo")
 volSlowL  = input.int(14, "slow", minval = 1, group = G_SIG, inline = "vo")
 volLevel  = input.float(-39, "Volume osc threshold", minval = -100, maxval = 1000, group = G_SIG,
      tooltip = "Volume oscillator must be above this. -100 disables the volume condition.")
 trendLen  = input.int(10, "Trend SMA length", minval = 1, group = G_SIG)
-sigMemory = input.int(0, "Signal memory (bars)", minval = 0, group = G_SIG,
-     tooltip = "0 = the RSI cross must happen on the signal bar (original behaviour).\nN = the RSI cross may have happened up to N bars earlier, as long as HA / volume / trend confirm on the signal bar.")
+sigMemoryIn = input.int(0, "Signal memory (bars)", minval = 0, group = G_SIG,
+     tooltip = "Only used when the preset is Custom.\n0 = the RSI cross must happen on the signal bar (original behaviour).\nN = the RSI cross may have happened up to N bars earlier, as long as HA / volume / trend confirm now. Each RSI cross is used for one trade at most.")
+
+rsiLower  = sigPreset == P_ACTIVE ? 30.0 : sigPreset == P_STRICT ? 20.0 : rsiLowerIn
+rsiUpper  = sigPreset == P_ACTIVE ? 70.0 : sigPreset == P_STRICT ? 71.0 : rsiUpperIn
+sigMemory = sigPreset == P_ACTIVE ? 2    : sigPreset == P_STRICT ? 0    : sigMemoryIn
 
 // ─── ⑤ Extra filters ────────────────────────────────────────────────────────
 tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = G_FILT)
@@ -185,12 +198,20 @@ htfEma  = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lo
 
 rsiUpX  = ta.crossover(rsiVal, rsiLower)
 rsiDnX  = ta.crossunder(rsiVal, rsiUpper)
-barsUp  = ta.barssince(rsiUpX)
-barsDn  = ta.barssince(rsiDnX)
 
 // ─── Signals ────────────────────────────────────────────────────────────────
-rsiLong   = sigMemory == 0 ? rsiUpX : (not na(barsUp) and barsUp <= sigMemory)
-rsiShort  = sigMemory == 0 ? rsiDnX : (not na(barsDn) and barsDn <= sigMemory)
+// The RSI cross may be up to `sigMemory` bars old, and each cross is used for
+// one trade at most (no re-entries on a stale cross after a stop-out).
+var int upXBar  = na
+var int dnXBar  = na
+var int usedUpX = -1
+var int usedDnX = -1
+if rsiUpX
+    upXBar := bar_index
+if rsiDnX
+    dnXBar := bar_index
+rsiLong   = not na(upXBar) and bar_index - upXBar <= sigMemory and upXBar > usedUpX
+rsiShort  = not na(dnXBar) and bar_index - dnXBar <= sigMemory and dnXBar > usedDnX
 volOk     = volOsc > volLevel
 filtLong  = (not useVwap or close > vwapVal) and (not useHtf or close > htfEma) and (not useAdx or adxVal >= adxMin)
 filtShort = (not useVwap or close < vwapVal) and (not useHtf or close < htfEma) and (not useAdx or adxVal >= adxMin)
@@ -224,7 +245,11 @@ var int    dayWins     = 0
 var int    dayLosses   = 0
 var bool   dayHalted   = false
 var string dayHaltWhy  = ""
+var int    sessCount   = 0
+var int    totEntries  = 0
+var int    maxDayEnt   = 0
 if newDay
+    sessCount   += 1
     dayStartBar := bar_index
     dayRealized := 0.0
     dayEntries  := 0
@@ -257,10 +282,11 @@ dayPnL = dayRealized + strategy.openprofit
 // ════════════════════════════════════════════════════════════════════════════
 //  TRAILING MAX DRAWDOWN (prop-firm style)
 // ════════════════════════════════════════════════════════════════════════════
+var float accStart   = strategy.initial_capital   // balance the current (simulated) account started with
+var int   accBlown   = 0
 var float ddPeak     = strategy.initial_capital
 var float ddFloor    = strategy.initial_capital - ddUsd
-var bool  ddBreached = false
-bool justBreached    = false
+var bool  ddBreached = false                      // true only in "Stop trading" mode
 if useDD and not ddBreached
     if ddType == "End of day"
         if newDay
@@ -269,11 +295,9 @@ if useDD and not ddBreached
         ddPeak := math.max(ddPeak, balance + openBest)
     float newFloor = ddPeak - ddUsd
     if ddLock
-        newFloor := math.min(newFloor, strategy.initial_capital + ddLockOffset)
+        newFloor := math.min(newFloor, accStart + ddLockOffset)
     ddFloor := math.max(ddFloor, newFloor)
-    if balance + openWorst <= ddFloor
-        ddBreached   := true
-        justBreached := true
+breachNow = useDD and not ddBreached and balance + openWorst <= ddFloor
 
 // ════════════════════════════════════════════════════════════════════════════
 //  DAY GUARDS & SESSION
@@ -299,21 +323,23 @@ flatMin  = math.floor(flatHHMM / 100) * 60 + flatHHMM % 100
 flatZone = useFlat and isIntra and f_min(time_close) >= flatMin and f_min(time) < GLOBEX_OPEN
 
 cooldownOk = cooldown == 0 or na(lastExitBar) or bar_index - lastExitBar > cooldown
-canOpen    = inWindow and not flatZone and not dayHalted and not ddBreached and tradesLeft and cooldownOk
+gatesOk    = inWindow and not flatZone and not dayHalted and tradesLeft and cooldownOk
 
 // ════════════════════════════════════════════════════════════════════════════
 //  RISK ENGINE — $ limits → ticks → contracts, for whatever contract is loaded
 // ════════════════════════════════════════════════════════════════════════════
 // The most this trade may lose: per-trade max, shrunk if the day / account is
 // close to its limit so one stop-out can never break a prop rule.
-float  budget   = maxLossUsd
-string budgetBy = "per-trade max"
-if useDLL and dllUsd + dayPnL - bufferUsd < budget
-    budget   := dllUsd + dayPnL - bufferUsd
-    budgetBy := "daily limit room"
-if useDD and equity - ddFloor - bufferUsd < budget
-    budget   := equity - ddFloor - bufferUsd
-    budgetBy := "drawdown room"
+f_budget(float floorLvl) =>
+    float  b  = maxLossUsd
+    string src = "per-trade max"
+    if useDLL and dllUsd + dayPnL - bufferUsd < b
+        b  := dllUsd + dayPnL - bufferUsd
+        src := "daily limit room"
+    if useDD and equity - floorLvl - bufferUsd < b
+        b  := equity - floorLvl - bufferUsd
+        src := "drawdown room"
+    [b, src]
 
 // Returns [contracts, stop ticks, target ticks]. Contracts = 0 → no trade.
 // Worst-case loss per contract = (stop + slippage) ticks × $/tick + round-trip fees.
@@ -338,7 +364,28 @@ f_plan(float riskBudget, float atrNow) =>
         q := 0
     [q, sl, tp]
 
+wantLong  = longSig  and not inLong  and (not inShort or oppMode == "Reverse")
+wantShort = shortSig and not inShort and (not inLong  or oppMode == "Reverse")
+
+// Account blown = drawdown hit, or a signal arrives while flat and the room
+// left can't cover even 1 contract (the account can no longer trade).
+[budget0, budgetBy0] = f_budget(ddFloor)
+[q0, sl0, tp0]       = f_plan(budget0, atrVal)
+stallNow  = useDD and not ddBreached and not inPos and (wantLong or wantShort) and gatesOk and q0 < 1 and budgetBy0 == "drawdown room"
+bool justBlown = false
+if breachNow or stallNow
+    accBlown  += 1
+    justBlown := true
+    if ddOnBlow == B_NEW
+        accStart := equity
+        ddPeak   := equity
+        ddFloor  := equity - ddUsd
+    else
+        ddBreached := true
+
+[budget, budgetBy]        = f_budget(ddFloor)
 [planQty, planSl, planTp] = f_plan(budget, atrVal)
+canOpen = gatesOk and not ddBreached
 
 f_riskUsd(int q, int sl) => q * ((sl + slipTicks) * tickValue + feeRT)
 f_rewUsd(int q, int tp)  => q * tp * tickValue
@@ -357,8 +404,6 @@ f_json(string action, int qty, int slT, int tpT, string reason) =>
 // ════════════════════════════════════════════════════════════════════════════
 //  ORDERS
 // ════════════════════════════════════════════════════════════════════════════
-wantLong  = longSig  and not inLong  and (not inShort or oppMode == "Reverse")
-wantShort = shortSig and not inShort and (not inLong  or oppMode == "Reverse")
 goLong    = wantLong  and canOpen and planQty >= 1
 goShort   = wantShort and canOpen and planQty >= 1
 
@@ -370,9 +415,9 @@ if (wantLong or wantShort) and canOpen and planQty < 1
 bool   flatNow = false
 string flatWhy = ""
 if inPos
-    if ddBreached
+    if ddBreached or justBlown
         flatNow := true
-        flatWhy := "Max drawdown"
+        flatWhy := "Account blown"
     else if flatZone
         flatNow := true
         flatWhy := "Session close"
@@ -408,6 +453,12 @@ if (goLong or goShort) and not flatNow
     mfePx      := na
     beDone     := false
     dayEntries += 1
+    totEntries += 1
+    maxDayEnt  := math.max(maxDayEnt, dayEntries)
+    if goLong
+        usedUpX := upXBar
+    else
+        usedDnX := dnXBar
     strategy.entry(eid, goLong ? strategy.long : strategy.short, qty = planQty, comment = eid + " " + str.tostring(planQty),
          alert_message = f_json(goLong ? "buy" : "sell", planQty, planSl, planTp, "entry"))
     strategy.exit(eid + " Exit", eid, loss = planSl, profit = planTp, trail_points = trTrailPts, trail_offset = trTrailOff,
@@ -479,9 +530,9 @@ if showLabels and (goLong or goShort)
          yloc = goLong ? yloc.belowbar : yloc.abovebar, style = goLong ? label.style_label_up : label.style_label_down,
          color = goLong ? C_GREEN : C_RED, textcolor = color.white, size = size.small, tooltip = tip)
 
-if justBreached
-    label.new(bar_index, high, "ACCOUNT BREACHED\ntrailing drawdown", yloc = yloc.abovebar,
-         style = label.style_label_down, color = C_RED, textcolor = color.white, size = size.normal)
+if justBlown
+    label.new(bar_index, high, "ACCOUNT BLOWN #" + str.tostring(accBlown) + (ddBreached ? "\ntrading stopped" : "\nnew account: " + f_usd(accStart)),
+         yloc = yloc.abovebar, style = label.style_label_down, color = C_RED, textcolor = color.white, size = size.normal)
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
 f_pos(string s) =>
@@ -495,7 +546,7 @@ dashSize = switch dashSizeIn
     "Normal" => size.normal
     => size.small
 
-var table dash = table.new(f_pos(dashPosIn), 2, 25, bgcolor = C_BG, frame_color = C_HEADBG, frame_width = 1, border_color = C_HEADBG, border_width = 1)
+var table dash = table.new(f_pos(dashPosIn), 2, 27, bgcolor = C_BG, frame_color = C_HEADBG, frame_width = 1, border_color = C_HEADBG, border_width = 1)
 
 f_kv(int row, string k, string v, color vc) =>
     table.cell(dash, 0, row, k, text_color = C_MUTED, text_size = dashSize, text_halign = text.align_left)
@@ -508,7 +559,7 @@ if showDash and barstate.islast
     string status = "READY"
     color  stCol  = C_GREEN
     if ddBreached
-        status := "ACCOUNT BREACHED"
+        status := "ACCOUNT BLOWN"
         stCol  := C_RED
     else if dayHalted
         status := "HALTED · " + dayHaltWhy
@@ -557,16 +608,18 @@ if showDash and barstate.islast
     float ddRoom = equity - ddFloor
     f_sec(15, "ACCOUNT")
     f_kv(16, "Equity", f_usd(equity), C_TEXT)
-    f_kv(17, "Drawdown floor", useDD ? f_usd(ddFloor) + (ddLock and ddFloor >= strategy.initial_capital + ddLockOffset ? " (locked)" : "") : "off", C_TEXT)
+    f_kv(17, "Drawdown floor", useDD ? f_usd(ddFloor) + (ddLock and ddFloor >= accStart + ddLockOffset ? " (locked)" : "") : "off", C_TEXT)
     f_kv(18, "Drawdown room", useDD ? f_usd(ddRoom) : "off", not useDD ? C_TEXT : ddRoom > maxLossUsd ? C_GREEN : ddRoom > 0 ? C_ORANGE : C_RED)
+    f_kv(19, "Accounts blown", useDD ? str.tostring(accBlown) : "off", not useDD or accBlown == 0 ? C_TEXT : C_RED)
 
     bool worstOk = worstTrade >= -maxLossUsd - 1.0
     bool bestOk  = bestTrade <= maxProfitUsd + 1.0
-    f_sec(19, "RULE CHECK (all trades)")
-    f_kv(20, "Worst trade · limit " + f_usd(maxLossUsd), f_usdS(worstTrade) + (worstOk ? "  ✓" : "  ✗"), worstOk ? C_GREEN : C_RED)
-    f_kv(21, "Best trade · cap " + f_usd(maxProfitUsd), f_usdS(bestTrade) + (bestOk ? "  ✓" : "  ✗"), bestOk ? C_GREEN : C_RED)
-    f_kv(22, "Signals skipped (no room)", str.tostring(skipped), C_TEXT)
+    f_sec(20, "RULE CHECK (all trades)")
+    f_kv(21, "Worst trade · limit " + f_usd(maxLossUsd), f_usdS(worstTrade) + (worstOk ? "  ✓" : "  ✗"), worstOk ? C_GREEN : C_RED)
+    f_kv(22, "Best trade · cap " + f_usd(maxProfitUsd), f_usdS(bestTrade) + (bestOk ? "  ✓" : "  ✗"), bestOk ? C_GREEN : C_RED)
+    f_kv(23, "Signals skipped (no room)", str.tostring(skipped), C_TEXT)
+    f_kv(24, "Trades per session · busiest", (sessCount > 0 ? str.tostring(totEntries * 1.0 / sessCount, "0.0") : "–") + " · " + str.tostring(maxDayEnt), C_TEXT)
     float winRate = strategy.closedtrades > 0 ? strategy.wintrades * 100.0 / strategy.closedtrades : na
     float pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
-    f_kv(23, "Win rate · PF", (na(winRate) ? "–" : str.tostring(winRate, "0.0") + "%") + " · " + (na(pf) ? "–" : str.tostring(pf, "0.00")), C_TEXT)
-    f_kv(24, "Net P/L", f_usdS(strategy.netprofit), strategy.netprofit >= 0 ? C_GREEN : C_RED)
+    f_kv(25, "Win rate · PF", (na(winRate) ? "–" : str.tostring(winRate, "0.0") + "%") + " · " + (na(pf) ? "–" : str.tostring(pf, "0.00")), C_TEXT)
+    f_kv(26, "Net P/L", f_usdS(strategy.netprofit), strategy.netprofit >= 0 ? C_GREEN : C_RED)

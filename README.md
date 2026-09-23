@@ -8,10 +8,31 @@ A TradingView (Pine Script v6) strategy: Heikin-Ashi + RSI + volume signals, plu
 ## Quick start
 
 1. In TradingView, open **Pine Editor**, paste all of `RutaCrypto_PROP.pine`, and click **Add to chart**.
-2. Use a **regular candle** chart such as `MNQ1!` on 1–5 min. Don't use a Heikin-Ashi chart: the script calculates HA itself.
+2. Use a **regular candle** chart of `MNQ1!` on the **1-minute** timeframe (the default signal preset is tuned for it). Don't use a Heikin-Ashi chart: the script calculates HA itself.
 3. Go to **Settings → Properties** and set *Initial capital* to your account size. Set *Commission* and *Slippage* to your firm's numbers (defaults are $0.62/contract/side and 1 tick).
 4. Go to **Settings → Inputs → ① Per-trade risk** and set your **max loss** ($2,000) and **max profit** ($1,500) per trade.
 5. Optional: under **Properties**, turn on **Bar magnifier** (Premium plans). Stop and target fills then use lower-timeframe data and are more accurate.
+
+## Signal presets (how many trades you get)
+
+The signal needs four things on the same candle: RSI crossing back from an extreme, Heikin-Ashi colour, volume, and price on the right side of the 10 SMA. With the original levels (RSI 20 / 71, cross on that exact candle) this almost never lines up. When RSI crosses back up through 20, price is above the 10 SMA only about 6% of the time. So the original rules trade less than once per session.
+
+Pick one in **Inputs → ④ Signal → Signal preset**:
+
+| Preset | Rules | Trades per session (1-min) | Busiest day | Win rate | Net, Apr–Sep 2026 |
+|---|---|---|---|---|---|
+| **Active** (default) | RSI 30 / 70, the cross can be up to 2 candles old | 5.5 | 10 | 57% | +$22,182 |
+| **Strict** | Original: RSI 20 / 71, cross on the same candle | 0.8 | 5 | 59% | +$9,854 |
+| **Custom** | Your own RSI levels and signal memory | – | – | – | – |
+
+Each RSI cross is used for one trade at most, so a stop-out doesn't re-enter on the same old signal.
+
+How these numbers were made: a Python copy of this strategy, run on 108 regular-hours sessions of real NQ 1-minute data ([free sample from getdata.finance](https://github.com/getdata-finance/nq-1m-ohlcv-stocks-historical-data)), priced as MNQ with the default settings. It is not a TradingView backtest, so your Strategy Tester numbers will differ somewhat. Things to know:
+
+- **Active** made almost nothing in April–June and most of its profit in July–September. **Strict** was profitable in both halves, but trades rarely.
+- On 2-, 3- and 5-minute charts both presets lost money in this test. Stay on 1-minute.
+- Five months of data is a small sample. Treat these numbers as a sanity check, not a promise.
+- To re-run the test yourself, see [`research/compare_presets.py`](research/compare_presets.py).
 
 ## How the $ limits work on any contract
 
@@ -56,13 +77,15 @@ Calm market → more contracts. Wild market → fewer contracts. The risk stays 
 
 | Rule | What it does |
 |---|---|
-| **Trailing max drawdown** (on, $5,000) | Simulates the firm's trailing threshold, either end-of-day or intraday. It can freeze at start balance + $100. Trades are downsized so a stop-out can never break it. If it breaks anyway (a gap), the strategy flattens and stops trading for good, like a failed account. |
+| **Trailing max drawdown** (on, $5,000) | Simulates the firm's trailing threshold, either end-of-day or intraday. It can freeze at start balance + $100. Trades are downsized so a stop-out can't break it. The account counts as **blown** when the drawdown is hit, or when the room left can't cover even 1 contract. By default the script then starts a new simulated account and keeps going, and the dashboard counts **Accounts blown**. Choose "Stop trading" to end the backtest there instead, like a failed evaluation. |
 | **Daily loss limit** (off) | Counts realized and open P/L. After a loss, the next trade shrinks to the room that's left. If the limit is hit, the strategy flattens and stops for the day. |
 | **Daily profit goal** (off) | Stops trading for the day once reached. Helps with consistency rules. |
 | **Max trades / max losers per day** (off) | Hard caps per trading day. The trading day starts at 18:00 New York, like CME and the prop firms. |
 | **Safety buffer** ($100) | Space kept between a worst-case stop and any limit. |
 
 Session (③): new trades only 09:30–15:45 New York, Mon–Fri. Positions are forced flat at 15:55. Change both for your firm's rules or to trade overnight.
+
+> **Risk vs drawdown:** with $2,000 per trade and a $5,000 trailing drawdown, three losses in a row end the account. In the test above, the Active preset blew **6** simulated $5,000-drawdown accounts in 5 months, and Strict blew 1. If that's too many, lower *Max loss per trade* (e.g. $1,000) or use a bigger account.
 
 ## Dashboard
 
@@ -71,7 +94,8 @@ The top-right panel shows:
 - contract specs ($ per tick)
 - the next trade (contracts, stop and target in ticks, points and $)
 - today's P/L and trade count
-- drawdown floor and room left
+- drawdown floor, room left and accounts blown
+- average trades per session and the busiest day
 - a **rule check**: worst and best trade over the whole backtest against your $ limits, so you can confirm the caps held (✓ / ✗)
 
 Hover over a BUY / SELL label for that trade's full risk details.
@@ -93,7 +117,7 @@ Exits send `"action":"exit"` with the reason: `stop_loss`, `take_profit`, `break
 - **Stops ignored wicks.** The original checked stop and target only against the candle *close*. If a wick went through the stop and the candle closed back inside, the backtest didn't count the loss. When a candle closed beyond the stop, it booked the whole overshoot. Live losses could be much bigger than the backtest showed. Now stops and targets are real bracket orders that fill intrabar.
 - **Crypto leverage sizing replaced.** The "max leverage" and "invested $" sizing doesn't apply to futures. Sizing is now in contracts, based on dollar risk.
 - **Martingale removed** (as requested).
-- **`lookback1` was never used.** It is now "Signal memory (bars)". The default 0 keeps the original behaviour.
+- **`lookback1` was never used.** That's why the original rarely traded. It is now "Signal memory", used by the Active preset (2 candles). The Strict preset keeps the original behaviour.
 - **Heikin-Ashi is calculated locally** instead of with 4 `security()` calls. Same values, and it's faster.
 - **Volume oscillator** no longer divides by zero on symbols without volume.
 - **Margin set to 0.** Pine v6 defaults margin to 100%, which would trigger fake margin calls on futures. `fill_orders_on_standard_ohlc` also keeps fills on real prices if someone loads it on an HA chart.
