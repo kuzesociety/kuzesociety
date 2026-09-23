@@ -11,11 +11,13 @@ def load(tf_min=1):
     df["tclose"] = df.index + pd.Timedelta(minutes=tf_min)
     return df
 
-def rma(s, n):   # Pine ta.rma: seeded with SMA of first n values
+def rma(s, n):   # Pine ta.rma: seeded with the SMA of the first n valid values, then Wilder smoothing
     a = s.to_numpy(float); out = np.full(len(a), np.nan)
-    if len(a) < n: return pd.Series(out, s.index)
-    out[n-1] = np.nanmean(a[:n])
-    for i in range(n, len(a)):
+    valid = np.flatnonzero(~np.isnan(a))
+    if len(valid) < n: return pd.Series(out, s.index)
+    k = valid[n-1]
+    out[k] = a[valid[:n]].mean()
+    for i in range(k + 1, len(a)):
         out[i] = (out[i-1] * (n - 1) + a[i]) / n
     return pd.Series(out, s.index)
 

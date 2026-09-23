@@ -3,7 +3,7 @@ from ind import load, indicators, signals
 TICK, PV = 0.25, 2.0          # simulate MNQ on NQ prices
 TV = TICK * PV
 
-def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall=False, keep_rr=False, maxLoss=2000, maxProfit=1500,
+def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall=False, keep_rr=False, fill="close", maxLoss=2000, maxProfit=1500,
         maxQty=50, slM=2.0, tpM=4.0, fee=0.62, slip=1, lower=20, upper=71, capital=150000, buffer=100, d=None):
     if d is None: d = indicators(load(tf))
     L, S, upx, dnx = signals(d, lower=lower, upper=upper, memory=memory)
@@ -19,6 +19,7 @@ def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall
     bal = capital; peak = capital; floor_ = capital - dd; acc_start = capital
     trades = []; blown = 0; stalls = 0; last_up = last_dn = -1; used_up = used_dn = -2
     prev_date = None
+    pend_entry = None; pend_flat = None   # NinjaTrader-style: orders from bar i fill at the open of bar i+1
     def close_pos(px, i, why):
         nonlocal pos, qty, bal
         pnl = pos * (px - ent) * PV * qty - qty * feeRT
@@ -32,6 +33,14 @@ def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall
             if useDD:
                 peak = max(peak, bal)
                 floor_ = max(floor_, min(peak - dd, acc_start + 100))
+        # 0) NinjaTrader-style fills of orders placed at the previous bar's close
+        if pend_flat is not None and pos != 0:
+            close_pos(o[i] - pos * slip * TICK, i, pend_flat)
+        pend_flat = None
+        if pend_entry is not None:
+            dirn, q_, sl_, tp_ = pend_entry; pend_entry = None
+            if pos != 0: close_pos(o[i] - pos * slip * TICK, i, "REV")
+            pos = dirn; qty = q_; slT = sl_; tpT = tp_; ent = o[i] + pos * slip * TICK
         # 1) bracket exits intrabar
         if pos != 0:
             stop = ent - pos * slT * TICK; tp = ent + pos * tpT * TICK
@@ -58,7 +67,8 @@ def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall
                 break
         # 2) session flatten
         if pos != 0 and flat[i]:
-            close_pos(c[i], i, "EOD")
+            if fill == "next_open": pend_flat = "EOD"
+            else: close_pos(c[i], i, "EOD")
         # 3) entries
         can = inwin[i] and not flat[i]
         wantL = Lv[i] and pos <= 0; wantS = Sv[i] and pos >= 0
@@ -76,12 +86,16 @@ def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall
                 blown += 1; stalls += 1; acc_start = peak = bal; floor_ = bal - dd
                 budget = maxLoss; q = min(maxQty, math.floor(budget / per))
             if q >= 1:
-                if pos: close_pos(c[i] - pos * slip * TICK, i, "REV")
-                pos = 1 if wantL else -1
                 if wantL: used_up = last_up
                 else: used_dn = last_dn
-                qty = q; slT = sl; tpT = min(round(atr[i] * tpM / TICK), math.floor(maxProfit / (q * TV)))
-                ent = c[i] + pos * slip * TICK
+                tp_ticks = min(round(atr[i] * tpM / TICK), math.floor(maxProfit / (q * TV)))
+                if fill == "next_open":
+                    pend_entry = (1 if wantL else -1, q, sl, tp_ticks)
+                else:
+                    if pos: close_pos(c[i] - pos * slip * TICK, i, "REV")
+                    pos = 1 if wantL else -1
+                    qty = q; slT = sl; tpT = tp_ticks
+                    ent = c[i] + pos * slip * TICK
             else:
                 stalls += 1
     t = pd.DataFrame(trades, columns=["date", "pnl", "why"])

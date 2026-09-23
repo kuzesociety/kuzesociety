@@ -4,6 +4,7 @@ A TradingView (Pine Script v6) strategy: Heikin-Ashi + RSI + volume signals, plu
 
 - **File to use:** [`RutaCrypto_PROP.pine`](RutaCrypto_PROP.pine)
 - **Original version (for reference):** [`legacy/rutacrypto_original_v4.pine`](legacy/rutacrypto_original_v4.pine)
+- **NinjaTrader 8 bot (same rules and settings):** [`NinjaTrader/RutaCryptoPROP.cs`](NinjaTrader/RutaCryptoPROP.cs), with its own [setup guide](NinjaTrader/README.md)
 
 ## Quick start
 
