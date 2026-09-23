@@ -1,4 +1,53 @@
-# RutaCrypto PROP — NinjaTrader 8 bot
+# NinjaTrader 8 bots
+
+- [`RutaPullback.cs`](#rutapullback--15001-2000-bracket-bot): fixed-contract $1,500 / $2,000 bracket bot on 5-minute candles
+- [`RutaCryptoPROP.cs`](#rutacrypto-prop): port of the TradingView strategy
+
+## RutaPullback — $1,500 / $2,000 bracket bot
+
+It always trades the same bracket: fixed contracts, a stop worth $2,000 (fees and slippage included) and a target worth $1,500. While flat, it decides at every 5-minute candle close.
+
+**Default rule, *PullbackInTrend*:** trade in the direction of the hourly trend (price above or below the 60-minute EMA 50). Enter on a 5-minute candle that pulls back against it: buy a red candle in an uptrend, sell a green candle in a downtrend.
+
+**Setup:**
+1. Copy `RutaPullback.cs` to `Documents\NinjaTrader 8\bin\Custom\Strategies\` and press F5 in the NinjaScript Editor.
+2. Chart or Strategy Analyzer: **MNQ, 5 Minute**, trading hours **CME US Index Futures RTH**.
+3. For backtests, set **Order fill resolution = High, 1 Minute**, so stops and targets are checked every minute.
+4. Keep **Fill limit orders on touch = False**, so targets must trade through, like real fills.
+
+**Settings:**
+
+| Setting | Default | Notes |
+|---|---|---|
+| Contracts | 15 | 15 MNQ: target 50 pts, stop ~66 pts. 30 MNQ: target 25 pts, stop ~32 pts. |
+| Max loss / max profit per trade | $2,000 / $1,500 | |
+| Direction rule | PullbackInTrend | Also: FadeCandle, FollowTrend, FollowCandle, FollowCandlePersistFlip. The last one is your current bot's logic: the first trade follows the candle, it keeps the direction after a win and flips after a loss. Use it to compare the two on your own data. |
+| Hourly trend EMA length | 50 | |
+| Entry window / force flat | 09:30–15:45 / 15:55 New York | |
+| Max trades per day, daily loss limit, daily goal | off | |
+
+**What the research found** (`research/compare_bracket_bots.py`, 108 sessions of NQ 1-minute data, Apr–Sep 2026):
+
+| Bot | Trades/session | Win rate (1st / 2nd half) | Net, 5 months | Evaluations passed* |
+|---|---|---|---|---|
+| Coin flip, 30 MNQ | 38.5 | 56.0% | −$221,826 | 30.1% |
+| Follow candle, keep after win / flip after loss, 30 MNQ | 38.6 | 56.2% (56.2 / 56.2) | −$191,179 | 33.9% |
+| Pullback in trend, 30 MNQ | 21.0 | 57.1% (56.9 / 57.3) | −$26,125 | 29.4% |
+| Pullback in trend, 20 MNQ | 15.3 | 59.3% (59.7 / 58.9) | +$114,001 | 41.2% |
+| **Pullback in trend, 15 MNQ** | **11.5** | **59.8% (60.5 / 59.2)** | **+$135,890** | **48.5%** |
+
+\* 150K-style evaluation: +$9,000 target, $5,000 end-of-day trailing drawdown, a new evaluation started every session.
+
+- **Break-even:** with these brackets, break-even is about 57.6% after costs. A coin flip wins about 56% and still passes ~30% of evaluations, purely from the swing of $1,500/$2,000 bets. Passing accounts alone doesn't prove an edge.
+- **Why the rule matters:** on this data, following the 5-minute candle is worse than random (NQ tends to snap back over 5 minutes). Fading it in the direction of the hourly trend works best.
+- **Why size matters:** 30 contracts is too many for this rule, because tight 25-point targets get eaten by noise and costs. 15–20 contracts does better.
+- **Big caveat:** this is 5 months of data and 59.8% is not far above break-even. Confirm it in NinjaTrader on months this test never saw (Jan–Mar 2026, and 2025) before real money.
+
+I compiled the bot against a stand-in of the NinjaTrader API, and checked its direction decisions against the research on 11,090 five-minute candles (0 differences). Send me any compile error text from NinjaTrader and I'll fix it.
+
+---
+
+# RutaCrypto PROP
 
 [`RutaCryptoPROP.cs`](RutaCryptoPROP.cs) is the NinjaTrader 8 version of [`RutaCrypto_PROP.pine`](../RutaCrypto_PROP.pine). It uses the same rules and the same default settings.
 

@@ -15,6 +15,16 @@ TICK, PV = 0.25, 2.0   # MNQ
 TV = TICK * PV
 
 
+def pine_ema(x, n):
+    """Pine ta.ema: SMA of the first n values, then alpha = 2 / (n + 1)."""
+    a = x.to_numpy(float); out = np.full(len(a), np.nan)
+    if len(a) >= n:
+        out[n - 1] = a[:n].mean(); k = 2 / (n + 1)
+        for i in range(n, len(a)):
+            out[i] = k * a[i] + (1 - k) * out[i - 1]
+    return pd.Series(out, x.index)
+
+
 def add_features(d):
     """Extra columns used by the optional filters (all non-repainting)."""
     d = d.copy()
@@ -31,10 +41,7 @@ def add_features(d):
     d["vwap"] = pv / vv.replace(0, np.nan)
     # 60-minute EMA(50) of the last *completed* hour (Pine: ema[1] with lookahead_on)
     hr = d.close.resample("60min", label="left", closed="left").last().dropna()
-    k = 2 / 51
-    e = hr.ewm(alpha=k, adjust=False).mean()
-    e.iloc[:49] = np.nan
-    d["htf"] = e.shift(1).reindex(idx.floor("60min")).to_numpy()
+    d["htf"] = pine_ema(hr, 50).shift(1).reindex(idx.floor("60min")).to_numpy()
     # ADX (Pine ta.dmi 14, 14)
     up = d.high.diff(); dn = -d.low.diff()
     plus_dm = np.where((up > dn) & (up > 0), up, 0.0); plus_dm[0] = np.nan
