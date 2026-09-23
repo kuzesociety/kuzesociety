@@ -123,6 +123,12 @@ export interface FeedHealth {
   msgs: number;
   /** bytes received (data plans are often metered by volume) */
   bytes?: number;
+  /** bytes that crossed the network: fewer than `bytes` when the server compresses */
+  wire?: number;
+  /** the server this feed is connected to (never a key) */
+  host?: string;
+  /** data streamed today through a metered key and its daily cap, in MB */
+  budget?: { usedMb: number; limitMb: number; onFree: boolean };
   reconnects: number;
   errors: number;
   note?: string;
@@ -1331,10 +1337,26 @@ export class Engine {
     this.lastPersist = this.now;
     try {
       this.hooks.persist?.(this.exportState());
+      this.saved = { at: this.now, failures: 0, error: "" };
     } catch (e) {
-      this.log.error("persist failed", { err: String(e) });
+      // retried on the next tick; failing in a row is shown on the dashboard
+      this.saved = { at: this.saved.at, failures: this.saved.failures + 1, error: String((e as Error)?.message ?? e).slice(0, 200) };
+      if (this.saved.failures < 5 || this.saved.failures % 100 === 0) this.log.error("persist failed", { err: this.saved.error, inARow: this.saved.failures });
       this.persistDirty = true;
     }
+  }
+
+  /** When settings and positions last reached the disk, and failed saves in a row since. */
+  saved = { at: 0, failures: 0, error: "" };
+
+  /** Pools of the coins we hold that trade on PumpSwap: their swaps must reach us. */
+  heldPools(): string[] {
+    const out = new Set<string>();
+    for (const p of this.positions.values()) {
+      const pool = this.tokens.get(p.mint)?.pool;
+      if (pool) out.add(pool);
+    }
+    return [...out];
   }
 
   exportState(): PersistedState {
@@ -1539,6 +1561,7 @@ export class Engine {
       uptimeSec: Math.round((now - this.stats.startedAt) / 1000),
       feeds: [...this.feeds.values()],
       feedDown: this.feedDown(),
+      saved: this.saved,
       tokens: this.tokens.size,
       scored: this.scores.size,
       wallets: this.wallets.size,

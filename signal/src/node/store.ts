@@ -74,7 +74,18 @@ export function writeFileAtomic(path: string, data: string | Uint8Array) {
   } finally {
     closeSync(fd);
   }
-  renameSync(tmp, path);
+  // Windows may hold the target for a moment (antivirus, search indexer, OneDrive): renaming
+  // over it then fails with EPERM/EBUSY/EACCES — wait a little and try again
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (attempt >= 6 || !(code === "EPERM" || code === "EBUSY" || code === "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * attempt);
+    }
+  }
 }
 
 export class DataStore {

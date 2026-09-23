@@ -10,9 +10,17 @@ export interface Config {
   host: string;
   dataDir: string;
   dashboardToken: string;
-  /** Solana RPC websocket (logsSubscribe firehose) and HTTP endpoint */
+  /** the RPC key's endpoints: orders, lookups, and the stream only when streamSource is "rpc" */
   rpcWs: string;
   rpcHttp: string;
+  /** where live trades stream from */
+  streamWs: string;
+  /** "public": the free public Solana feed (default); "rpc": the RPC key's websocket, metered by the provider */
+  streamSource: "public" | "rpc";
+  /** daily cap on data streamed through a metered key, in MB; then the free feed until 00:00 UTC */
+  streamBudgetMb: number;
+  /** also stream every PumpSwap swap on every pool — about nine tenths of the whole stream */
+  ammFirehose: boolean;
   feeds: Set<"rpc" | "pumpportal" | "dexscreener" | "sim">;
   pumpPortalApiKey: string;
   telegramToken: string;
@@ -52,6 +60,11 @@ export function loadDotEnv(path = ".env") {
   }
 }
 
+/** The free public Solana endpoints (Solana Foundation): no key, 100 MB per 30 s per connection. */
+export const PUBLIC_RPC_HTTP = "https://api.mainnet-beta.solana.com";
+export const PUBLIC_RPC_WS = "wss://api.mainnet-beta.solana.com";
+export const isPublicRpc = (u: string) => /api\.mainnet(-beta)?\.solana\.com/i.test(u);
+
 function n(v: string | undefined, d: number) {
   const x = Number(v);
   return v !== undefined && v !== "" && Number.isFinite(x) ? x : d;
@@ -69,8 +82,13 @@ export function loadConfig(env = process.env, argv = process.argv): Config {
     feeds.clear();
     feeds.add("sim");
   }
-  const rpcHttp = env.RPC_URL ?? env.RPC_HTTP_URL ?? "https://api.mainnet-beta.solana.com";
+  const rpcHttp = env.RPC_URL ?? env.RPC_HTTP_URL ?? PUBLIC_RPC_HTTP;
   const rpcWs = env.RPC_WS_URL ?? rpcHttp.replace(/^http/, "ws");
+  // Streaming every pump.fun trade through a metered key costs far more than its free plan
+  // (Helius meters 20 credits per MB), so the stream uses the free public feed unless the
+  // owner chooses the key — and then only up to a daily budget.
+  const streamSource = env.STREAM_SOURCE === "rpc" && !isPublicRpc(rpcWs) ? "rpc" : "public";
+  const streamWs = streamSource === "rpc" ? rpcWs : env.STREAM_WS_URL || PUBLIC_RPC_WS;
   const level = (env.LOG_LEVEL ?? "info") as Config["logLevel"];
   return {
     port: n(env.PORT, 8787),
@@ -79,6 +97,10 @@ export function loadConfig(env = process.env, argv = process.argv): Config {
     dashboardToken: env.DASHBOARD_TOKEN ?? "",
     rpcWs,
     rpcHttp,
+    streamWs,
+    streamSource,
+    streamBudgetMb: Math.max(0, n(env.STREAM_BUDGET_MB_PER_DAY, 1500)),
+    ammFirehose: env.AMM_FIREHOSE === "1" || env.AMM_FIREHOSE === "true",
     feeds,
     pumpPortalApiKey: env.PUMPPORTAL_API_KEY ?? "",
     telegramToken: env.TELEGRAM_BOT_TOKEN ?? "",
@@ -116,7 +138,10 @@ export function describeConfig(c: Config) {
   return {
     feeds: [...c.feeds],
     rpc: host(c.rpcHttp),
-    rpcIsPublic: /api\.mainnet-beta\.solana\.com/.test(c.rpcHttp),
+    rpcIsPublic: isPublicRpc(c.rpcHttp),
+    stream: host(c.streamWs),
+    streamSource: c.streamSource,
+    ammFirehose: c.ammFirehose,
     pumpPortalApiKey: hide(c.pumpPortalApiKey),
     telegram: c.telegramToken && c.telegramChatId ? "on" : "off",
     liveTrading: c.liveTrading ? "enabled by server" : "disabled by server",

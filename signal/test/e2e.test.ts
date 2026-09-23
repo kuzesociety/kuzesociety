@@ -46,6 +46,7 @@ let rpcHttp: ReturnType<typeof createServer> | null = null;
 let dataDir = "";
 let port = 0;
 let rpcPort = 0;
+let wsPort = 0;
 let output = "";
 
 const api = (path: string, init: RequestInit = {}) =>
@@ -109,7 +110,8 @@ beforeAll(async () => {
     ws.on("message", (m) => {
       const req = JSON.parse(m.toString());
       ws.send(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: 100 + req.id }));
-      if (++subs === 2) {
+      // stream once the pump program is subscribed (pool subscriptions may follow)
+      if (++subs === 1) {
         const timer = setInterval(() => {
           for (let n = 0; n < 400 && i < events.length; n++, i++) {
             const logs = toLogs(events[i]!);
@@ -122,7 +124,7 @@ beforeAll(async () => {
       }
     });
   });
-  const wsPort = (wss.address() as AddressInfo).port;
+  wsPort = (wss.address() as AddressInfo).port;
   const httpPort = (rpcHttp.address() as AddressInfo).port;
   rpcPort = httpPort;
   port = 20000 + Math.floor(Math.random() * 20000);
@@ -136,6 +138,7 @@ beforeAll(async () => {
       DASHBOARD_TOKEN: TOKEN,
       FEEDS: "rpc",
       RPC_WS_URL: `ws://127.0.0.1:${wsPort}`,
+      STREAM_WS_URL: `ws://127.0.0.1:${wsPort}`,
       RPC_URL: `http://127.0.0.1:${httpPort}`,
       LEARN_EVERY_HOURS: "0",
       FETCH_METADATA: "0",
@@ -200,6 +203,11 @@ describe("built server end-to-end", () => {
     expect(rpc.note).toMatch(/start it again/);
     const st = await (await api("/api/setup")).json();
     expect(st.rpc.host).toBe(`127.0.0.1:${rpcPort}`);
+    // the stream is its own choice: a saved key does not switch it
+    expect(st.stream).toMatchObject({ source: "public", chosen: "public", ammFirehose: false });
+    expect(st.stream.feed).toMatchObject({ host: `127.0.0.1:${wsPort}`, status: "open" });
+    expect(st.stream.feed.msgs).toBeGreaterThan(100);
+    expect((await api("/api/setup/stream", post({ source: "rpc", budgetMb: 10 }))).status).toBe(400); // cap too small
     expect(st.local).toBe(true);
     expect(st.supervised).toBe(false);
     // the bot knows its version; without its starter script it does not update itself

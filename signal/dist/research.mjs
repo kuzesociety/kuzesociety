@@ -2435,7 +2435,16 @@ function writeFileAtomic(path, data) {
   } finally {
     closeSync(fd);
   }
-  renameSync(tmp, path);
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (e) {
+      const code = e.code;
+      if (attempt >= 6 || !(code === "EPERM" || code === "EBUSY" || code === "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * attempt);
+    }
+  }
 }
 var DataStore = class {
   constructor(dir, log) {
@@ -4549,10 +4558,23 @@ var Engine = class {
     this.lastPersist = this.now;
     try {
       this.hooks.persist?.(this.exportState());
+      this.saved = { at: this.now, failures: 0, error: "" };
     } catch (e) {
-      this.log.error("persist failed", { err: String(e) });
+      this.saved = { at: this.saved.at, failures: this.saved.failures + 1, error: String(e?.message ?? e).slice(0, 200) };
+      if (this.saved.failures < 5 || this.saved.failures % 100 === 0) this.log.error("persist failed", { err: this.saved.error, inARow: this.saved.failures });
       this.persistDirty = true;
     }
+  }
+  /** When settings and positions last reached the disk, and failed saves in a row since. */
+  saved = { at: 0, failures: 0, error: "" };
+  /** Pools of the coins we hold that trade on PumpSwap: their swaps must reach us. */
+  heldPools() {
+    const out = /* @__PURE__ */ new Set();
+    for (const p of this.positions.values()) {
+      const pool = this.tokens.get(p.mint)?.pool;
+      if (pool) out.add(pool);
+    }
+    return [...out];
   }
   exportState() {
     const heldMints = new Set([...this.positions.values()].map((p) => p.mint));
@@ -4755,6 +4777,7 @@ var Engine = class {
       uptimeSec: Math.round((now - this.stats.startedAt) / 1e3),
       feeds: [...this.feeds.values()],
       feedDown: this.feedDown(),
+      saved: this.saved,
       tokens: this.tokens.size,
       scored: this.scores.size,
       wallets: this.wallets.size,

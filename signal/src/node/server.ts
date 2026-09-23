@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { Engine } from "../core/engine.js";
 import { type ApiContext, accountSummary, handleApi } from "../core/api.js";
 import type { Logger } from "../core/util.js";
-import { type Config, describeConfig } from "./config.js";
+import { type Config, describeConfig, isPublicRpc } from "./config.js";
 import type { Learner } from "./learner.js";
 import { getJson, postJson } from "./http.js";
 import type { LiveExecutor } from "./live/executor.js";
@@ -288,7 +288,7 @@ export class DashboardServer {
     const path = url.pathname;
     const method = req.method ?? "GET";
 
-    if (path === "/healthz") return this.json(res, 200, { ok: true, uptime: process.uptime() });
+    if (path === "/healthz") return this.json(res, 200, { ok: true, app: "signal", uptime: process.uptime() });
 
     if (method === "GET" && (path === "/" || path === "/index.html")) {
       const t = url.searchParams.get("token");
@@ -349,7 +349,7 @@ export class DashboardServer {
     }
     const feed = this.ctx.engine().health().feeds.find((f) => f.name === "solana-rpc");
     const up = Math.max(120, process.uptime());
-    const mbPerDay = feed?.bytes ? (feed.bytes / 1e6) * (86_400 / up) : null;
+    const perDay = (bytes?: number) => (bytes ? (bytes / 1e6) * (86_400 / up) : null);
     const tgToken = eff("TELEGRAM_BOT_TOKEN");
     const tgChat = eff("TELEGRAM_CHAT_ID");
     let address: string | null = null;
@@ -369,8 +369,25 @@ export class DashboardServer {
       privateChannel: isPrivateChannel(req),
       rpc: {
         host,
-        isPublic: /api\.mainnet-beta\.solana\.com/.test(host),
-        feed: feed ? { status: feed.status, msgs: feed.msgs, mbPerDay } : null,
+        isPublic: isPublicRpc(rpcUrl),
+      },
+      stream: {
+        /** running now */
+        source: this.ctx.config.streamSource,
+        /** saved choice (applies after a restart) */
+        chosen: eff("STREAM_SOURCE") === "rpc" ? "rpc" : "public",
+        budgetMb: this.ctx.config.streamBudgetMb,
+        ammFirehose: this.ctx.config.ammFirehose,
+        feed: feed
+          ? {
+              host: feed.host ?? "",
+              status: feed.status,
+              msgs: feed.msgs,
+              mbPerDay: perDay(feed.bytes),
+              netMbPerDay: perDay(feed.wire),
+              budget: feed.budget ?? null,
+            }
+          : null,
       },
       telegram: {
         tokenSet: !!tgToken && tgToken !== "off",
@@ -407,6 +424,16 @@ export class DashboardServer {
         this.ctx.log.info("data feed changed from the dashboard", { host: new URL(r.http).host });
         const restarting = this.ctx.restart();
         return done({ slot: test.json.result, restarting, ...restartNote(restarting) });
+      }
+      case "/api/setup/stream": {
+        const source = body.source === "rpc" ? "rpc" : "public";
+        const budget = Math.round(Number(body.budgetMb ?? this.ctx.config.streamBudgetMb));
+        if (source === "rpc" && isPublicRpc(this.ctx.effective("RPC_WS_URL") || this.ctx.config.rpcWs)) return fail(400, "Add your RPC key first (step 1), then choose to stream through it.");
+        if (!(budget >= 50 && budget <= 100_000)) return fail(400, "The daily cap must be between 50 and 100,000 MB.");
+        this.ctx.setup.write({ STREAM_SOURCE: source, STREAM_BUDGET_MB_PER_DAY: String(budget) });
+        this.ctx.log.info("market data source changed from the dashboard", { source, budget });
+        const restarting = this.ctx.restart();
+        return done({ restarting, ...restartNote(restarting) });
       }
       case "/api/setup/telegram": {
         const token = String(body.token ?? "").trim();

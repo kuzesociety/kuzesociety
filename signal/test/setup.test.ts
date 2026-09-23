@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { priorModel } from "../src/core/model.js";
 import { PRESETS, followsPreset, ruleSummary } from "../src/core/presets.js";
-import { DEFAULT_SETTINGS, sanitizeSettings } from "../src/core/settings.js";
+import { DEFAULT_SETTINGS, rebaseSettings, sanitizeSettings, settingsChanges } from "../src/core/settings.js";
 import { SetupStore, isLocalRequest, isPrivateChannel, rpcFromInput, telegramTokenLooksValid } from "../src/node/setup.js";
 import { Telegram } from "../src/node/telegram.js";
 import { Engine } from "../src/core/engine.js";
+import { PUBLIC_RPC_WS, loadConfig } from "../src/node/config.js";
 
 const req = (remote: string, headers: Record<string, string>, encrypted = false) => ({ socket: { remoteAddress: remote, encrypted }, headers }) as unknown as IncomingMessage;
 
@@ -54,6 +55,35 @@ describe("setup from the dashboard", () => {
   });
 
   const silent = { debug() {}, info() {}, warn() {}, error() {} };
+
+  it("streams from the free public feed unless the owner chooses the key, and then within a cap", () => {
+    const helius = { RPC_URL: "https://mainnet.helius-rpc.com/?api-key=k", RPC_WS_URL: "wss://mainnet.helius-rpc.com/?api-key=k" };
+    // a saved key alone does not stream: that is what spent a free plan in hours
+    const plain = loadConfig(helius, []);
+    expect(plain).toMatchObject({ streamSource: "public", streamWs: PUBLIC_RPC_WS, rpcHttp: helius.RPC_URL, ammFirehose: false, streamBudgetMb: 1500 });
+    const chosen = loadConfig({ ...helius, STREAM_SOURCE: "rpc", STREAM_BUDGET_MB_PER_DAY: "800" }, []);
+    expect(chosen).toMatchObject({ streamSource: "rpc", streamWs: helius.RPC_WS_URL, streamBudgetMb: 800 });
+    // choosing "my key" without one stays on the free feed
+    expect(loadConfig({ STREAM_SOURCE: "rpc" }, []).streamSource).toBe("public");
+    expect(loadConfig({ STREAM_WS_URL: "ws://127.0.0.1:9" }, []).streamWs).toBe("ws://127.0.0.1:9");
+    expect(loadConfig({ AMM_FIREHOSE: "1" }, []).ammFirehose).toBe(true);
+  });
+
+  it("saves only the edited fields, so a switch made meanwhile is not undone", () => {
+    const base = { ...DEFAULT_SETTINGS, filters: { ...DEFAULT_SETTINGS.filters } };
+    const draft = { ...base, tpPct: 300, filters: { ...base.filters, maxDevPct: 10 } };
+    expect(settingsChanges(draft, base)).toEqual({ tpPct: 300, filters: { maxDevPct: 10 } });
+    // meanwhile auto-trading was switched on and a strategy moved the score
+    const latest = { ...base, enabled: true, minScore: 95 };
+    const rebased = rebaseSettings(draft, base, latest);
+    expect(rebased).toMatchObject({ enabled: true, minScore: 95, tpPct: 300 });
+    expect(rebased.filters.maxDevPct).toBe(10);
+    expect(settingsChanges(rebased, latest)).toEqual({ tpPct: 300, filters: { maxDevPct: 10 } });
+    // the server merges a partial patch over what it has, filters included
+    const merged = sanitizeSettings(settingsChanges(rebased, latest), latest);
+    expect(merged).toMatchObject({ enabled: true, minScore: 95, tpPct: 300 });
+    expect(merged.filters).toEqual({ ...latest.filters, maxDevPct: 10 });
+  });
 
   it("links Telegram to whoever sends the dashboard's code", () => {
     let linked = "";

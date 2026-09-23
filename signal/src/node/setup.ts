@@ -21,6 +21,8 @@ export const SETUP_KEYS = [
   "WALLET_PRIVATE_KEY",
   "LIVE_MAX_POSITION_SOL",
   "LIVE_MAX_DAILY_LOSS_SOL",
+  "STREAM_SOURCE",
+  "STREAM_BUDGET_MB_PER_DAY",
 ] as const;
 export type SetupKey = (typeof SETUP_KEYS)[number];
 export type SetupValues = Partial<Record<SetupKey, string>>;

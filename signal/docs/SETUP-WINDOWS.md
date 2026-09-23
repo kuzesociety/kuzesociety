@@ -22,14 +22,17 @@ About 15 minutes. You need: a Windows 10/11 PC that stays on, an internet connec
    - If Windows asks whether Node.js may use the network: tick **Private networks** → **Allow** (needed for your phone).
 2. A black window opens and stays open — **that is the bot. Leave it open.** Your browser opens the dashboard by itself (or go to **http://localhost:8787**).
 
-## 4. Give it market data (free Helius key)
+## 4. Market data (nothing to do)
+
+Every pump.fun trade comes from the **free public Solana feed** — no key, no account, no cost. **More → Health** shows *solana-rpc* green with the message count going up, and **More → Setup → 1** shows how much internet it uses per day.
+
+**Helius key: optional.** You only need one to send orders when you go live (step 9). A free key is enough:
 
 1. Go to **https://dashboard.helius.dev** and sign up (Google login works). The free plan is chosen by default.
 2. Open **API Keys** and copy your key (it looks like `1a2b3c4d-5e6f-…`).
-3. In the dashboard: **More → Setup → 1. Market data** → paste → **Save and connect**. The bot tests the key, then restarts by itself in a few seconds.
-4. The yellow "Setup needed" banner disappears. **More → Health** shows *solana-rpc* green with the message count going up.
+3. Dashboard: **More → Setup → 1. Market data → Your RPC key** → paste → **Save key**. The bot tests it and restarts by itself.
 
-The Setup page shows how much data the feed uses per day and whether it fits the Helius free plan (about 33,000 credits a day). If it does not, Helius will ask for a paid plan before the month ends — you will see it coming.
+The trade stream stays on the free feed even with a key saved. Streaming every trade through a key is billed per MB and used up a free Helius plan in about five hours. If the free feed ever keeps dropping, Setup lets you stream through your key with a daily cap (after the cap, it switches back to the free feed until 00:00 UTC).
 
 ## 5. Telegram alerts (optional, recommended)
 
@@ -77,17 +80,19 @@ From your phone anywhere: send `/update` to your Telegram bot. You can see your 
 
 Only when **Learn → go-live check** is green for your strategy:
 
-1. In **Phantom**: add a **new account** used only by the bot, and send it only what you can afford to lose.
-2. Phantom → **Settings → Manage accounts →** that account → **Show private key** → copy.
-3. On the PC running the bot (for safety this does not work from your phone): **More → Setup → 5. Go live** → paste the key → set **Max SOL per trade** (e.g. 0.05) and **Stop for the day after losing** (e.g. 0.25) → type `I understand the risk` → **Allow live trading**. The bot restarts.
-4. **Bot → Mode → Live.** Done. To go back: **Mode → Paper**, or **Setup → Turn live off**.
+1. Save your free Helius key if you have not yet (step 4): orders are sent through it.
+2. In **Phantom**: add a **new account** used only by the bot, and send it only what you can afford to lose.
+3. Phantom → **Settings → Manage accounts →** that account → **Show private key** → copy.
+4. On the PC running the bot (for safety this does not work from your phone): **More → Setup → 5. Go live** → paste the key → set **Max SOL per trade** (e.g. 0.05) and **Stop for the day after losing** (e.g. 0.25) → type `I understand the risk` → **Allow live trading**. The bot restarts.
+5. **Bot → Mode → Live.** Done. To go back: **Mode → Paper**, or **Setup → Turn live off**.
 
 The key is saved only in `C:\SIGNAL\data\config.json` on your PC and is never shown again. The two limits cannot be raised from the Bot tab.
 
 ## If something is wrong
 
 - **The black window closes immediately:** Node.js is not installed — do step 1, then start again.
-- **"Setup needed" banner stays:** the Helius key did not work — paste it again in Setup (the page says why).
-- **Red bar "Live data feed is down":** the bar says why. *Refused the key* → paste your Helius key again in **More → Setup**. *Limiting requests* → the free Helius plan's limit was reached (Setup shows your daily use). Anything else is usually the internet connection: the bot reconnects by itself. Right after starting, "Connecting to the live market data…" for a few seconds is normal.
+- **Settings you changed are back to the old values:** on the **Bot** tab, changes apply only after **Save** — the bar at the bottom says so until you press it. Strategies (**Use this**) and Telegram commands apply at once.
+- **"SIGNAL is already running in another window":** the bot started with Windows is already on (maybe minimized on the taskbar). Only one runs at a time; close the extra window.
+- **Red bar "Live data feed is down":** the bar says why. *Refused the key* (only when streaming through your key) → paste your Helius key again in **More → Setup**. *Limiting requests* on the free feed → it retries by itself; if it keeps happening, Setup lets you stream through your own key with a daily cap. Anything else is usually the internet connection: the bot reconnects by itself. Right after starting, "Connecting to the live market data…" for a few seconds is normal.
 - **No trades after hours:** Bot tab → *Why no trades?* lists exactly what blocked each signal.
 - **Dashboard won't open:** make sure the black window is open, then go to http://localhost:8787.

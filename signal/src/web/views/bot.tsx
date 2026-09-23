@@ -1,11 +1,20 @@
 import { useEffect, useState } from "preact/hooks";
 import type { EdgeFound, EdgeReport } from "../../core/edges";
 import { PRESETS, type Preset, followsPreset, ruleSummary } from "../../core/presets";
-import type { Settings } from "../../core/settings";
+import { type Settings, rebaseSettings, settingsChanges } from "../../core/settings";
 import { ext } from "../ext";
 import { pct } from "../format";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
+
+type Filters = Settings["filters"];
+
+/**
+ * Edits not saved yet, and the saved settings they started from. Kept when you switch tabs,
+ * so edits are never dropped silently; saving sends only what you changed, so a switch made
+ * meanwhile (auto-trading, a strategy, a Telegram command) is not undone.
+ */
+let kept: { draft: Settings; base: Settings } | null = null;
 
 export function Bot() {
   const settings = useApp((s) => s.settings);
@@ -13,30 +22,57 @@ export function Bot() {
   const day = useApp((s) => s.funnelDay);
   const health = useApp((s) => s.health);
   const account = useApp((s) => s.account);
-  const [draft, setDraft] = useState<Settings | null>(settings);
-  const [dirty, setDirty] = useState(false);
+  const [draft, setDraft] = useState<Settings | null>(kept?.draft ?? settings);
+  const [dirty, setDirty] = useState(kept !== null);
   const [busy, setBusy] = useState(false);
   const [confirmKill, setConfirmKill] = useState(false);
 
   useEffect(() => {
-    if (!dirty) setDraft(settings);
-  }, [settings, dirty]);
+    if (!settings) return;
+    if (!kept) {
+      setDraft(settings);
+      return;
+    }
+    // changed elsewhere while you were editing: keep your edits, take the rest
+    const next = rebaseSettings(kept.draft, kept.base, settings);
+    kept = { draft: next, base: settings };
+    setDraft(next);
+  }, [settings]);
+  // leaving the page with unsaved edits asks first
+  useEffect(() => {
+    if (!dirty) return;
+    const warn = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [dirty]);
   if (!draft || !settings) return null;
 
-  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => {
-    setDraft({ ...draft, [k]: v });
+  const edit = (next: Settings) => {
+    kept = { draft: next, base: kept?.base ?? settings };
+    setDraft(next);
     setDirty(true);
   };
-  const setF = <K extends keyof Settings["filters"]>(k: K, v: Settings["filters"][K]) => {
-    setDraft({ ...draft, filters: { ...draft.filters, [k]: v } });
-    setDirty(true);
+  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => edit({ ...draft, [k]: v });
+  const setF = <K extends keyof Filters>(k: K, v: Filters[K]) => edit({ ...draft, filters: { ...draft.filters, [k]: v } });
+  const discard = () => {
+    kept = null;
+    setDraft(settings);
+    setDirty(false);
   };
+  /** A quick switch (`patch`), or the edited form: only the fields you changed are sent. */
   const save = async (patch?: Partial<Settings>) => {
     setBusy(true);
     try {
-      const r = await api<{ settings: Settings }>("/api/settings", patch ?? draft);
-      setDraft(r.settings);
-      setDirty(false);
+      const body = patch ?? settingsChanges(draft, kept?.base ?? settings);
+      const r = await api<{ settings: Settings }>("/api/settings", body);
+      if (!patch) {
+        kept = null;
+        setDraft(r.settings);
+        setDirty(false);
+      }
       toast(patch ? "Updated" : "Saved — applies to new trades");
       void refreshState();
     } catch (e) {
@@ -136,13 +172,7 @@ export function Bot() {
               {busy ? "Saving…" : dirty ? "Save settings" : "Saved"}
             </button>
             {dirty && (
-              <button
-                class="btn ghost"
-                onClick={() => {
-                  setDraft(settings);
-                  setDirty(false);
-                }}
-              >
+              <button class="btn ghost" onClick={discard}>
                 Discard
               </button>
             )}
@@ -299,6 +329,18 @@ export function Bot() {
           )}
         </div>
       </div>
+
+      {dirty && (
+        <div class="savebar" role="status">
+          <span style="flex:1">Not saved yet — the bot still trades on the saved settings.</span>
+          <button class="btn sm ghost" onClick={discard}>
+            Discard
+          </button>
+          <button class="btn sm primary" disabled={busy} onClick={() => save()}>
+            {busy ? "Saving…" : "Save"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

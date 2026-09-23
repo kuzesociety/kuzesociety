@@ -35,6 +35,8 @@ export class ReconnectingWS {
   private lastAliveAt = 0;
   /** the socket's last error, shown with the next "closed" (e.g. the server refused the key) */
   private lastError = "";
+  /** network bytes of the sockets before the current one */
+  private wireBase = 0;
   readonly h: FeedHealth;
 
   constructor(private o: ReconnectingOptions) {
@@ -79,6 +81,19 @@ export class ReconnectingWS {
     return this.ws?.readyState === WebSocket.OPEN;
   }
 
+  /** Drops the connection and connects again right away (to pick up a new address). */
+  reconnect() {
+    if (this.stopped) return;
+    this.attempts = 0;
+    const ws = this.ws;
+    if (!ws) return;
+    try {
+      ws.terminate();
+    } catch {
+      /* the close handler reconnects */
+    }
+  }
+
   private setStatus(s: FeedHealth["status"], note?: string) {
     this.h.status = s;
     if (note !== undefined) this.h.note = redactKeys(note);
@@ -100,10 +115,16 @@ export class ReconnectingWS {
       this.setStatus("down", `bad url: ${String(e)}`);
       return;
     }
+    try {
+      this.h.host = new URL(url).host;
+    } catch {
+      this.h.host = "";
+    }
     this.setStatus("connecting");
     let ws: WebSocket;
     try {
-      ws = new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: false, maxPayload: 16 * 1024 * 1024 });
+      // compression is offered; servers that support it send several times fewer bytes
+      ws = new WebSocket(url, { handshakeTimeout: 15_000, perMessageDeflate: true, maxPayload: 16 * 1024 * 1024 });
     } catch (e) {
       this.h.errors++;
       this.schedule(`connect threw: ${String(e)}`);
@@ -113,6 +134,7 @@ export class ReconnectingWS {
     ws.on("open", () => {
       this.attempts = 0;
       this.lastError = "";
+      this.wireBase = this.h.wire ?? 0;
       this.lastAliveAt = Date.now();
       this.setStatus("open", "");
       this.o.log.info(`${this.o.name}: connected`);
@@ -129,6 +151,8 @@ export class ReconnectingWS {
       this.h.lastMsgAt = now;
       this.h.msgs++;
       this.h.bytes = (this.h.bytes ?? 0) + (Array.isArray(data) ? data.reduce((n, b) => n + b.length, 0) : (data as Buffer).byteLength);
+      const socket = (ws as unknown as { _socket?: { bytesRead?: number } })._socket;
+      if (typeof socket?.bytesRead === "number") this.h.wire = this.wireBase + socket.bytesRead;
       try {
         this.o.onMessage(data.toString());
       } catch (e) {

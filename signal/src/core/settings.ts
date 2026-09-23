@@ -216,3 +216,19 @@ export function exitPlanFrom(s: Settings): ExitPlan {
     exitSlippagePct: s.exitSlippagePct,
   };
 }
+
+/** The fields of an edited copy that differ from the settings it started from (filters too). */
+export function settingsChanges(draft: Settings, base: Settings): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(draft) as (keyof Settings)[]) if (k !== "filters" && draft[k] !== base[k]) out[k] = draft[k];
+  const f: Record<string, unknown> = {};
+  for (const k of Object.keys(draft.filters) as (keyof Settings["filters"])[]) if (draft.filters[k] !== base.filters[k]) f[k] = draft.filters[k];
+  if (Object.keys(f).length) out.filters = f;
+  return out as Partial<Settings>;
+}
+
+/** Settings changed elsewhere while being edited: the latest settings with the edits laid over them. */
+export function rebaseSettings(draft: Settings, base: Settings, latest: Settings): Settings {
+  const edits = settingsChanges(draft, base);
+  return { ...latest, ...edits, filters: { ...latest.filters, ...(edits.filters ?? {}) } };
+}

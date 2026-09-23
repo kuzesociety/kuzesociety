@@ -76,6 +76,9 @@ a{color:var(--info);text-decoration:none}
 .banner{max-width:1180px;width:calc(100% - 32px);margin:10px auto 0;padding:10px 14px;border-radius:var(--r-sm);font-weight:600;font-size:13px;display:flex;gap:10px;align-items:center}
 .banner.sim{background:var(--warn-soft);color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 30%,transparent)}
 .banner.bad{background:var(--bad-soft);color:var(--bad);border:1px solid color-mix(in srgb,var(--bad) 30%,transparent)}
+.savebar{position:fixed;z-index:40;left:50%;transform:translateX(-50%);bottom:calc(76px + env(safe-area-inset-bottom,0px));width:min(640px,calc(100% - 24px));display:flex;gap:8px;align-items:center;padding:10px 12px;border-radius:var(--r);background:var(--surface);color:var(--ink);border:1px solid color-mix(in srgb,var(--flare) 55%,var(--line));box-shadow:var(--shadow);font-size:13px;font-weight:600}
+@media (min-width:900px){.savebar{bottom:20px}}
+.main:has(.savebar){padding-bottom:calc(150px + env(safe-area-inset-bottom,0px))}
 .banner.info{background:color-mix(in srgb,var(--info) 12%,var(--surface));color:var(--info);border:1px solid color-mix(in srgb,var(--info) 30%,transparent)}
 
 /* building blocks */

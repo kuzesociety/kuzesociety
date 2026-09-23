@@ -41,11 +41,14 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 | Feed | What it gives | Cost |
 |---|---|---|
-| **Solana RPC firehose** (`RPC_WS_URL`) | Every pump.fun create, trade, graduation and PumpSwap swap, decoded from on-chain logs about one slot after landing | Free: a [Helius](https://helius.dev) free key works. The public endpoint works but is rate-limited |
+| **Solana stream** (free public feed by default) | Every pump.fun create, trade and graduation, decoded from on-chain logs about one slot after landing. Graduated coins on PumpSwap are followed pool by pool: the ones held, and fresh graduates for an hour | Free. The public Solana feed allows 100 MB per 30 s; the pump.fun stream is a small part of that |
+| Your RPC key (`RPC_URL`, optional) | Sending orders when live, and lookups | A free [Helius](https://helius.dev) key is enough |
 | PumpPortal | New launches and migrations, plus trades for held coins if `PUMPPORTAL_API_KEY` is set | Free / paid per message |
 | DexScreener | Paid profiles and boosts, USD quotes and liquidity for graduated coins | Free |
 
-**Health** (More → Health) shows each feed's status, message rate and reconnects. The bot does not open trades while its primary feed is down.
+**Why not stream through a key?** Providers bill streams by volume (Helius: 20 credits per MB). Every pump.fun *and* PumpSwap transaction is about 2–3 MB a second — a Helius free plan (1M credits a month) lasted about five hours, and PumpSwap is about nine tenths of it (most PumpSwap pools never came from pump.fun). So the bot does not stream all of PumpSwap (`AMM_FIREHOSE=1` turns it back on), and streams through your key only if you choose it in **More → Setup**, within a daily cap (`STREAM_BUDGET_MB_PER_DAY`, default 1500 MB), after which it uses the free feed until 00:00 UTC.
+
+**Health** (More → Health) shows each feed's server, message rate, data per day and reconnects. The bot does not open trades while its primary feed is down.
 
 ## 3. How the score works
 

@@ -82,10 +82,15 @@ function FeedBanner({ health }: { health: Health }) {
     return <div class="banner sim">Connecting to the live market data…</div>;
   }
   const note = critical.map((f) => f.note).find((n) => !!n) ?? "";
-  const why = /\b40[13]\b/.test(note)
-    ? "The data provider refused the key: paste it again in More → Setup."
-    : /\b429\b/.test(note)
-      ? "The data provider is limiting requests (plan limit reached?)."
+  const publicFeed = critical.some((f) => /solana\.com$/i.test(f.host ?? ""));
+  const why = /\b429\b/.test(note)
+    ? publicFeed
+      ? "The free public feed is limiting this connection; it retries by itself. If it keeps happening, stream through your own key (More → Setup)."
+      : "The data provider is limiting requests (plan limit reached?)."
+    : /\b40[13]\b/.test(note)
+      ? publicFeed
+        ? "The free public feed refused the connection; it retries by itself."
+        : "The data provider refused the key: paste it again in More → Setup."
       : note
         ? `Reason: ${note}`
         : "";
@@ -177,15 +182,14 @@ export function App() {
         </div>
       )}
       {account?.killed && <div class="banner bad">Kill switch is ON — no new entries.</div>}
-      {!ext.demo && health?.config?.rpcIsPublic && !health.simulated && (
-        <div class="banner sim">
-          <span style="flex:1">Setup needed: the bot is on the slow public data feed. Add your free Helius key.</span>
-          <button class="btn sm" onClick={() => navigate("more", "setup")}>
-            Set up
-          </button>
+      {health && health.feedDown && !health.simulated && <FeedBanner health={health} />}
+      {!ext.demo && (health?.saved?.failures ?? 0) >= 3 && (
+        <div class="banner bad">
+          <span style="flex:1">
+            Settings and trades are not being saved ({health!.saved!.error}). Check that the bot's folder is not read-only, full, or synced by OneDrive.
+          </span>
         </div>
       )}
-      {health && health.feedDown && !health.simulated && <FeedBanner health={health} />}
       {!ext.demo && health?.update?.available && health.update.can && (
         <div class="banner info">
           <span style="flex:1">A new version of SIGNAL is ready.</span>

@@ -30,6 +30,7 @@ rem one block, read whole before the bot starts, because an update replaces this
   node dist\engine.mjs
   if errorlevel 76 goto stopped
   if errorlevel 75 goto restart
+  if errorlevel 74 goto running
   goto stopped
 )
 :restart
@@ -41,6 +42,11 @@ echo.
 echo SIGNAL stopped (exit code %errorlevel%). Restarting in 5 seconds - close this window to stop.
 timeout /t 5 /nobreak >nul
 goto loop
+:running
+echo.
+echo SIGNAL is already running in another window, so this one can be closed.
+timeout /t 15 >nul
+exit
 :fail
 echo Build failed - see the messages above.
 pause

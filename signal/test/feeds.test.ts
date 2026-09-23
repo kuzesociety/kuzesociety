@@ -1,8 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocketServer, type WebSocket } from "ws";
 import { base58Decode } from "../src/core/codec.js";
-import { encodeAmmSwap, encodeCreate, encodeTrade, programDataLine } from "../src/core/encode.js";
+import { encodeAmmSwap, encodeCreate, encodeMigration, encodeTrade, programDataLine } from "../src/core/encode.js";
 import type { DecodedEvent } from "../src/core/decode.js";
 import { Engine, type FeedHealth } from "../src/core/engine.js";
 import { PUMP_AMM_PROGRAM, PUMP_PROGRAM } from "../src/core/types.js";
@@ -42,7 +45,7 @@ function notification(sub: number, sig: string, logs: string[], err: unknown = n
 }
 
 describe("Solana RPC firehose feed (mock websocket server)", () => {
-  it("subscribes to both programs, decodes events, skips failed/duplicate txs", async () => {
+  it("subscribes to the pump program, decodes events, skips failed/duplicate txs", async () => {
     const subs: unknown[] = [];
     let client: WebSocket | null = null;
     wss = new WebSocketServer({ port: 0 });
@@ -60,8 +63,9 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     const engine = new Engine({ now: Date.now() });
     const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: (e) => events.push(e), onHealth: (h) => engine.setFeedHealth(h) });
     feed.start();
-    await waitFor(() => subs.length === 2);
-    expect(subs).toEqual([PUMP_PROGRAM, PUMP_AMM_PROGRAM]);
+    await waitFor(() => subs.length === 1);
+    // pump.fun only: the whole PumpSwap stream is about nine tenths of the data
+    expect(subs).toEqual([PUMP_PROGRAM]);
     const create = programDataLine(
       encodeCreate({ name: "A", symbol: "A", uri: "", mint: MINT, bondingCurve: USER, user: USER, creator: USER, chainTs: 1, vTok: 1.073e15, vSol: 30e9, realTok: 7.931e14, supply: 1e15 }),
     );
@@ -80,12 +84,108 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     engine.advance(Date.now());
     const seen = engine.health().feeds.find((f) => f.name === "solana-rpc")!;
     expect(seen.status).toBe("open");
-    expect(seen.msgs).toBeGreaterThanOrEqual(6);
+    expect(seen.msgs).toBeGreaterThanOrEqual(5);
     expect(seen.lastMsgAt).toBeGreaterThan(0);
     expect(engine.feedDown()).toBe(false);
     engine.advance(Date.now() + 60_000); // …and down again once it really goes quiet
     expect(engine.feedDown()).toBe(true);
     feed.stop();
+  });
+
+  it("streams every PumpSwap swap only when asked to", async () => {
+    const subs: unknown[] = [];
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => ws.on("message", (m) => subs.push(JSON.parse(m.toString()).params[0].mentions[0])));
+    const port = (wss.address() as AddressInfo).port;
+    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, ammFirehose: true, log: silentLogger, onEvent: () => {}, onHealth: () => {} });
+    feed.start();
+    await waitFor(() => subs.length === 2);
+    expect(subs).toEqual([PUMP_PROGRAM, PUMP_AMM_PROGRAM]);
+    feed.stop();
+  });
+
+  it("follows graduated and held pools one by one, and lets go of them", async () => {
+    const calls: { method: string; params: unknown[] }[] = [];
+    let client: WebSocket | null = null;
+    let nextSub = 100;
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      client = ws;
+      ws.on("message", (m) => {
+        const req = JSON.parse(m.toString());
+        calls.push(req);
+        ws.send(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: req.method === "logsSubscribe" ? nextSub++ : true }));
+      });
+    });
+    const port = (wss.address() as AddressInfo).port;
+    const held: string[] = [];
+    const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, heldPools: () => held, poolCheckMs: 50, log: silentLogger, onEvent: () => {}, onHealth: () => {} });
+    feed.start();
+    const mentions = () => calls.filter((c) => c.method === "logsSubscribe").map((c) => (c.params[0] as { mentions: string[] }).mentions[0]);
+    await waitFor(() => mentions().length === 1);
+    // a coin graduates: its pool is followed
+    const POOL = key(503);
+    const migration = programDataLine(encodeMigration({ user: USER, mint: MINT, mintAmount: 2e14, solAmount: 85e9, bondingCurve: USER, chainTs: 1, pool: POOL }));
+    client!.send(notification(100, "sigM", [migration]));
+    await waitFor(() => mentions().includes(POOL));
+    // a coin we hold on PumpSwap is followed while we hold it
+    const HELD = key(504);
+    held.push(HELD);
+    await waitFor(() => mentions().includes(HELD) && feed.pools.includes(HELD));
+    held.length = 0;
+    await waitFor(() => calls.some((c) => c.method === "logsUnsubscribe") && !feed.pools.includes(HELD));
+    expect(feed.pools).toEqual([POOL]);
+    feed.stop();
+  });
+
+  it("keeps a metered key within its daily budget, then uses the free feed", async () => {
+    const hits = { paid: 0, free: 0 };
+    wss = new WebSocketServer({ port: 0 });
+    const free = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => {
+      hits.paid++;
+      ws.on("message", () => {
+        // a busy stream: 3 KB notifications until the cap is reached
+        for (let i = 0; i < 5; i++) ws.send(notification(10, `sig${hits.paid}-${i}`, ["Program log: x".padEnd(3_000, "x")]));
+      });
+    });
+    free.on("connection", () => hits.free++);
+    const dir = mkdtempSync(join(tmpdir(), "signal-budget-"));
+    try {
+      let spent = 0;
+      const feed = new RpcLogsFeed({
+        url: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`,
+        fallbackUrl: `ws://127.0.0.1:${(free.address() as AddressInfo).port}`,
+        budgetMb: 0.01,
+        budgetFile: join(dir, "usage.json"),
+        onBudgetSpent: () => spent++,
+        log: silentLogger,
+        onEvent: () => {},
+        onHealth: () => {},
+      });
+      feed.start();
+      await waitFor(() => hits.free === 1);
+      expect(spent).toBe(1);
+      expect(feed.health.budget).toMatchObject({ limitMb: 0.01, onFree: true });
+      feed.stop();
+      // a restart the same day stays on the free feed: the day's usage was saved
+      const again = new RpcLogsFeed({
+        url: `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`,
+        fallbackUrl: `ws://127.0.0.1:${(free.address() as AddressInfo).port}`,
+        budgetMb: 0.01,
+        budgetFile: join(dir, "usage.json"),
+        log: silentLogger,
+        onEvent: () => {},
+        onHealth: () => {},
+      });
+      again.start();
+      await waitFor(() => hits.free === 2);
+      expect(hits.paid).toBe(1);
+      again.stop();
+    } finally {
+      free.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("reconnects and resubscribes after the server drops the connection", async () => {
@@ -101,7 +201,7 @@ describe("Solana RPC firehose feed (mock websocket server)", () => {
     const statuses: FeedHealth["status"][] = [];
     const feed = new RpcLogsFeed({ url: `ws://127.0.0.1:${port}`, log: silentLogger, onEvent: () => {}, onHealth: (h) => statuses.push(h.status) });
     feed.start();
-    await waitFor(() => connections >= 2 && subs >= 4, 10_000);
+    await waitFor(() => connections >= 2 && subs >= 2, 10_000);
     expect(feed.health.reconnects).toBeGreaterThanOrEqual(1);
     expect(statuses).toContain("down");
     expect(redactKeys("Invalid URL: wss://mainnet.helius-rpc.com/?api-key=1a2b3c4d-5e6f&x=1")).toBe("Invalid URL: wss://mainnet.helius-rpc.com/?api-key=***&x=1");

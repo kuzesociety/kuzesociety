@@ -20,6 +20,7 @@ while true; do
   caffeinate -i node dist/engine.mjs
   code=$?
   if [ "$code" -eq 75 ]; then echo "Applying new settings..."; sleep 1; continue; fi
+  if [ "$code" -eq 74 ]; then echo "SIGNAL is already running in another window, so this one can be closed."; sleep 10; exit 0; fi
   echo "SIGNAL stopped (exit $code). Restarting in 5 seconds - close this window to stop."
   sleep 5
 done

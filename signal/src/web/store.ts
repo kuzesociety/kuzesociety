@@ -38,10 +38,13 @@ export type FunnelSummary = {
 };
 
 export type Health = Record<string, any> & {
-  feeds: { name: string; status: string; lastMsgAt: number; msgs: number; reconnects: number; errors: number; note?: string; critical: boolean }[];
+  feeds: { name: string; status: string; lastMsgAt: number; msgs: number; reconnects: number; errors: number; note?: string; critical: boolean; host?: string }[];
   feedDown: boolean;
   simulated?: boolean;
   uptimeSec: number;
+  /** when settings and positions last reached the disk, and failed saves in a row */
+  saved?: { at: number; failures: number; error: string };
+  dataDir?: string;
   /** one-tap updates (real bot only) */
   update?: { current: string | null; available: boolean; can: boolean } | null;
 };

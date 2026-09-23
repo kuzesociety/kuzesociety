@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 import { getHeapStatistics } from "node:v8";
 import { Engine } from "../core/engine.js";
 import { priorModel } from "../core/model.js";
+import { ruleSummary } from "../core/presets.js";
 import type { DecodedEvent } from "../core/decode.js";
 import type { MarketEvent } from "../core/types.js";
-import { loadConfig, loadDotEnv } from "./config.js";
+import { PUBLIC_RPC_WS, loadConfig, loadDotEnv } from "./config.js";
 import { DexScreenerFeed } from "./feeds/dexscreener.js";
 import { MetadataFetcher } from "./feeds/metadata.js";
 import { PoolResolver } from "./feeds/pools.js";
@@ -40,6 +41,31 @@ function dashboardHtml(): string {
   return "<!doctype html><title>SIGNAL</title><p>Dashboard not built. Run <code>npm run build</code>.</p>";
 }
 
+/** Another SIGNAL already answers on this computer's port. */
+export class AlreadyRunning extends Error {
+  constructor(
+    readonly port: number,
+    readonly dataDir: string,
+  ) {
+    super(`SIGNAL is already running on this computer (port ${port}).`);
+  }
+}
+
+async function answersAsSignal(port: number): Promise<boolean> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1_500) });
+    const j = (await r.json()) as { ok?: unknown; app?: unknown; uptime?: unknown };
+    return r.ok && j.ok === true && (j.app === "signal" || typeof j.uptime === "number");
+  } catch {
+    return false;
+  }
+}
+
+const ago = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60_000);
+  return m < 1 ? "just now" : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
+
 export async function main() {
   loadDotEnv();
   // values saved from the dashboard (data feed, Telegram, wallet) win over .env and host variables
@@ -48,6 +74,9 @@ export async function main() {
   setup.applyTo(process.env);
   const effective = (k: SetupKey) => setup.read()[k] ?? baseEnv[k] ?? "";
   const config = loadConfig();
+  // one bot per computer: a second copy (say, one started with Windows and minimized, and one
+  // started by hand) would stream everything twice and fight over the same files
+  if (await answersAsSignal(config.port)) throw new AlreadyRunning(config.port, config.dataDir);
   const log = new ServerLog(config.logLevel);
   const store = new DataStore(config.dataDir, log);
 
@@ -101,7 +130,15 @@ export async function main() {
   });
 
   const saved = store.loadState();
-  if (saved) engine.restore(saved);
+  if (saved) {
+    engine.restore(saved);
+    const s = engine.settings;
+    log.info(
+      `Settings restored from ${config.dataDir} (saved ${ago(saved.savedAt)}): ${ruleSummary(s)} · auto-trading ${s.enabled ? "ON" : "off"} · ${engine.closed.length} closed trades`,
+    );
+  } else {
+    log.warn(`No saved settings in ${config.dataDir} — starting with the defaults. If you set the bot up before, it was in another folder.`);
+  }
   const wallets = store.loadWallets();
   if (wallets) engine.wallets.restore(wallets as never);
 
@@ -151,7 +188,21 @@ export async function main() {
     feeds.push(sim);
   }
   if (config.feeds.has("rpc")) {
-    rpc = new RpcLogsFeed({ url: config.rpcWs, log, onEvent: (ev) => router.push(ev), onHealth });
+    const metered = config.streamSource === "rpc";
+    rpc = new RpcLogsFeed({
+      url: config.streamWs,
+      // through a key billed per MB: a daily cap, then the free public feed until 00:00 UTC
+      fallbackUrl: metered ? PUBLIC_RPC_WS : undefined,
+      budgetMb: metered ? config.streamBudgetMb : 0,
+      budgetFile: join(config.dataDir, "stream-usage.json"),
+      onBudgetSpent: (mb) =>
+        telegram?.send(`📉 Today's ${mb} MB of streaming through your RPC key is used. SIGNAL switched to the free public feed until 00:00 UTC, so your key's credits stop here.`),
+      ammFirehose: config.ammFirehose,
+      heldPools: () => engine.heldPools(),
+      log,
+      onEvent: (ev) => router.push(ev),
+      onHealth,
+    });
     rpc.start();
     feeds.push(rpc);
     pools = new PoolResolver({ rpcHttp: config.rpcHttp, log, onResolved: (pool, mint) => engine.mapPool(pool, mint) });
@@ -316,6 +367,7 @@ export async function main() {
       metadata: metadata ? { fetched: metadata.fetched, failed: metadata.failed } : null,
       pools: pools ? { resolved: pools.resolved } : null,
       simulated: config.feeds.has("sim"),
+      dataDir: config.dataDir,
       update: updater ? { current: updater.current, available: updater.available, can: updater.can } : null,
     }),
   });
@@ -329,6 +381,18 @@ export async function main() {
   if (lan) log.info(`On your phone at home (same Wi-Fi): http://${lan}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
   log.info(`Access token ${shown}`);
   log.info(`Feeds: ${[...config.feeds].join(", ")} · mode ${engine.settings.mode} · auto-trading ${engine.settings.enabled ? "ON" : "off"}`);
+  if (config.feeds.has("rpc")) {
+    const host = (() => {
+      try {
+        return new URL(config.streamWs).host;
+      } catch {
+        return "invalid address";
+      }
+    })();
+    log.info(
+      `Market data: ${config.streamSource === "rpc" ? `through your RPC key (${host}), up to ${config.streamBudgetMb} MB a day` : `free public Solana feed (${host})`}${config.ammFirehose ? " · every PumpSwap swap" : ""}`,
+    );
+  }
   if (config.feeds.has("sim")) log.warn("SIMULATION MODE: all coins and prices are synthetic");
   log.info("================================================================");
 
@@ -363,6 +427,9 @@ export async function main() {
   if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${config.port}/`, config.dataDir);
   process.on("SIGINT", () => shutdown(0));
   process.on("SIGTERM", () => shutdown(0));
+  // Windows: closing the bot's window sends SIGHUP (a few seconds to save), Ctrl+Break SIGBREAK
+  process.on("SIGHUP", () => shutdown(0));
+  process.on("SIGBREAK", () => shutdown(0));
   process.on("unhandledRejection", (e) => log.error("unhandled rejection", { err: String(e) }));
   process.on("uncaughtException", (e) => {
     log.error("uncaught exception — saving state and restarting", { err: String(e), stack: e.stack });
@@ -380,6 +447,13 @@ const isEntry = (() => {
 })();
 if (isEntry || process.env.SIGNAL_FORCE_MAIN === "1") {
   main().catch((e) => {
+    if (e instanceof AlreadyRunning) {
+      console.log(`\n  ${e.message}\n  Its window may be minimized on the taskbar. Dashboard: http://localhost:${e.port}\n`);
+      if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${e.port}/`, e.dataDir);
+      // 74: the starter scripts stop here instead of starting it again
+      setTimeout(() => process.exit(74), 500);
+      return;
+    }
     console.error("SIGNAL failed to start:", e);
     process.exit(1);
   });

@@ -60,7 +60,8 @@ export function Deploy() {
     const lines = [
       "# SIGNAL server settings",
       `DASHBOARD_TOKEN=${token}`,
-      "# free key from helius.dev — gives the bot every pump.fun trade in real time",
+      "# optional: a free key from helius.dev, used to send orders when you go live",
+      "# (the trade stream uses the free public Solana feed — streaming through a key is billed per MB)",
       "RPC_URL=https://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
       "RPC_WS_URL=wss://mainnet.helius-rpc.com/?api-key=YOUR_HELIUS_KEY",
     ];
@@ -97,8 +98,8 @@ export function Deploy() {
         <div class="card">
           <h2>2 · Settings</h2>
           <p class="muted" style="margin:0">
-            None to write on a PC: the dashboard's <b>More → Setup</b> page takes your free market-data key, links Telegram with a code, and later adds a wallet with a few
-            taps.
+            None to write on a PC. Market data is the free public Solana feed — nothing to set up. The dashboard's <b>More → Setup</b> page links Telegram with a code, and
+            later takes a free Helius key and a wallet for going live, with a few taps.
           </p>
         </div>
       ) : (
@@ -213,11 +214,7 @@ export function Deploy() {
               opens in your browser.
             </li>
             <li>
-              Dashboard → <b>More → Setup</b>: paste your free key from{" "}
-              <a href="https://dashboard.helius.dev" target="_blank" rel="noopener">
-                dashboard.helius.dev
-              </a>
-              , and link Telegram with the code it shows.
+              Dashboard → <b>More → Setup</b>: link Telegram with the code it shows. Market data needs nothing: it streams from the free public Solana feed.
             </li>
             <li>
               Double-click <code>autostart-windows.bat</code> once so it starts with Windows, and set Windows <b>Settings → System → Power → Sleep</b> to <b>Never</b>.

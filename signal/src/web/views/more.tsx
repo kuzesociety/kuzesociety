@@ -244,6 +244,21 @@ function HealthView() {
             <dd>{connected ? "live" : "reconnecting…"}</dd>
             <dt>Uptime</dt>
             <dd>{(h.uptimeSec / 3600).toFixed(1)} h</dd>
+            {h.dataDir && (
+              <>
+                <dt>Data folder</dt>
+                <dd style="word-break:break-all">{h.dataDir}</dd>
+              </>
+            )}
+            {h.saved && (
+              <>
+                <dt>Settings saved</dt>
+                <dd class={h.saved.failures >= 3 ? "bad" : ""}>
+                  {h.saved.at ? `${Math.max(0, Math.round((now - h.saved.at) / 1000))} s ago` : "nothing to save yet"}
+                  {h.saved.failures > 0 && ` · ${h.saved.failures} failed in a row`}
+                </dd>
+              </>
+            )}
             <dt>Events processed</dt>
             <dd>{h.events?.toLocaleString()}</dd>
             <dt>Coins in memory / scored</dt>

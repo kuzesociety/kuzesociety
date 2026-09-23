@@ -9,7 +9,21 @@ interface SetupStatus {
   supervised: boolean;
   local: boolean;
   privateChannel: boolean;
-  rpc: { host: string; isPublic: boolean; feed: { status: string; msgs: number; mbPerDay: number | null } | null };
+  rpc: { host: string; isPublic: boolean };
+  stream: {
+    source: "public" | "rpc";
+    chosen: "public" | "rpc";
+    budgetMb: number;
+    ammFirehose: boolean;
+    feed: {
+      host: string;
+      status: string;
+      msgs: number;
+      mbPerDay: number | null;
+      netMbPerDay: number | null;
+      budget: { usedMb: number; limitMb: number; onFree: boolean } | null;
+    } | null;
+  };
   telegram: { tokenSet: boolean; linked: boolean; code: string | null };
   live: { enabled: boolean; pendingRestart: boolean; walletSet: boolean; address: string | null; maxPositionSol: number; maxDailyLossSol: number; ready: boolean };
   phoneUrl: string | null;
@@ -55,6 +69,7 @@ export function SetupView() {
   const [restarting, setRestarting] = useState(false);
   const [busy, setBusy] = useState("");
   const [rpcKey, setRpcKey] = useState("");
+  const [budgetMb, setBudgetMb] = useState("");
   const [tgToken, setTgToken] = useState("");
   const [wallet, setWallet] = useState("");
   const [maxPos, setMaxPos] = useState("0.05");
@@ -106,9 +121,11 @@ export function SetupView() {
     }
   };
 
-  const feed = st.rpc.feed;
-  const feedOk = !st.rpc.isPublic && feed?.status === "open";
+  const feed = st.stream.feed;
+  const feedOk = feed?.status === "open";
   const credits = feed?.mbPerDay ? feed.mbPerDay * CREDITS_PER_MB : null;
+  const cap = Number(budgetMb || st.stream.budgetMb);
+  const fmt = (n: number) => Math.round(n).toLocaleString("en-US");
 
   const u = st.update;
   const updating = busy === "update";
@@ -171,32 +188,62 @@ export function SetupView() {
       {restarting && <div class="banner sim" style="margin:0;width:100%">Restarting the bot to apply it — this page reconnects by itself in a few seconds.</div>}
       {u?.available && updateCard}
 
-      <Step n={1} title="Market data (required)" done={feedOk}>
+      <Step n={1} title="Market data" done={feedOk}>
         <p class="muted" style="margin-top:0">
-          The bot needs a live feed of every pump.fun trade. A free Helius key gives it one: sign up at{" "}
+          Every pump.fun trade comes from the <b>free public Solana feed</b> — no key, no account, no cost. Coins that graduate to PumpSwap are followed one by one while they
+          matter (the ones you hold, and fresh graduates for an hour).
+        </p>
+        <p class="faint note" style="margin-top:0">
+          Now:{" "}
+          {feed
+            ? `${st.stream.source === "rpc" ? "through your key" : "free public feed"} (${feed.host}) · ${feed.status}, ${feed.msgs.toLocaleString("en-US")} messages`
+            : "not connected"}
+          {feed && (feed.netMbPerDay ?? feed.mbPerDay) !== null && ` · about ${fmt(feed.netMbPerDay ?? feed.mbPerDay!)} MB a day of internet`}
+          {feed?.budget &&
+            ` · today ${fmt(feed.budget.usedMb)} of ${fmt(feed.budget.limitMb)} MB through your key${feed.budget.onFree ? " — cap reached, on the free feed until 00:00 UTC" : ""}`}
+        </p>
+
+        <b style="display:block;margin:10px 0 4px">Your RPC key (optional)</b>
+        <p class="muted" style="margin:0 0 8px">
+          Needed only to send orders when you go live. A free Helius key is enough: sign up at{" "}
           <a href="https://dashboard.helius.dev" target="_blank" rel="noopener">
             dashboard.helius.dev
-          </a>{" "}
-          (Google login works), open <b>API Keys</b>, copy the key and paste it here.
+          </a>
+          , open <b>API Keys</b>, copy the key and paste it here. {st.rpc.isPublic ? "No key saved yet." : `Key saved (${st.rpc.host}).`}
         </p>
         <div class="row wrap" style="gap:8px">
           <input class="inp wide" type="password" autoComplete="off" placeholder="Helius API key" value={rpcKey} onInput={(e) => setRpcKey((e.target as HTMLInputElement).value)} />
-          <button class="btn primary" disabled={!rpcKey || !!busy} onClick={() => act("rpc", "/api/setup/rpc", { key: rpcKey }, () => setRpcKey(""))}>
-            {busy === "rpc" ? "Testing…" : "Save and connect"}
+          <button class="btn" disabled={!rpcKey || !!busy} onClick={() => act("rpc", "/api/setup/rpc", { key: rpcKey }, () => setRpcKey(""))}>
+            {busy === "rpc" ? "Testing…" : "Save key"}
           </button>
         </div>
-        <p class="faint note">
-          {st.rpc.isPublic
-            ? "Now: the free public Solana endpoint — slow and often cut off, so the bot sees few trades."
-            : `Now: ${st.rpc.host} · ${feed ? `${feed.status}, ${feed.msgs.toLocaleString("en-US")} messages` : "not connected"}`}
-          {credits !== null && !st.rpc.isPublic && (
-            <>
-              {" "}
-              · about {feed!.mbPerDay!.toFixed(0)} MB/day ≈ {Math.round(credits).toLocaleString("en-US")} Helius credits/day
-              {credits > FREE_CREDITS_PER_DAY ? " — more than the free plan's ~33,000/day: expect Helius to ask for a paid plan before the month ends." : " — within the free plan."}
-            </>
-          )}
-        </p>
+
+        {!st.rpc.isPublic && (
+          <>
+            <b style="display:block;margin:14px 0 4px">Stream trades through your key instead?</b>
+            <p class="muted" style="margin:0 0 8px">
+              Only if the free feed keeps dropping. Keys are billed by data: Helius charges about {CREDITS_PER_MB} credits per MB, and its free plan has about{" "}
+              {fmt(FREE_CREDITS_PER_DAY)} credits a day.
+              {credits !== null && ` The stream measured now is about ${fmt(feed!.mbPerDay!)} MB a day — about ${fmt(credits)} credits a day through a key.`} With a daily cap the
+              key carries the stream until the cap, then the free feed takes over until 00:00 UTC.
+            </p>
+            <div class="row wrap" style="gap:8px;align-items:center">
+              <div class="chips">
+                <button class="chip" aria-pressed={st.stream.chosen === "public"} disabled={!!busy} onClick={() => act("stream", "/api/setup/stream", { source: "public", budgetMb: cap }, () => {})}>
+                  Free public feed
+                </button>
+                <button class="chip" aria-pressed={st.stream.chosen === "rpc"} disabled={!!busy} onClick={() => act("stream", "/api/setup/stream", { source: "rpc", budgetMb: cap }, () => {})}>
+                  Through my key
+                </button>
+              </div>
+              <label class="row" style="gap:6px">
+                at most
+                <input class="inp" style="max-width:90px" inputMode="numeric" value={budgetMb || String(st.stream.budgetMb)} onInput={(e) => setBudgetMb((e.target as HTMLInputElement).value)} />
+                MB a day ≈ {fmt(cap * CREDITS_PER_MB)} credits
+              </label>
+            </div>
+          </>
+        )}
       </Step>
 
       <Step n={2} title="Telegram alerts (optional)" done={st.telegram.linked}>
@@ -283,6 +330,9 @@ export function SetupView() {
           <p class="muted" style="margin:0">For safety, a wallet can only be added on the computer running the bot — open http://localhost:8787 there.</p>
         ) : (
           <>
+            {st.rpc.isPublic && (
+              <p class="note warn" style="margin-top:0">Save your free Helius key in step 1 first: orders are sent through it (the public endpoint is slow for sending).</p>
+            )}
             <ol class="steps" style="margin:0 0 10px">
               <li>In Phantom, create a new account used only by the bot, and send it the SOL you can afford to lose.</li>
               <li>Phantom → Settings → Manage accounts → that account → Show private key. Copy it.</li>
