@@ -1,0 +1,572 @@
+//@version=6
+// ════════════════════════════════════════════════════════════════════════════
+//  RutaCrypto PROP — Heikin-Ashi · RSI · Volume strategy with a prop-firm
+//  risk engine. Built for MNQ, adapts automatically to any futures contract
+//  (NQ, ES, MES, RTY, YM, CL, GC …) using the chart's tick size and point value.
+//
+//  • Every trade loses at most "Max loss per trade" (fees + slippage included)
+//  • Every trade takes profit at most at "Max profit per trade"
+//  • Stops / targets are real bracket orders, so intrabar wicks are respected
+//  • Account guard: trailing drawdown, daily loss limit, daily goal,
+//    max trades / losers per day, forced flat before the close
+//
+//  Run it on REGULAR candles (not Heikin-Ashi): HA is calculated internally.
+// ════════════════════════════════════════════════════════════════════════════
+strategy("RutaCrypto PROP", overlay = true,
+     initial_capital              = 150000,
+     currency                     = currency.USD,
+     default_qty_type             = strategy.fixed,
+     default_qty_value            = 1,
+     pyramiding                   = 0,
+     process_orders_on_close      = true,
+     commission_type              = strategy.commission.cash_per_contract,
+     commission_value             = 0.62,
+     slippage                     = 1,
+     margin_long                  = 0,
+     margin_short                 = 0,
+     fill_orders_on_standard_ohlc = true,
+     max_labels_count             = 500)
+
+// ─── Constants ──────────────────────────────────────────────────────────────
+TZ          = "America/New_York"
+GLOBEX_OPEN = 18 * 60                       // CME re-opens 18:00 NY = new trading day
+M_ATR       = "ATR stop + auto contracts"
+M_USD       = "Fixed $ stop/target + fixed contracts"
+
+C_GREEN  = #089981
+C_RED    = #f23645
+C_BLUE   = #2962ff
+C_ORANGE = #ff9800
+C_TEXT   = #d1d4dc
+C_MUTED  = #8c909a
+C_BG     = color.new(#131722, 8)
+C_HEADBG = #2a2e39
+
+G_RISK = "① Per-trade risk (prop firm)"
+G_ACCT = "② Account guard (prop firm)"
+G_SESS = "③ Session (New York time)"
+G_SIG  = "④ Signal"
+G_FILT = "⑤ Extra filters"
+G_MGMT = "⑥ Trade management"
+G_COST = "⑦ Costs (keep equal to Properties tab)"
+G_VIS  = "⑧ Display"
+G_ALRT = "⑨ Alerts / automation"
+
+// ─── ① Per-trade risk ───────────────────────────────────────────────────────
+sizeMode     = input.string(M_ATR, "Sizing mode", options = [M_ATR, M_USD], group = G_RISK,
+     tooltip = "ATR stop + auto contracts: the stop distance comes from ATR and the number of contracts is calculated so a full stop-out costs at most 'Max loss per trade'.\n\nFixed $ stop/target + fixed contracts: you choose the contracts; the stop and target distances are calculated so they are worth exactly the $ amounts below.")
+maxLossUsd   = input.float(2000, "Max loss per trade ($)", minval = 1, step = 50, group = G_RISK,
+     tooltip = "Hard cap on what one trade can lose, INCLUDING round-trip commission and the stop slippage buffer.")
+maxProfitUsd = input.float(1500, "Max profit per trade ($)", minval = 1, step = 50, group = G_RISK,
+     tooltip = "The take-profit is placed so one winner never makes more than this (gross). Helps with consistency rules.")
+fixedQty     = input.int(10, "Contracts (fixed $ mode)", minval = 1, group = G_RISK)
+maxQty       = input.int(50, "Max contracts (ATR mode)", minval = 1, group = G_RISK,
+     tooltip = "Never trade more than this. Set it to your firm's position limit for this contract (micros count as micros).")
+atrLen       = input.int(14, "ATR length", minval = 1, group = G_RISK)
+slMult       = input.float(2.0, "Stop = ATR ×", minval = 0.1, step = 0.1, group = G_RISK)
+tpMult       = input.float(4.0, "Target = ATR ×", minval = 0.1, step = 0.1, group = G_RISK,
+     tooltip = "Target = ATR × this, but never worth more than 'Max profit per trade'.")
+minStopTicks = input.int(8, "Min stop (ticks, ATR mode)", minval = 1, group = G_RISK,
+     tooltip = "ATR stops tighter than this are widened to this, so dead-quiet bars can't produce oversized positions.")
+
+// ─── ② Account guard ────────────────────────────────────────────────────────
+useDD        = input.bool(true, "Trailing max drawdown", group = G_ACCT, inline = "dd")
+ddUsd        = input.float(5000, "$", minval = 1, step = 100, group = G_ACCT, inline = "dd",
+     tooltip = "Simulates the firm's trailing drawdown. Trades are sized so a stop-out can never break it; if it is broken anyway (gap) the strategy flattens and stops trading for good, like a failed account.")
+ddType       = input.string("End of day", "Drawdown trails", options = ["End of day", "Intraday (open P/L)"], group = G_ACCT,
+     tooltip = "End of day: the high-water mark updates once per trading day (closing balance).\nIntraday: it follows the highest open equity reached inside each bar (stricter).")
+ddLock       = input.bool(true, "Stop trailing at start balance +", group = G_ACCT, inline = "lock")
+ddLockOffset = input.float(100, "$", minval = 0, step = 50, group = G_ACCT, inline = "lock",
+     tooltip = "Most firms freeze the drawdown floor once it reaches the starting balance (+ a small amount). Set 0 to freeze exactly at the starting balance.")
+useDLL       = input.bool(false, "Daily loss limit", group = G_ACCT, inline = "dll")
+dllUsd       = input.float(3000, "$", minval = 1, step = 100, group = G_ACCT, inline = "dll",
+     tooltip = "Includes open P/L. Next trades are downsized so a stop-out can't break it; if hit, the strategy flattens and stops for the day.")
+useDPT       = input.bool(false, "Daily profit goal (stop for the day)", group = G_ACCT, inline = "dpt")
+dptUsd       = input.float(3000, "$", minval = 1, step = 100, group = G_ACCT, inline = "dpt")
+maxTradesDay = input.int(0, "Max trades per day (0 = off)", minval = 0, group = G_ACCT)
+maxLossesDay = input.int(0, "Max losing trades per day (0 = off)", minval = 0, group = G_ACCT)
+bufferUsd    = input.float(100, "Safety buffer ($)", minval = 0, step = 25, group = G_ACCT,
+     tooltip = "Space kept between a worst-case stop-out and the daily loss limit / drawdown floor.")
+
+// ─── ③ Session ──────────────────────────────────────────────────────────────
+useSession = input.bool(true, "Only open trades inside the entry window", group = G_SESS)
+entrySess  = input.session("0930-1545:23456", "Entry window", group = G_SESS,
+     tooltip = "New York time. Default: regular hours Mon–Fri, no new trades in the last 15 minutes.")
+useFlat    = input.bool(true, "Force flat at", group = G_SESS, inline = "flat")
+flatHHMM   = input.int(1555, "HHMM", minval = 0, maxval = 1759, group = G_SESS, inline = "flat",
+     tooltip = "New York time (00:00–17:59). Any open position is closed on the bar that closes at/after this time; no new trades until the next session (18:00).")
+
+// ─── ④ Signal ───────────────────────────────────────────────────────────────
+useHA     = input.bool(true, "Require Heikin-Ashi candle colour", group = G_SIG)
+rsiSrc    = input.source(close, "RSI source", group = G_SIG)
+rsiLen    = input.int(12, "RSI length", minval = 1, group = G_SIG)
+rsiLower  = input.float(20, "RSI lower (long trigger)", minval = 1, maxval = 99, group = G_SIG)
+rsiUpper  = input.float(71, "RSI upper (short trigger)", minval = 1, maxval = 99, group = G_SIG)
+volFastL  = input.int(5, "Volume osc fast", minval = 1, group = G_SIG, inline = "vo")
+volSlowL  = input.int(14, "slow", minval = 1, group = G_SIG, inline = "vo")
+volLevel  = input.float(-39, "Volume osc threshold", minval = -100, maxval = 1000, group = G_SIG,
+     tooltip = "Volume oscillator must be above this. -100 disables the volume condition.")
+trendLen  = input.int(10, "Trend SMA length", minval = 1, group = G_SIG)
+sigMemory = input.int(0, "Signal memory (bars)", minval = 0, group = G_SIG,
+     tooltip = "0 = the RSI cross must happen on the signal bar (original behaviour).\nN = the RSI cross may have happened up to N bars earlier, as long as HA / volume / trend confirm on the signal bar.")
+
+// ─── ⑤ Extra filters ────────────────────────────────────────────────────────
+tradeDir = input.string("Both", "Direction", options = ["Both", "Long only", "Short only"], group = G_FILT)
+oppMode  = input.string("Reverse", "Opposite signal while in a trade", options = ["Reverse", "Close", "Ignore"], group = G_FILT,
+     tooltip = "Reverse = close and flip (original behaviour). Close = just close. Ignore = let the bracket handle the exit.")
+useVwap  = input.bool(false, "VWAP side (long above / short below)", group = G_FILT)
+useHtf   = input.bool(false, "HTF EMA trend", group = G_FILT, inline = "htf")
+htfTf    = input.timeframe("60", "", group = G_FILT, inline = "htf")
+htfLen   = input.int(50, "len", minval = 1, group = G_FILT, inline = "htf",
+     tooltip = "Long only above / short only below this EMA from a higher timeframe (must be ≥ chart timeframe). Non-repainting.")
+useAdx   = input.bool(false, "Min ADX", group = G_FILT, inline = "adx")
+adxMin   = input.float(18, "", minval = 0, group = G_FILT, inline = "adx")
+adxLen   = input.int(14, "len", minval = 1, group = G_FILT, inline = "adx")
+cooldown = input.int(0, "Cooldown bars after an exit", minval = 0, group = G_FILT)
+
+// ─── ⑥ Trade management ─────────────────────────────────────────────────────
+useBE      = input.bool(false, "Break-even at", group = G_MGMT, inline = "be")
+beTrigPct  = input.float(50, "% of the way to target", minval = 1, maxval = 99, group = G_MGMT, inline = "be")
+beOffTicks = input.int(2, "Break-even offset (ticks)", minval = 0, group = G_MGMT,
+     tooltip = "The stop moves to entry ± this many ticks in your favour (covers commissions).")
+useTrail   = input.bool(false, "Trailing stop from", group = G_MGMT, inline = "tr")
+trailPct   = input.float(60, "% of the way to target", minval = 1, maxval = 99, group = G_MGMT, inline = "tr")
+trailAtr   = input.float(1.0, "Trail distance (× ATR)", minval = 0.1, step = 0.1, group = G_MGMT)
+
+// ─── ⑦ Costs ────────────────────────────────────────────────────────────────
+feeSide   = input.float(0.62, "Commission per contract, per side ($)", minval = 0, step = 0.01, group = G_COST,
+     tooltip = "Used by the risk engine so a full stop-out INCLUDING fees stays under the max loss. Keep equal to Properties → Commission. Micros ≈ $0.25–0.65, minis ≈ $1.5–2.5 depending on the firm.")
+slipTicks = input.int(1, "Slippage on stops (ticks)", minval = 0, group = G_COST,
+     tooltip = "Keep equal to Properties → Slippage.")
+
+// ─── ⑧ Display ──────────────────────────────────────────────────────────────
+showDash    = input.bool(true, "Dashboard", group = G_VIS, inline = "d")
+dashPosIn   = input.string("Top right", "", options = ["Top right", "Top left", "Bottom right", "Bottom left"], group = G_VIS, inline = "d")
+dashSizeIn  = input.string("Small", "", options = ["Tiny", "Small", "Normal"], group = G_VIS, inline = "d")
+showLevels  = input.bool(true, "Entry / stop / target lines", group = G_VIS)
+showLabels  = input.bool(true, "Trade labels (hover for details)", group = G_VIS)
+showBlocked = input.bool(false, "Mark signals blocked by filters / risk rules", group = G_VIS)
+showSessBg  = input.bool(true, "Shade outside entry window & halted days", group = G_VIS)
+showMA      = input.bool(false, "Plot trend SMA", group = G_VIS)
+
+// ─── ⑨ Alerts ───────────────────────────────────────────────────────────────
+alertTicker = input.string("", "Ticker in alert JSON (blank = chart)", group = G_ALRT,
+     tooltip = "Create the alert on this strategy with message {{strategy.order.alert_message}} to receive JSON for every entry / exit (for webhook bridges).")
+
+// ════════════════════════════════════════════════════════════════════════════
+//  CONTRACT SPECS — read from the chart symbol, so the $ risk adapts to any
+//  contract: MNQ tick 0.25 = $0.50 · NQ $5 · MES $1.25 · ES $12.50 · …
+// ════════════════════════════════════════════════════════════════════════════
+tickSize  = syminfo.mintick
+pointVal  = syminfo.pointvalue
+tickValue = tickSize * pointVal              // $ per tick per contract
+feeRT     = 2.0 * feeSide                    // round-trip commission per contract
+symName   = alertTicker == "" ? syminfo.ticker : alertTicker
+
+// ════════════════════════════════════════════════════════════════════════════
+//  INDICATORS — all computed on every bar (Pine v6 `and` / `or` are lazy)
+// ════════════════════════════════════════════════════════════════════════════
+// Heikin-Ashi computed locally: same values as the HA chart, no request.security()
+haClose = (open + high + low + close) / 4.0
+var float haOpen = na
+haOpen := na(haOpen[1]) ? (open + close) / 2.0 : (haOpen[1] + haClose[1]) / 2.0
+haBull  = haClose > haOpen
+haBear  = haClose < haOpen
+
+volFast = ta.ema(volume, volFastL)
+volSlow = ta.ema(volume, volSlowL)
+volOsc  = volSlow > 0 ? 100.0 * (volFast - volSlow) / volSlow : 0.0
+rsiVal  = ta.rsi(rsiSrc, rsiLen)
+atrVal  = ta.atr(atrLen)
+trendMa = ta.sma(close, trendLen)
+vwapVal = ta.vwap(hlc3)
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+htfEma  = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead = barmerge.lookahead_on)
+
+rsiUpX  = ta.crossover(rsiVal, rsiLower)
+rsiDnX  = ta.crossunder(rsiVal, rsiUpper)
+barsUp  = ta.barssince(rsiUpX)
+barsDn  = ta.barssince(rsiDnX)
+
+// ─── Signals ────────────────────────────────────────────────────────────────
+rsiLong   = sigMemory == 0 ? rsiUpX : (not na(barsUp) and barsUp <= sigMemory)
+rsiShort  = sigMemory == 0 ? rsiDnX : (not na(barsDn) and barsDn <= sigMemory)
+volOk     = volOsc > volLevel
+filtLong  = (not useVwap or close > vwapVal) and (not useHtf or close > htfEma) and (not useAdx or adxVal >= adxMin)
+filtShort = (not useVwap or close < vwapVal) and (not useHtf or close < htfEma) and (not useAdx or adxVal >= adxMin)
+longSig   = (not useHA or haBull) and rsiLong  and volOk and close > trendMa and filtLong  and tradeDir != "Short only"
+shortSig  = (not useHA or haBear) and rsiShort and volOk and close < trendMa and filtShort and tradeDir != "Long only"
+
+// ════════════════════════════════════════════════════════════════════════════
+//  POSITION STATE
+// ════════════════════════════════════════════════════════════════════════════
+posSize = strategy.position_size
+inLong  = posSize > 0
+inShort = posSize < 0
+inPos   = posSize != 0
+posQty  = math.abs(posSize)
+avgPx   = strategy.position_avg_price
+// best / worst open P/L reached inside this bar (for intraday drawdown & limits)
+openBest  = inLong ? (high - avgPx) * posQty * pointVal : inShort ? (avgPx - low)  * posQty * pointVal : 0.0
+openWorst = inLong ? (low  - avgPx) * posQty * pointVal : inShort ? (avgPx - high) * posQty * pointVal : 0.0
+openWorst := math.min(openWorst, strategy.openprofit)
+balance = strategy.initial_capital + strategy.netprofit
+equity  = balance + strategy.openprofit
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DAILY BOOK-KEEPING  (trading day starts 18:00 NY on CME futures)
+// ════════════════════════════════════════════════════════════════════════════
+newDay = timeframe.change("D")
+var int    dayStartBar = 0
+var float  dayRealized = 0.0
+var int    dayEntries  = 0
+var int    dayWins     = 0
+var int    dayLosses   = 0
+var bool   dayHalted   = false
+var string dayHaltWhy  = ""
+if newDay
+    dayStartBar := bar_index
+    dayRealized := 0.0
+    dayEntries  := 0
+    dayWins     := 0
+    dayLosses   := 0
+    dayHalted   := false
+    dayHaltWhy  := ""
+
+// Newly closed trades → attributed to the day they actually exited on
+var int   seenClosed  = 0
+var int   lastExitBar = na
+var float worstTrade  = 0.0
+var float bestTrade   = 0.0
+if strategy.closedtrades > seenClosed
+    for i = seenClosed to strategy.closedtrades - 1
+        float p = strategy.closedtrades.profit(i)
+        worstTrade := math.min(worstTrade, p)
+        bestTrade  := math.max(bestTrade, p)
+        if strategy.closedtrades.exit_bar_index(i) >= dayStartBar
+            dayRealized += p
+            if p > 0
+                dayWins += 1
+            else if p < 0
+                dayLosses += 1
+    seenClosed  := strategy.closedtrades
+    lastExitBar := strategy.closedtrades.exit_bar_index(strategy.closedtrades - 1)
+
+dayPnL = dayRealized + strategy.openprofit
+
+// ════════════════════════════════════════════════════════════════════════════
+//  TRAILING MAX DRAWDOWN (prop-firm style)
+// ════════════════════════════════════════════════════════════════════════════
+var float ddPeak     = strategy.initial_capital
+var float ddFloor    = strategy.initial_capital - ddUsd
+var bool  ddBreached = false
+bool justBreached    = false
+if useDD and not ddBreached
+    if ddType == "End of day"
+        if newDay
+            ddPeak := math.max(ddPeak, balance)
+    else
+        ddPeak := math.max(ddPeak, balance + openBest)
+    float newFloor = ddPeak - ddUsd
+    if ddLock
+        newFloor := math.min(newFloor, strategy.initial_capital + ddLockOffset)
+    ddFloor := math.max(ddFloor, newFloor)
+    if balance + openWorst <= ddFloor
+        ddBreached   := true
+        justBreached := true
+
+// ════════════════════════════════════════════════════════════════════════════
+//  DAY GUARDS & SESSION
+// ════════════════════════════════════════════════════════════════════════════
+dllHit = useDLL and dayRealized + openWorst <= -dllUsd
+if not dayHalted
+    if dllHit
+        dayHalted  := true
+        dayHaltWhy := "daily loss limit"
+    else if useDPT and dayRealized >= dptUsd
+        dayHalted  := true
+        dayHaltWhy := "daily goal reached"
+    else if maxLossesDay > 0 and dayLosses >= maxLossesDay
+        dayHalted  := true
+        dayHaltWhy := "max losers"
+tradesLeft = maxTradesDay == 0 or dayEntries < maxTradesDay
+
+f_min(int t) => hour(t, TZ) * 60 + minute(t, TZ)
+isIntra  = timeframe.isintraday
+sessOn   = useSession and isIntra
+inWindow = not sessOn or not na(time(timeframe.period, entrySess, TZ))
+flatMin  = math.floor(flatHHMM / 100) * 60 + flatHHMM % 100
+flatZone = useFlat and isIntra and f_min(time_close) >= flatMin and f_min(time) < GLOBEX_OPEN
+
+cooldownOk = cooldown == 0 or na(lastExitBar) or bar_index - lastExitBar > cooldown
+canOpen    = inWindow and not flatZone and not dayHalted and not ddBreached and tradesLeft and cooldownOk
+
+// ════════════════════════════════════════════════════════════════════════════
+//  RISK ENGINE — $ limits → ticks → contracts, for whatever contract is loaded
+// ════════════════════════════════════════════════════════════════════════════
+// The most this trade may lose: per-trade max, shrunk if the day / account is
+// close to its limit so one stop-out can never break a prop rule.
+float  budget   = maxLossUsd
+string budgetBy = "per-trade max"
+if useDLL and dllUsd + dayPnL - bufferUsd < budget
+    budget   := dllUsd + dayPnL - bufferUsd
+    budgetBy := "daily limit room"
+if useDD and equity - ddFloor - bufferUsd < budget
+    budget   := equity - ddFloor - bufferUsd
+    budgetBy := "drawdown room"
+
+// Returns [contracts, stop ticks, target ticks]. Contracts = 0 → no trade.
+// Worst-case loss per contract = (stop + slippage) ticks × $/tick + round-trip fees.
+f_plan(float riskBudget, float atrNow) =>
+    int q  = 0
+    int sl = 0
+    int tp = 0
+    if sizeMode == M_ATR
+        sl := math.max(minStopTicks, math.round(atrNow * slMult / tickSize))
+        float perContract = (sl + slipTicks) * tickValue + feeRT
+        q := math.min(maxQty, math.floor(riskBudget / perContract))
+        if q >= 1
+            tp := math.min(math.round(atrNow * tpMult / tickSize), math.floor(maxProfitUsd / (q * tickValue)))
+    else
+        // exact $ bracket for the chosen size; size is only cut if the day / account can't afford it
+        sl := math.floor((maxLossUsd / fixedQty - feeRT) / tickValue) - slipTicks
+        tp := math.floor(maxProfitUsd / (fixedQty * tickValue))
+        if sl >= 1
+            float perContract = (sl + slipTicks) * tickValue + feeRT
+            q := math.min(fixedQty, math.floor(riskBudget / perContract))
+    if na(q) or na(sl) or na(tp) or sl < 1 or tp < 1
+        q := 0
+    [q, sl, tp]
+
+[planQty, planSl, planTp] = f_plan(budget, atrVal)
+
+f_riskUsd(int q, int sl) => q * ((sl + slipTicks) * tickValue + feeRT)
+f_rewUsd(int q, int tp)  => q * tp * tickValue
+
+// ─── Alert JSON (use {{strategy.order.alert_message}} as the alert message) ──
+f_num(float v) => str.tostring(v, "0.########")
+f_json(string action, int qty, int slT, int tpT, string reason) =>
+    int    d = action == "buy" ? 1 : action == "sell" ? -1 : 0
+    string s = '{"ticker":"' + symName + '","action":"' + action + '","qty":' + str.tostring(qty) + ',"reason":"' + reason + '"'
+    if d != 0
+        s += ',"price":' + f_num(close) + ',"sl_ticks":' + str.tostring(slT) + ',"tp_ticks":' + str.tostring(tpT) +
+             ',"sl_price":' + f_num(math.round_to_mintick(close - d * slT * tickSize)) +
+             ',"tp_price":' + f_num(math.round_to_mintick(close + d * tpT * tickSize))
+    s + '}'
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ORDERS
+// ════════════════════════════════════════════════════════════════════════════
+wantLong  = longSig  and not inLong  and (not inShort or oppMode == "Reverse")
+wantShort = shortSig and not inShort and (not inLong  or oppMode == "Reverse")
+goLong    = wantLong  and canOpen and planQty >= 1
+goShort   = wantShort and canOpen and planQty >= 1
+
+var int skipped = 0
+if (wantLong or wantShort) and canOpen and planQty < 1
+    skipped += 1
+
+// 1) Forced exits: account breach, end of session, daily loss limit
+bool   flatNow = false
+string flatWhy = ""
+if inPos
+    if ddBreached
+        flatNow := true
+        flatWhy := "Max drawdown"
+    else if flatZone
+        flatNow := true
+        flatWhy := "Session close"
+    else if dllHit
+        flatNow := true
+        flatWhy := "Daily loss limit"
+if flatNow
+    strategy.close_all(comment = flatWhy, alert_message = f_json("flatten", math.round(posQty), 0, 0, flatWhy))
+
+// 2) Opposite signal → close only
+if not flatNow and oppMode == "Close"
+    if inLong and shortSig
+        strategy.close("Long", comment = "Opposite", alert_message = f_json("exit", math.round(posQty), 0, 0, "opposite_signal"))
+    else if inShort and longSig
+        strategy.close("Short", comment = "Opposite", alert_message = f_json("exit", math.round(posQty), 0, 0, "opposite_signal"))
+
+// 3) New entry (or reversal) with its bracket. The bracket uses ticks relative
+//    to the real fill price, so the $ loss / profit is exact whatever the fill.
+var int   trQty      = 0
+var int   trSl       = 0
+var int   trTp       = 0
+var int   trTrailPts = na
+var int   trTrailOff = na
+var float mfePx      = na
+var bool  beDone     = false
+if (goLong or goShort) and not flatNow
+    string eid = goLong ? "Long" : "Short"
+    trQty      := planQty
+    trSl       := planSl
+    trTp       := planTp
+    trTrailPts := useTrail ? math.max(1, math.round(planTp * trailPct / 100.0)) : na
+    trTrailOff := useTrail ? math.max(1, math.round(atrVal * trailAtr / tickSize)) : na
+    mfePx      := na
+    beDone     := false
+    dayEntries += 1
+    strategy.entry(eid, goLong ? strategy.long : strategy.short, qty = planQty, comment = eid + " " + str.tostring(planQty),
+         alert_message = f_json(goLong ? "buy" : "sell", planQty, planSl, planTp, "entry"))
+    strategy.exit(eid + " Exit", eid, loss = planSl, profit = planTp, trail_points = trTrailPts, trail_offset = trTrailOff,
+         comment_loss = "SL", comment_profit = "TP", comment_trailing = "Trail",
+         alert_loss     = f_json("exit", planQty, 0, 0, "stop_loss"),
+         alert_profit   = f_json("exit", planQty, 0, 0, "take_profit"),
+         alert_trailing = f_json("exit", planQty, 0, 0, "trailing_stop"))
+
+// 4) Break-even: once price has covered X% of the way to target, pull the stop
+//    to entry ± offset. Target / trailing stay identical.
+if inPos and not flatNow and not goLong and not goShort
+    mfePx := na(mfePx) ? (inLong ? high : low) : inLong ? math.max(mfePx, high) : math.min(mfePx, low)
+    float runTicks = (inLong ? mfePx - avgPx : avgPx - mfePx) / tickSize
+    if useBE and not beDone and runTicks >= trTp * beTrigPct / 100.0
+        beDone := true
+        int    d   = inLong ? 1 : -1
+        string eid = inLong ? "Long" : "Short"
+        strategy.exit(eid + " Exit", eid,
+             stop  = math.round_to_mintick(avgPx + d * beOffTicks * tickSize),
+             limit = math.round_to_mintick(avgPx + d * trTp * tickSize),
+             trail_points = trTrailPts, trail_offset = trTrailOff,
+             comment_loss = "BE", comment_profit = "TP", comment_trailing = "Trail",
+             alert_loss     = f_json("exit", trQty, 0, 0, "breakeven"),
+             alert_profit   = f_json("exit", trQty, 0, 0, "take_profit"),
+             alert_trailing = f_json("exit", trQty, 0, 0, "trailing_stop"))
+
+// ════════════════════════════════════════════════════════════════════════════
+//  VISUALS
+// ════════════════════════════════════════════════════════════════════════════
+float lvlE = na
+float lvlS = na
+float lvlT = na
+if goLong or goShort
+    int d = goLong ? 1 : -1
+    lvlE := close
+    lvlS := close - d * planSl * tickSize
+    lvlT := close + d * planTp * tickSize
+else if inPos
+    int d = inLong ? 1 : -1
+    lvlE := avgPx
+    lvlS := beDone ? avgPx + d * beOffTicks * tickSize : avgPx - d * trSl * tickSize
+    lvlT := avgPx + d * trTp * tickSize
+
+pE = plot(showLevels ? lvlE : na, "Entry",  color.new(C_TEXT, 40), 1, plot.style_linebr)
+pS = plot(showLevels ? lvlS : na, "Stop",   C_RED,   2, plot.style_linebr)
+pT = plot(showLevels ? lvlT : na, "Target", C_GREEN, 2, plot.style_linebr)
+fill(pE, pS, color.new(C_RED, 88),   "Risk zone")
+fill(pE, pT, color.new(C_GREEN, 88), "Reward zone")
+plot(showMA ? trendMa : na, "Trend SMA", color.new(C_ORANGE, 30), 1)
+plot(useVwap ? vwapVal : na, "VWAP", color.new(C_BLUE, 30), 1)
+
+plotshape(showBlocked and wantLong  and not goLong,  "Blocked long",  shape.xcross, location.belowbar, color.new(C_MUTED, 20), size = size.tiny)
+plotshape(showBlocked and wantShort and not goShort, "Blocked short", shape.xcross, location.abovebar, color.new(C_MUTED, 20), size = size.tiny)
+
+bgcolor(showSessBg and sessOn and not inWindow ? color.new(color.gray, 93) : na, title = "Outside entry window")
+bgcolor(showSessBg and (dayHalted or ddBreached) ? color.new(C_RED, 92) : na, title = "Halted")
+
+f_usd(float v)  => na(v) ? "–" : (v < 0 ? "-$" : "$") + str.tostring(math.abs(v), "#,##0")
+f_usdS(float v) => na(v) ? "–" : (v > 0 ? "+$" : v < 0 ? "-$" : "$") + str.tostring(math.abs(v), "#,##0")
+f_dist(int t)   => str.tostring(t) + "t · " + str.tostring(t * tickSize, format.mintick) + " pts"
+
+if showLabels and (goLong or goShort)
+    string tip = (goLong ? "LONG " : "SHORT ") + str.tostring(planQty) + " × " + syminfo.ticker +
+         "\nStop: "   + f_dist(planSl) + " → max " + f_usd(-f_riskUsd(planQty, planSl)) + " (fees + slippage incl.)" +
+         "\nTarget: " + f_dist(planTp) + " → " + f_usdS(f_rewUsd(planQty, planTp)) +
+         "\nRisk budget: " + f_usd(budget) + " (" + budgetBy + ")" +
+         "\n$/tick per contract: $" + str.tostring(tickValue, "0.00##")
+    label.new(bar_index, goLong ? low : high, (goLong ? "BUY " : "SELL ") + str.tostring(planQty),
+         yloc = goLong ? yloc.belowbar : yloc.abovebar, style = goLong ? label.style_label_up : label.style_label_down,
+         color = goLong ? C_GREEN : C_RED, textcolor = color.white, size = size.small, tooltip = tip)
+
+if justBreached
+    label.new(bar_index, high, "ACCOUNT BREACHED\ntrailing drawdown", yloc = yloc.abovebar,
+         style = label.style_label_down, color = C_RED, textcolor = color.white, size = size.normal)
+
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+f_pos(string s) =>
+    switch s
+        "Top left"     => position.top_left
+        "Bottom right" => position.bottom_right
+        "Bottom left"  => position.bottom_left
+        => position.top_right
+dashSize = switch dashSizeIn
+    "Tiny"   => size.tiny
+    "Normal" => size.normal
+    => size.small
+
+var table dash = table.new(f_pos(dashPosIn), 2, 25, bgcolor = C_BG, frame_color = C_HEADBG, frame_width = 1, border_color = C_HEADBG, border_width = 1)
+
+f_kv(int row, string k, string v, color vc) =>
+    table.cell(dash, 0, row, k, text_color = C_MUTED, text_size = dashSize, text_halign = text.align_left)
+    table.cell(dash, 1, row, v, text_color = vc, text_size = dashSize, text_halign = text.align_right)
+f_sec(int row, string title) =>
+    table.cell(dash, 0, row, title, text_color = C_TEXT, bgcolor = C_HEADBG, text_size = dashSize, text_halign = text.align_left)
+    table.cell(dash, 1, row, "", bgcolor = C_HEADBG, text_size = dashSize)
+
+if showDash and barstate.islast
+    string status = "READY"
+    color  stCol  = C_GREEN
+    if ddBreached
+        status := "ACCOUNT BREACHED"
+        stCol  := C_RED
+    else if dayHalted
+        status := "HALTED · " + dayHaltWhy
+        stCol  := C_ORANGE
+    else if not tradesLeft
+        status := "MAX TRADES TODAY"
+        stCol  := C_ORANGE
+    else if inPos
+        status := inLong ? "IN TRADE · LONG" : "IN TRADE · SHORT"
+        stCol  := C_BLUE
+    else if flatZone or not inWindow
+        status := "OUTSIDE SESSION"
+        stCol  := color.gray
+    else if planQty < 1
+        status := "NO RISK ROOM"
+        stCol  := C_ORANGE
+
+    table.cell(dash, 0, 0, "RutaCrypto PROP", text_color = color.white, bgcolor = C_BLUE, text_size = dashSize, text_halign = text.align_left)
+    table.cell(dash, 1, 0, status, text_color = color.white, bgcolor = stCol, text_size = dashSize, text_halign = text.align_right)
+
+    f_sec(1, "CONTRACT")
+    f_kv(2, "Symbol", syminfo.ticker, C_TEXT)
+    f_kv(3, "Tick · $ per tick", str.tostring(tickSize) + " · $" + str.tostring(tickValue, "0.00##"), C_TEXT)
+    f_kv(4, "$ per point", "$" + str.tostring(pointVal, "#,##0.00"), C_TEXT)
+
+    int q  = inPos ? math.round(posQty) : planQty
+    int sl = inPos ? trSl : planSl
+    int tp = inPos ? trTp : planTp
+    bool ok = q >= 1
+    f_sec(5, inPos ? "OPEN TRADE" : "NEXT TRADE")
+    f_kv(6, "Mode", sizeMode == M_ATR ? "ATR stop · auto size" : "Fixed $ · " + str.tostring(fixedQty) + " contracts", C_TEXT)
+    f_kv(7, inPos ? "Position" : "Contracts",
+         inPos ? (inLong ? "LONG " : "SHORT ") + str.tostring(q) + " @ " + str.tostring(avgPx, format.mintick) : ok ? str.tostring(q) : "no trade",
+         inPos ? (inLong ? C_GREEN : C_RED) : C_TEXT)
+    f_kv(8, "Stop", not ok ? "–" : inPos and beDone ? "break-even" : f_dist(sl) + " · " + f_usd(-f_riskUsd(q, sl)), C_RED)
+    f_kv(9, "Target", not ok ? "–" : f_dist(tp) + " · " + f_usdS(f_rewUsd(q, tp)), C_GREEN)
+    f_kv(10, inPos ? "Open P/L" : "Risk budget",
+         inPos ? f_usdS(strategy.openprofit) : f_usd(budget) + " (" + budgetBy + ")",
+         inPos ? (strategy.openprofit >= 0 ? C_GREEN : C_RED) : C_TEXT)
+
+    f_sec(11, "TODAY")
+    f_kv(12, "P/L (incl. open)", f_usdS(dayPnL), dayPnL >= 0 ? C_GREEN : C_RED)
+    f_kv(13, "Trades · W / L", str.tostring(dayEntries) + (maxTradesDay > 0 ? " of " + str.tostring(maxTradesDay) : "") + " · " + str.tostring(dayWins) + " / " + str.tostring(dayLosses), C_TEXT)
+    f_kv(14, "Daily loss room", useDLL ? f_usd(dllUsd + dayPnL) : "off", C_TEXT)
+
+    float ddRoom = equity - ddFloor
+    f_sec(15, "ACCOUNT")
+    f_kv(16, "Equity", f_usd(equity), C_TEXT)
+    f_kv(17, "Drawdown floor", useDD ? f_usd(ddFloor) + (ddLock and ddFloor >= strategy.initial_capital + ddLockOffset ? " (locked)" : "") : "off", C_TEXT)
+    f_kv(18, "Drawdown room", useDD ? f_usd(ddRoom) : "off", not useDD ? C_TEXT : ddRoom > maxLossUsd ? C_GREEN : ddRoom > 0 ? C_ORANGE : C_RED)
+
+    bool worstOk = worstTrade >= -maxLossUsd - 1.0
+    bool bestOk  = bestTrade <= maxProfitUsd + 1.0
+    f_sec(19, "RULE CHECK (all trades)")
+    f_kv(20, "Worst trade · limit " + f_usd(maxLossUsd), f_usdS(worstTrade) + (worstOk ? "  ✓" : "  ✗"), worstOk ? C_GREEN : C_RED)
+    f_kv(21, "Best trade · cap " + f_usd(maxProfitUsd), f_usdS(bestTrade) + (bestOk ? "  ✓" : "  ✗"), bestOk ? C_GREEN : C_RED)
+    f_kv(22, "Signals skipped (no room)", str.tostring(skipped), C_TEXT)
+    float winRate = strategy.closedtrades > 0 ? strategy.wintrades * 100.0 / strategy.closedtrades : na
+    float pf      = strategy.grossloss > 0 ? strategy.grossprofit / strategy.grossloss : na
+    f_kv(23, "Win rate · PF", (na(winRate) ? "–" : str.tostring(winRate, "0.0") + "%") + " · " + (na(pf) ? "–" : str.tostring(pf, "0.00")), C_TEXT)
+    f_kv(24, "Net P/L", f_usdS(strategy.netprofit), strategy.netprofit >= 0 ? C_GREEN : C_RED)
