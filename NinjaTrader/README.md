@@ -53,7 +53,14 @@ I compiled this file against a stand-in of the NinjaTrader API, because NinjaTra
 
 4. Click **Run**.
 
-If **MNQ doesn't show up** when you type it, open **Tools → Instruments**, search for `MNQ` and add it. NinjaTrader names futures by expiry month (`MNQ 12-26` = December 2026). The front month changes roughly one week before each quarterly expiry (March, June, September, December).
+If **MNQ doesn't show up** when you type it, NinjaTrader's instrument database is out of date. **Don't create a new instrument by hand:** a blank one has point value 1 and tick size 0.01, and the bot would size every trade wrong. Instead:
+
+1. Disconnect (**Connections → Disconnect**).
+2. Open **Tools → Database Management**. Under *Update instruments*, tick **General properties**, **Futures expiries** and **Symbol mappings**, then click **Update**.
+3. Restart NinjaTrader, reconnect, and type `MNQ` again.
+4. Still missing? Install the latest NinjaTrader 8 version, which includes MNQ.
+
+NinjaTrader names futures by expiry month (`MNQ 12-26` = December 2026). The front month changes roughly one week before each quarterly expiry (March, June, September, December). Once the bot runs, the dashboard must show **tick 0.25 = $0.50** for MNQ. If it shows anything else, the instrument is set up wrong.
 
 ## Settings
 
