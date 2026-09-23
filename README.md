@@ -35,6 +35,34 @@ How these numbers were made: a Python copy of this strategy, run on 108 regular-
 - Five months of data is a small sample. Treat these numbers as a sanity check, not a promise.
 - To re-run the test yourself, see [`research/compare_presets.py`](research/compare_presets.py).
 
+## Win-rate search for $1,500 target / $2,000 stop
+
+With a $1,500 target and a $2,000 stop, random entries already win about 55–57% of the time (2,000 ÷ 3,500, minus fees). That is also roughly break-even, so a higher win rate has to come from the signal.
+
+What was tested (`research/optimize.py`):
+
+- **Search:** 92,160 setting combinations, searched on April to mid-June 2026 only, then checked on mid-June to September.
+- **Rules:** MNQ, 1-minute, NinjaTrader-style fills, fees and slippage included.
+
+What it found:
+
+- **Most "best" settings were luck.** Win rates in the first half did not predict the second half (correlation +0.02). The settings that won 72% in the first half won 55–57% in the second.
+- **Random entries** with the same brackets won 54.6% on average (51–58% by luck alone). The current Active signal wins 57%, barely better than random.
+- **One ingredient held up everywhere: the hourly trend filter.** It only buys above the 60-minute EMA and only sells below it. Neighbouring settings stayed at 60–65%, and every quarter stayed above 60%.
+
+| Settings | Trades per session | Win rate (1st / 2nd half) | Net, Apr–Sep |
+|---|---|---|---|
+| Current Active defaults | 5.5 | 57.0% (56% / 59%) | +$15,271 |
+| + hourly trend filter (60-min EMA 50) | 2.1 | 61.4% (62% / 60%) | +$35,365 |
+| + hourly trend filter + volume above average (threshold 0) | 1.5 | 63.6% (64% / 63%) | +$37,910 |
+
+**How to use it:**
+
+- **Inputs:** keep preset **Active**. Set **Volume osc threshold = 0** and turn **HTF EMA trend** on (60 minutes, length 50).
+- **In NinjaTrader:** use Trading hours **CME US Index Futures RTH**, to match the test data (mostly regular-hours bars). On 24-hour charts, 50 hourly bars cover only about 2 days. Shorter trends (2–3 days) tested weaker (58–60%), while 4–21 days all tested 60–64%.
+
+This is a candidate, not a proven edge. It was picked from many combinations on 5 months of data. Treat about 60–62% as the realistic expectation, and confirm it on months this test never saw (e.g. January–March 2026 in NinjaTrader) before going live.
+
 ## How the $ limits work on any contract
 
 The script reads the contract specs from the chart symbol (`syminfo.mintick`, `syminfo.pointvalue`) and turns dollars into ticks:
