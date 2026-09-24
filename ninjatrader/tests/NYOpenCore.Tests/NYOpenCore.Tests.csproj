@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Unit tests for ../../AddOns/NYOpenCore.cs (the NinjaTrader-independent logic).
+       Run from the repo root:  dotnet run (project ninjatrader/tests/NYOpenCore.Tests)
+       LangVersion 5 = the same syntax limits as the NinjaTrader 8 compiler. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <LangVersion>5</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>false</InvariantGlobalization>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../AddOns/NYOpenCore.cs" Link="NYOpenCore.cs" />
+  </ItemGroup>
+</Project>
