@@ -30,15 +30,15 @@ It always trades the same bracket: fixed contracts, a stop worth $2,000 (fees an
 
 | Bot | Trades/session | Win rate (1st / 2nd half) | Net, 5 months | Evaluations passed* |
 |---|---|---|---|---|
-| Coin flip, 30 MNQ | 38.5 | 56.0% | −$221,826 | 30.1% |
-| Follow candle, keep after win / flip after loss, 30 MNQ | 38.6 | 56.2% (56.2 / 56.2) | −$191,179 | 33.9% |
-| Pullback in trend, 30 MNQ | 21.0 | 57.1% (56.9 / 57.3) | −$26,125 | 29.4% |
-| Pullback in trend, 20 MNQ | 15.3 | 59.3% (59.7 / 58.9) | +$114,001 | 41.2% |
-| **Pullback in trend, 15 MNQ** | **11.5** | **59.8% (60.5 / 59.2)** | **+$135,890** | **48.5%** |
+| Coin flip, 30 MNQ | 38.1 | 55.5% | −$217,400 | 32.0% |
+| Follow candle, keep after win / flip after loss, 30 MNQ | 38.2 | 55.8% (55.7 / 55.9) | −$184,870 | 30.3% |
+| Pullback in trend, 30 MNQ | 21.0 | 56.7% (56.5 / 56.8) | −$21,388 | 30.4% |
+| Pullback in trend, 20 MNQ | 15.2 | 58.9% (59.3 / 58.5) | +$111,494 | 43.1% |
+| **Pullback in trend, 15 MNQ** | **11.4** | **59.6% (60.5 / 58.9)** | **+$141,134** | **47.5%** |
 
 \* 150K-style evaluation: +$9,000 target, $5,000 end-of-day trailing drawdown, a new evaluation started every session.
 
-- **Break-even:** with these brackets, break-even is about 57.6% after costs. A coin flip wins about 56% and still passes ~30% of evaluations, purely from the swing of $1,500/$2,000 bets. Passing accounts alone doesn't prove an edge.
+- **Break-even:** every stop-out is about −$2,000 and every win about +$1,500 after commission, so break-even is about 57%. A coin flip wins about 55.5% and still passes ~32% of evaluations, purely from the swing of $1,500/$2,000 bets. Passing accounts alone doesn't prove an edge.
 - **Why the rule matters:** on this data, following the 5-minute candle is worse than random (NQ tends to snap back over 5 minutes). Fading it in the direction of the hourly trend works best.
 - **Why size matters:** 30 contracts is too many for this rule, because tight 25-point targets get eaten by noise and costs. 15–20 contracts does better.
 - **Big caveat:** this is 5 months of data and 59.8% is not far above break-even. Confirm it in NinjaTrader on months this test never saw (Jan–Mar 2026, and 2025) before real money.

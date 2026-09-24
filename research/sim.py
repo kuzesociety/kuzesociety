@@ -3,7 +3,7 @@ from ind import load, indicators, signals
 TICK, PV = 0.25, 2.0          # simulate MNQ on NQ prices
 TV = TICK * PV
 
-def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall=False, keep_rr=False, fill="close", maxLoss=2000, maxProfit=1500,
+def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall=False, keep_rr=False, fill="close", exact=False, maxLoss=2000, maxProfit=1500,
         maxQty=50, slM=2.0, tpM=4.0, fee=0.62, slip=1, lower=20, upper=71, capital=150000, buffer=100, d=None):
     if d is None: d = indicators(load(tf))
     L, S, upx, dnx = signals(d, lower=lower, upper=upper, memory=memory)
@@ -89,6 +89,9 @@ def run(tf=1, memory=0, one_per_cross=False, useDD=True, dd=5000, reset_on_stall
                 if wantL: used_up = last_up
                 else: used_dn = last_dn
                 tp_ticks = min(round(atr[i] * tpM / TICK), math.floor(maxProfit / (q * TV)))
+                if exact:   # ATR picked the size; bracket set in $ for that size (net of fees)
+                    sl = math.floor((min(budget, maxLoss) / q - feeRT) / TV) - slip
+                    tp_ticks = math.floor((maxProfit / q + feeRT) / TV)
                 if fill == "next_open":
                     pend_entry = (1 if wantL else -1, q, sl, tp_ticks)
                 else:

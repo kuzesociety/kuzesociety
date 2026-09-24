@@ -73,6 +73,8 @@ tpMult       = input.float(4.0, "Target = ATR ×", minval = 0.1, step = 0.1, gro
      tooltip = "Target = ATR × this, but never worth more than 'Max profit per trade'.")
 minStopTicks = input.int(8, "Min stop (ticks, ATR mode)", minval = 1, group = G_RISK,
      tooltip = "ATR stops tighter than this are widened to this, so dead-quiet bars can't produce oversized positions.")
+exactUsd     = input.bool(true, "Exact $ bracket (every stop = max loss, every target = max profit)", group = G_RISK,
+     tooltip = "On: a full stop-out loses the max loss and a win makes the max profit, net of commission. In ATR mode the ATR stop then only decides the number of contracts.\nOff: the $ amounts are limits, and the ATR multiples set the distances.")
 
 // ─── ② Account guard ────────────────────────────────────────────────────────
 useDD        = input.bool(true, "Trailing max drawdown", group = G_ACCT, inline = "dd")
@@ -352,11 +354,16 @@ f_plan(float riskBudget, float atrNow) =>
         float perContract = (sl + slipTicks) * tickValue + feeRT
         q := math.min(maxQty, math.floor(riskBudget / perContract))
         if q >= 1
-            tp := math.min(math.round(atrNow * tpMult / tickSize), math.floor(maxProfitUsd / (q * tickValue)))
+            if exactUsd
+                // ATR only picked the size; now set the bracket in $ for that size
+                sl := math.floor((math.min(riskBudget, maxLossUsd) / q - feeRT) / tickValue) - slipTicks
+                tp := math.floor((maxProfitUsd / q + feeRT) / tickValue)
+            else
+                tp := math.min(math.round(atrNow * tpMult / tickSize), math.floor(maxProfitUsd / (q * tickValue)))
     else
         // exact $ bracket for the chosen size; size is only cut if the day / account can't afford it
         sl := math.floor((maxLossUsd / fixedQty - feeRT) / tickValue) - slipTicks
-        tp := math.floor(maxProfitUsd / (fixedQty * tickValue))
+        tp := exactUsd ? math.floor((maxProfitUsd / fixedQty + feeRT) / tickValue) : math.floor(maxProfitUsd / (fixedQty * tickValue))
         if sl >= 1
             float perContract = (sl + slipTicks) * tickValue + feeRT
             q := math.min(fixedQty, math.floor(riskBudget / perContract))
@@ -388,7 +395,7 @@ if breachNow or stallNow
 canOpen = gatesOk and not ddBreached
 
 f_riskUsd(int q, int sl) => q * ((sl + slipTicks) * tickValue + feeRT)
-f_rewUsd(int q, int tp)  => q * tp * tickValue
+f_rewUsd(int q, int tp)  => q * (tp * tickValue - feeRT)   // net of round-trip fees
 
 // ─── Alert JSON (use {{strategy.order.alert_message}} as the alert message) ──
 f_num(float v) => str.tostring(v, "0.########")

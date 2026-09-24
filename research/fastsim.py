@@ -59,7 +59,7 @@ def add_features(d):
 @njit(cache=True)
 def _run(o, h, l, c, atr, upx, dnx, setL, setS, can, flat,
          memory, slM, tpM, min_stop, max_qty, fixed_qty, max_loss, max_profit,
-         fee_rt, slip, opp_mode, next_open):
+         fee_rt, slip, opp_mode, next_open, exact):
     # opp_mode: 0 reverse, 1 close, 2 ignore ; fixed_qty > 0 → fixed $ bracket mode
     n = len(o)
     pnl = np.zeros(n); ebar = np.zeros(n, np.int64); xbar = np.zeros(n, np.int64); why = np.zeros(n, np.int64)
@@ -127,7 +127,7 @@ def _run(o, h, l, c, atr, upx, dnx, setL, setS, can, flat,
         if can[i] and (wantL or wantS) and not pend_flat and not math.isnan(atr[i]):
             if fixed_qty > 0:
                 sl = int(math.floor((max_loss / fixed_qty - fee_rt) / TV)) - slip
-                tpk = int(math.floor(max_profit / (fixed_qty * TV)))
+                tpk = int(math.floor((max_profit / fixed_qty + fee_rt) / TV)) if exact else int(math.floor(max_profit / (fixed_qty * TV)))
                 q = fixed_qty
             else:
                 sl = max(min_stop, int(math.floor(atr[i] * slM / TICK + 0.5)))
@@ -135,7 +135,11 @@ def _run(o, h, l, c, atr, upx, dnx, setL, setS, can, flat,
                 q = min(max_qty, int(math.floor(max_loss / per)))
                 tpk = 0
                 if q >= 1:
-                    tpk = min(int(math.floor(atr[i] * tpM / TICK + 0.5)), int(math.floor(max_profit / (q * TV))))
+                    if exact:   # ATR picked the size; bracket set in $ for that size (net of fees)
+                        sl = int(math.floor((max_loss / q - fee_rt) / TV)) - slip
+                        tpk = int(math.floor((max_profit / q + fee_rt) / TV))
+                    else:
+                        tpk = min(int(math.floor(atr[i] * tpM / TICK + 0.5)), int(math.floor(max_profit / (q * TV))))
             if q >= 1 and sl >= 1 and tpk >= 1:
                 d = 1 if wantL else -1
                 if wantL:
@@ -188,7 +192,7 @@ def arrays(d):
 def run(d, lower=30, upper=70, memory=2, use_ha=True, vol=-39.0, trend=None,
         vwap=False, htf=False, adx_min=0.0, win=(570, 945), flat_min=955, direction="both",
         slM=2.0, tpM=4.0, min_stop=8, max_qty=50, fixed_qty=0, max_loss=2000.0, max_profit=1500.0,
-        fee=0.62, slip=1, opp="reverse", fill="next_open"):
+        fee=0.62, slip=1, opp="reverse", fill="next_open", exact=False):
     a = arrays(d)
     c = a.c
     upx, dnx = crosses(a.rsi, lower, upper)
@@ -211,7 +215,7 @@ def run(d, lower=30, upper=70, memory=2, use_ha=True, vol=-39.0, trend=None,
     om = {"reverse": 0, "close": 1, "ignore": 2}[opp]
     pnl, eb, xb, why = _run(a.o, a.h, a.l, c, a.atr, upx, dnx, setL, setS, can, flat, memory, slM, tpM,
                             min_stop, max_qty, fixed_qty, max_loss, max_profit, 2 * fee, slip, om,
-                            fill == "next_open")
+                            fill == "next_open", exact)
     return pnl, eb, xb, why
 
 

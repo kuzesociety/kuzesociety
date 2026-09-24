@@ -23,15 +23,16 @@ Pick one in **Inputs → ④ Signal → Signal preset**:
 
 | Preset | Rules | Trades per session (1-min) | Busiest day | Win rate | Net, Apr–Sep 2026 |
 |---|---|---|---|---|---|
-| **Active** (default) | RSI 30 / 70, the cross can be up to 2 candles old | 5.5 | 10 | 57% | +$22,182 |
-| **Strict** | Original: RSI 20 / 71, cross on the same candle | 0.8 | 5 | 59% | +$9,854 |
+| **Active** (default) | RSI 30 / 70, the cross can be up to 2 candles old | 5.5 | 10 | 57% | +$2,574 |
+| **Strict** | Original: RSI 20 / 71, cross on the same candle | 0.8 | 5 | 58% | +$5,346 |
 | **Custom** | Your own RSI levels and signal memory | – | – | – | – |
 
 Each RSI cross is used for one trade at most, so a stop-out doesn't re-enter on the same old signal.
 
 How these numbers were made: a Python copy of this strategy, run on 108 regular-hours sessions of real NQ 1-minute data ([free sample from getdata.finance](https://github.com/getdata-finance/nq-1m-ohlcv-stocks-historical-data)), priced as MNQ with the default settings. It is not a TradingView backtest, so your Strategy Tester numbers will differ somewhat. Things to know:
 
-- **Active** made almost nothing in April–June and most of its profit in July–September. **Strict** was profitable in both halves, but trades rarely.
+- **Active** lost money in April–June and made it back in July–September. **Strict** was profitable in both halves, but trades rarely.
+- These numbers use the exact $ bracket (every stop −$2,000, every target +$1,500). With the older capped bracket, where quiet markets risked less than $2,000, Active made +$22,182 and Strict +$9,854.
 - On 2-, 3- and 5-minute charts both presets lost money in this test. Stay on 1-minute.
 - Five months of data is a small sample. Treat these numbers as a sanity check, not a promise.
 - To re-run the test yourself, see [`research/compare_presets.py`](research/compare_presets.py).
@@ -53,9 +54,9 @@ What it found:
 
 | Settings | Trades per session | Win rate (1st / 2nd half) | Net, Apr–Sep |
 |---|---|---|---|
-| Current Active defaults | 5.5 | 57.0% (56% / 59%) | +$15,271 |
-| + hourly trend filter (60-min EMA 50) | 2.1 | 61.4% (62% / 60%) | +$35,365 |
-| + hourly trend filter + volume above average (threshold 0) | 1.5 | 63.6% (64% / 63%) | +$37,910 |
+| Current Active defaults | 5.5 | 57.4% (56% / 59%) | +$13,857 |
+| + hourly trend filter (60-min EMA 50) | 2.1 | 61.8% (63% / 60%) | +$36,347 |
+| + hourly trend filter + volume above average (threshold 0) | 1.5 | 64.8% (66% / 63%) | +$42,951 |
 
 **How to use it:**
 
@@ -90,7 +91,12 @@ If you switch the chart from MNQ to NQ or ES, the distances recalculate by thems
 
 ### Mode 2 — "ATR stop + auto contracts" (default)
 
-The stop comes from ATR (like the original, 2 × ATR). The script then works out how many contracts fit so a full stop-out costs at most $2,000. The target is 4 × ATR, capped so it is never worth more than $1,500. Example on MNQ:
+The stop comes from ATR (like the original, 2 × ATR). The script then works out how many contracts fit so a full stop-out costs at most $2,000.
+
+- **Exact $ bracket on (default):** ATR only decides the number of contracts. The stop and target are then placed so every stop-out is −$2,000 and every win is +$1,500, both after commission (to within one tick per contract).
+- **Exact $ bracket off:** the $ amounts are limits. The target is 4 × ATR, capped at $1,500, so wins can be smaller than $1,500 if you lower the target multiple.
+
+Example on MNQ (exact $ bracket off):
 
 | ATR | Contracts | Stop | Max loss | Target |
 |---|---|---|---|---|
@@ -115,7 +121,7 @@ Calm market → more contracts. Wild market → fewer contracts. The risk stays 
 
 Session (③): new trades only 09:30–15:45 New York, Mon–Fri. Positions are forced flat at 15:55. Change both for your firm's rules or to trade overnight.
 
-> **Risk vs drawdown:** with $2,000 per trade and a $5,000 trailing drawdown, three losses in a row end the account. In the test above, the Active preset blew **6** simulated $5,000-drawdown accounts in 5 months, and Strict blew 1. If that's too many, lower *Max loss per trade* (e.g. $1,000) or use a bigger account.
+> **Risk vs drawdown:** with $2,000 per trade and a $5,000 trailing drawdown, three losses in a row end the account. In the test above, the Active preset blew **9** simulated $5,000-drawdown accounts in 5 months, and Strict blew 2. If that's too many, lower *Max loss per trade* (e.g. $1,000) or use a bigger account.
 
 ## Dashboard
 

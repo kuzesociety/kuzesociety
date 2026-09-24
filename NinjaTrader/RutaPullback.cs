@@ -191,9 +191,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             double tickSize = Instrument.MasterInstrument.TickSize;
             double tickValue = tickSize * Instrument.MasterInstrument.PointValue;
             double feeRT = 2.0 * FeePerSide;
-            // fixed $ bracket for the chosen size (stop includes fees and slippage)
+            // exact $ bracket for the chosen size: a stop-out loses MaxLoss (fees + slippage included),
+            // a win makes MaxProfit after fees
             slTicks = (int)Math.Floor((MaxLossPerTrade / Contracts - feeRT) / tickValue) - (int)Slippage;
-            tpTicks = (int)Math.Floor(MaxProfitPerTrade / (Contracts * tickValue));
+            tpTicks = (int)Math.Floor((MaxProfitPerTrade / Contracts + feeRT) / tickValue);
 
             DateTime closeNy = ToNewYork(Time[0]);
             DateTime openNy = BarsPeriod.BarsPeriodType == BarsPeriodType.Minute ? closeNy.AddMinutes(-BarsPeriod.Value)
@@ -280,7 +281,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string Dashboard(int trendDir, double tickSize, double tickValue, double feeRT, double openPnl)
         {
             double risk = Contracts * ((slTicks + (int)Slippage) * tickValue + feeRT);
-            double reward = Contracts * tpTicks * tickValue;
+            double reward = Contracts * (tpTicks * tickValue - feeRT);
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("RutaPullback  |  " + Rule + (dayStopped ? "  |  STOPPED: " + dayStopWhy : ""));
             sb.AppendLine(Contracts + " x " + Instrument.FullName + "   stop " + slTicks + "t (" + (slTicks * tickSize).ToString("0.00") + " pts) = -" + Usd(risk)
@@ -305,7 +306,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty]
         [Range(1, double.MaxValue)]
-        [Display(Name = "Max profit per trade ($)", Order = 3, GroupName = "1. Bracket")]
+        [Display(Name = "Max profit per trade ($)", Description = "Target is set so a win makes this after commission.", Order = 3, GroupName = "1. Bracket")]
         public double MaxProfitPerTrade { get; set; }
 
         [NinjaScriptProperty]

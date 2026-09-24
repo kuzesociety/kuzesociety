@@ -133,7 +133,7 @@ def run(F, rule="candle", qty=30, max_loss=2000.0, max_profit=1500.0, fee=0.62, 
     d, is_dec, day, sig = F
     fee_rt = 2 * fee
     slT = sl_ticks if sl_ticks else int(math.floor((max_loss / qty - fee_rt) / TV)) - slip
-    tpT = tp_ticks if tp_ticks else int(math.floor(max_profit / (qty * TV)))
+    tpT = tp_ticks if tp_ticks else int(math.floor((max_profit / qty + fee_rt) / TV))   # win = max_profit after fees
     a = fs.arrays(d)
     rand = rule == "random"
     s = np.zeros(a.n, np.int64) if rand else sig[rule]

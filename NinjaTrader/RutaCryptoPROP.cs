@@ -240,11 +240,25 @@ namespace RutaCryptoProp
             return (int)Math.Floor(x);
         }
 
+        /// <summary>Stop ticks so a full stop-out of qty contracts costs at most `loss`, fees and slippage included.</summary>
+        public static int ExactStopTicks(double loss, int qty, double tickValue, double feeRT, int slipTicks)
+        {
+            return FloorInt((loss / qty - feeRT) / tickValue) - slipTicks;
+        }
+
+        /// <summary>Target ticks so a win on qty contracts makes at most `profit` after round-trip fees.</summary>
+        public static int ExactTargetTicks(double profit, int qty, double tickValue, double feeRT)
+        {
+            return FloorInt((profit / qty + feeRT) / tickValue);
+        }
+
         /// <summary>Contracts, stop ticks and target ticks. Qty = 0 means no trade.
-        /// Worst-case loss per contract = (stop + slippage) ticks × $/tick + round-trip fees.</summary>
+        /// Worst-case loss per contract = (stop + slippage) ticks × $/tick + round-trip fees.
+        /// exactUsd: the stop costs the max loss and the target makes the max profit (net of fees);
+        /// in ATR mode the ATR stop then only decides how many contracts to trade.</summary>
         public static TradePlan Plan(SizingMode mode, double budget, double atr, double tickSize, double tickValue,
             double feeRT, int slipTicks, double maxLoss, double maxProfit, int fixedQty, int maxQty,
-            double slMult, double tpMult, int minStopTicks)
+            double slMult, double tpMult, int minStopTicks, bool exactUsd = false)
         {
             TradePlan p = new TradePlan();
             if (mode == SizingMode.AtrStopAutoContracts)
@@ -254,13 +268,21 @@ namespace RutaCryptoProp
                 double perContract = (p.StopTicks + slipTicks) * tickValue + feeRT;
                 p.Qty = Math.Min(maxQty, FloorInt(budget / perContract));
                 if (p.Qty >= 1)
-                    p.TargetTicks = Math.Min(PineRound(atr * tpMult / tickSize), FloorInt(maxProfit / (p.Qty * tickValue)));
+                {
+                    if (exactUsd)
+                    {
+                        p.StopTicks = ExactStopTicks(Math.Min(budget, maxLoss), p.Qty, tickValue, feeRT, slipTicks);
+                        p.TargetTicks = ExactTargetTicks(maxProfit, p.Qty, tickValue, feeRT);
+                    }
+                    else
+                        p.TargetTicks = Math.Min(PineRound(atr * tpMult / tickSize), FloorInt(maxProfit / (p.Qty * tickValue)));
+                }
             }
             else
             {
                 // exact $ bracket for the chosen size; size is only cut if the day / account can't afford it
-                p.StopTicks = FloorInt((maxLoss / fixedQty - feeRT) / tickValue) - slipTicks;
-                p.TargetTicks = FloorInt(maxProfit / (fixedQty * tickValue));
+                p.StopTicks = ExactStopTicks(maxLoss, fixedQty, tickValue, feeRT, slipTicks);
+                p.TargetTicks = exactUsd ? ExactTargetTicks(maxProfit, fixedQty, tickValue, feeRT) : FloorInt(maxProfit / (fixedQty * tickValue));
                 if (p.StopTicks >= 1)
                 {
                     double perContract = (p.StopTicks + slipTicks) * tickValue + feeRT;
@@ -357,6 +379,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 StopAtrMult = 2.0;
                 TargetAtrMult = 4.0;
                 MinStopTicks = 8;
+                ExactDollarBracket = true;
 
                 // 2. Account guard
                 AccountSize = 150000;
@@ -672,7 +695,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private TradePlan MakePlan(double budget, double tickSize, double tickValue, double feeRT)
         {
             return RiskEngine.Plan(SizeMode, budget, eng.Atr, tickSize, tickValue, feeRT, (int)Slippage, MaxLossPerTrade,
-                MaxProfitPerTrade, FixedContracts, MaxContracts, StopAtrMult, TargetAtrMult, MinStopTicks);
+                MaxProfitPerTrade, FixedContracts, MaxContracts, StopAtrMult, TargetAtrMult, MinStopTicks, ExactDollarBracket);
         }
 
         private void SubmitEntry(int dir, TradePlan p, double atrNow, double tickSize)
@@ -777,7 +800,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void DrawEntry(int dir, TradePlan p, double budget, string src, double tickSize, double tickValue, double feeRT)
         {
             double risk = p.Qty * ((p.StopTicks + (int)Slippage) * tickValue + feeRT);
-            double reward = p.Qty * p.TargetTicks * tickValue;
+            double reward = p.Qty * (p.TargetTicks * tickValue - feeRT);
             string txt = (dir > 0 ? "BUY " : "SELL ") + p.Qty + "\nrisk " + Usd(risk) + " / tgt " + Usd(reward);
             if (dir > 0)
             {
@@ -798,7 +821,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                           : inPos ? (inLong ? "IN TRADE: LONG" : "IN TRADE: SHORT") : !inSession ? "OUTSIDE SESSION"
                           : plan.Qty < 1 ? "NO RISK ROOM" : "READY";
             int q = inPos ? posQty : plan.Qty, sl = inPos ? trSl : plan.StopTicks, tp = inPos ? trTp : plan.TargetTicks;
-            double risk = q * ((sl + (int)Slippage) * tickValue + feeRT), reward = q * tp * tickValue;
+            double risk = q * ((sl + (int)Slippage) * tickValue + feeRT), reward = q * (tp * tickValue - feeRT);
             bool worstOk = worstTrade >= -MaxLossPerTrade - 1.0, bestOk = bestTrade <= MaxProfitPerTrade + 1.0;
 
             StringBuilder sb = new StringBuilder();
@@ -869,6 +892,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [Range(1, int.MaxValue)]
         [Display(Name = "Min stop (ticks, ATR mode)", Order = 9, GroupName = "1. Per-trade risk (prop firm)")]
         public int MinStopTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "Exact $ bracket (every stop = max loss, every target = max profit)", Description = "On: a full stop-out loses the max loss and a win makes the max profit, net of commission. In ATR mode the ATR stop then only decides the number of contracts. Off: the $ amounts are limits, and the ATR multiples set the distances.", Order = 10, GroupName = "1. Per-trade risk (prop firm)")]
+        public bool ExactDollarBracket { get; set; }
 
         // 2. Account guard
         [NinjaScriptProperty]
