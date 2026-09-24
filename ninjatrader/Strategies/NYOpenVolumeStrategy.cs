@@ -159,6 +159,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 				runner = new NyoRunner(new NyoEngine(s), p);
 				font = new SimpleFont("Arial", 10);
 			}
+			else if (State == State.Realtime)
+			{
+				// On a chart: the history has just been replayed (and learned from), show what it learned before live trading starts
+				if (PrintReport && runner != null && runner.Engine.Sessions.Count > 0)
+					Print(Report());
+			}
 			else if (State == State.Terminated)
 			{
 				if (runner != null && runner.Engine.Sessions.Count > 0)
