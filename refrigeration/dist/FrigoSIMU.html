@@ -142,6 +142,8 @@
 }
 
 * { box-sizing: border-box; }
+/* Márgenes del notch en la raíz (igual que el marco de los artefactos). */
+:root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
 html, body { height: 100%; }
 body {
   margin: 0;
@@ -191,7 +193,6 @@ button, select, input, textarea { font: inherit; color: inherit; }
   align-items: center;
   gap: 6px 16px;
   padding: 7px 14px;
-  padding-top: calc(7px + env(safe-area-inset-top, 0px));
   background: var(--panel);
   border-bottom: 1px solid var(--line);
   position: relative;
@@ -489,7 +490,6 @@ button, select, input, textarea { font: inherit; color: inherit; }
   background: var(--panel);
   border-top: 1px solid var(--line);
   position: relative;
-  padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 .dock-resize { position: absolute; left: 0; right: 0; top: -4px; height: 8px; cursor: row-resize; z-index: 2; }
 .tabs {
@@ -1023,7 +1023,7 @@ svg.elec.sim .comp { cursor: pointer; }
 @media (max-width: 860px) {
   body { overflow: auto; }
   .app, .app[data-mode] { display: block; height: auto; }
-  .topbar { gap: 6px 8px; padding: 6px 10px; padding-top: calc(6px + env(safe-area-inset-top, 0px)); position: sticky; top: 0; }
+  .topbar { gap: 6px 8px; padding: 6px 10px; position: sticky; top: env(safe-area-inset-top, 0px); }
   .brand-name { display: none; }
   .modes { order: 3; width: 100%; overflow-x: auto; }
   .modes button { flex: 1; padding: 0 6px; font-size: 13px; }
