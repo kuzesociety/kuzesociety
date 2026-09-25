@@ -759,6 +759,82 @@ button, select, input, textarea { font: inherit; color: inherit; }
 .btn.door-btn.open { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-color: var(--warn); color: var(--ink); }
 .note { font-size: 12px; color: var(--muted); margin: 0; }
 
+/* Importar un esquema */
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--ink) 38%, transparent);
+}
+.modal {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+}
+.modal-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 0; font: 600 20px/1.2 var(--font-display); letter-spacing: 0.01em; text-wrap: balance; }
+.modal-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 18px; }
+.modal-body h3 { margin: 4px 0 0; font: 600 13px var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.imp-intro { margin: 0; color: var(--ink-2); line-height: 1.5; }
+.imp-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 16px;
+  border: 2px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel-2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.imp-drop strong { font-size: 15px; }
+.imp-drop span { font-size: 13px; color: var(--muted); max-width: 46ch; }
+.imp-drop:hover, .imp-drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.imp-drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.imp-or { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.imp-or::before, .imp-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.modal textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
+.imp-work { display: flex; align-items: center; gap: 12px; padding: 18px 4px; }
+.imp-work p { margin: 0; }
+.imp-spin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: imp-spin 0.9s linear infinite; flex: none; }
+@keyframes imp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .imp-spin { animation-duration: 3s; } }
+.imp-err { margin: 0; color: var(--bad); }
+.imp-sum { margin: 0; line-height: 1.5; }
+.imp-ok { color: var(--ok); font-weight: 600; }
+.imp-bad { margin: 0; color: var(--bad); font-weight: 600; }
+.imp-notes { margin: 0; padding-left: 20px; font-size: 13px; color: var(--ink-2); }
+.imp-inst { flex-wrap: wrap; }
+.imp-scroll { overflow-x: auto; }
+.imp-table { width: 100%; border-collapse: collapse; }
+.imp-table th, .imp-table td { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.imp-table th { font-weight: 400; }
+.imp-table th b { display: block; font-weight: 600; }
+.imp-table th small { color: var(--muted); font-size: 12px; }
+.imp-table select { width: 100%; min-width: 190px; height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 0 6px; }
+.imp-actions { margin-top: 4px; }
+@media (max-width: 560px) {
+  .modal-back { padding: 8px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+  .modal-head h2 { font-size: 18px; }
+  .imp-table tr { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .imp-table th, .imp-table td { display: block; padding: 0; border: 0; }
+  .imp-table th b { display: inline; margin-right: 6px; }
+  .imp-table select { min-width: 0; }
+  .imp-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
+
 /* Aviso flotante */
 .snack {
   position: fixed;
@@ -1107,7 +1183,7 @@ svg.elec.sim .comp { cursor: pointer; }
         <span class="sr-only">Ejemplos</span>
         <select id="sel-example"></select>
       </label>
-      <button class="btn icon only-sim only-edit" id="btn-open" title="Abrir un esquema (.json)"><svg><use href="#i-open"/></svg><span class="lbl">Abrir</span></button>
+      <button class="btn icon only-sim only-edit" id="btn-open" title="Abrir o importar un esquema: CADe SIMU (.cad), FrigoSIMU (.json), foto, PDF…"><svg><use href="#i-open"/></svg><span class="lbl">Importar</span></button>
       <button class="btn icon only-sim only-edit" id="btn-save" title="Guardar el esquema (.json)"><svg><use href="#i-save"/></svg><span class="lbl">Guardar</span></button>
       <button class="btn icon" id="btn-theme" title="Tema claro / oscuro"><svg><use href="#i-theme"/></svg></button>
       <input type="file" id="file-input" accept=".json,application/json" hidden>
@@ -4130,6 +4206,7 @@ const DEFAULT_REFRIG = {
   internalKW: 0.08, // cargas internas fijas (kW)
   heaterKW: 1.5, // potencia de la resistencia de desescarche (kW)
   humidity: 1, // factor de formación de escarcha
+  assumeFans: true, // si el esquema no tiene ventiladores, se supone que giran
 };
 
 const DEFAULT_FAULTS = {
@@ -5182,11 +5259,26 @@ class CoupledSim {
       refrig: () => (this.refrigOn ? this.fridge.out : null),
       setDoor: (open) => this.setDoor(open),
     });
-    this.io = ioFromElec(this.elec);
+    this.io = this._io();
     this.time = 0;
     this.elec.tick(0);
     this.elec.solve();
-    this.io = ioFromElec(this.elec);
+    this.io = this._io();
+  }
+
+  /**
+   * Salidas del esquema para el circuito frigorífico. Si el esquema no tiene
+   * ventiladores (muchos esquemas de clase solo dibujan el compresor), se
+   * supone que el del evaporador gira siempre y el del condensador con el
+   * compresor, salvo que la instalación diga lo contrario.
+   */
+  _io() {
+    const io = ioFromElec(this.elec);
+    if (this.project.refrig && this.project.refrig.assumeFans !== false) {
+      if (!io.present.evapFan) io.evapFan = !this.elec.fault;
+      if (!io.present.condFan) io.condFan = io.comp === 'run';
+    }
+    return io;
   }
 
   setDoor(open) {
@@ -5204,7 +5296,7 @@ class CoupledSim {
       this.elec.tick(h);
       if (this.elec.dirty) {
         this.elec.solve();
-        this.io = ioFromElec(this.elec);
+        this.io = this._io();
         changed = true;
       }
       if (this.refrigOn) this.fridge.step(h, this.io);
@@ -5219,7 +5311,7 @@ class CoupledSim {
   resolve() {
     if (this.elec.dirty) {
       this.elec.solve();
-      this.io = ioFromElec(this.elec);
+      this.io = this._io();
       return true;
     }
     return false;
@@ -6833,6 +6925,7 @@ class Panels {
       bind(seg('Expansión', { txv: 'VET + recipiente', capilar: 'Tubo capilar' }, P().expansion, (v) => app.setRefrig('expansion', v)), () => P().expansion),
       bind(stepper('Recalentamiento de la VET', P().shSet, { step: 0.5, min: 2, max: 15, unit: 'K' }, (v) => app.setRefrig('shSet', v)), () => P().shSet),
       bind(stepper('Resistencia de desescarche', P().heaterKW, { step: 0.1, min: 0.1, max: 20, unit: 'kW' }, (v) => app.setRefrig('heaterKW', v)), () => P().heaterKW),
+      bind(toggle('Si el esquema no tiene ventiladores, suponer que giran', P().assumeFans !== false, (v) => app.setRefrig('assumeFans', v)), () => P().assumeFans !== false),
     );
 
     const cols = [col1, col2];
@@ -8248,6 +8341,655 @@ class Practice {
 return { ANSWERS, Practice };
 })();
 
+// ---- js/import/cadesimu.js
+__mods["js/import/cadesimu.js"] = (() => {
+// Importa esquemas de CADe SIMU (.cad).
+//
+// El archivo es texto: tras la cabecera "CADe_SIMU" van registros
+//   *id*código#etiqueta#descripción#b1#…#b8*f1*…*f8*x*y*x2*y2*c0*c1*c2*c3*…*giro*…#texto
+// b1…b8 son los nombres de los bornes y f1…f8 dicen cuáles existen; (x, y) es
+// el punto de inserción; c0…c3 la caja del símbolo; en los cables (x, y) y
+// (x2, y2) son los extremos. Las unidades son de 3 en 3: un cuadro nuestro son
+// 3 unidades de CADe SIMU (la separación entre polos, 6, son 2 cuadros).
+//
+// Cada pieza se coloca donde estaba y se reutilizan los cables originales. Los
+// símbolos de CADe SIMU son más altos que los nuestros (12 unidades = 4
+// cuadros, frente a 3), así que se añade un tramo corto de cable entre nuestro
+// borne y el punto donde estaba el borne original. Al final se comprueba que
+// las conexiones eléctricas son las mismas que en el archivo.
+
+const { TYPES, termPos, rotatePt } = __mods["js/elec/components.js"];
+const { ElecSim } = __mods["js/elec/solver.js"];
+
+const S = 3; // unidades de CADe SIMU por cuadro
+const WIRES = new Set([4000, 4009, 4018, 4019]);
+const PE_WIRE = 4010;
+const JUNCTION = 4001;
+const TEXT = 8;
+
+/** Lee los registros del archivo. */
+function parseCad(txt) {
+  if (!/^\s*CADe_SIMU/.test(txt)) throw new Error('No es un archivo de CADe SIMU (debe empezar por «CADe_SIMU»).');
+  const re = /\*(-?\d+)\*(\d+)#((?:[^#*]*#){9}[^#*]*)\*((?:[^*#]*\*){15,40}[^*#]*)#([^*]*)/g;
+  const out = [];
+  let m;
+  while ((m = re.exec(txt))) {
+    const hf = m[3].split('#');
+    out.push({
+      id: +m[1],
+      code: +m[2],
+      tag: hf[0].trim(),
+      desc: hf[1].trim(),
+      slots: hf.slice(2, 10),
+      n: m[4].split('*').map((v) => (v.trim() === '' ? 0 : Number(v))),
+      text: m[5].replace(/\$\$\$.*$/, '').trim(),
+    });
+  }
+  return out;
+}
+
+const cleanTag = (t) => t.replace(/^-+/, '').trim();
+
+// Bornes de nuestros símbolos que corresponden a la fila de arriba y a la de
+// abajo del símbolo de CADe SIMU (de izquierda a derecha).
+function ourRows(type) {
+  switch (type) {
+    case 'c_main3':
+    case 'mcb3':
+    case 'thermal3':
+      return [['1', '3', '5'], ['2', '4', '6']];
+    case 'mcb4':
+      return [['1', '3', '5', 'N1'], ['2', '4', '6', 'N2']];
+    case 'mcb2':
+      return [['1', 'N1'], ['2', 'N2']];
+    case 'motor3':
+      return [['U', 'V', 'W'], []];
+    case 'thermostat':
+    case 'pressostat':
+      return [['C'], ['NC']];
+    default: {
+      const t = TYPES[type].terms;
+      return [[t[0].n], [t[1].n]];
+    }
+  }
+}
+
+// Conversión de cada código de CADe SIMU. kind: 'poles' (bornes arriba y abajo),
+// 'top' (todos arriba, motores), 'supply', 'skip'.
+const CODES = {
+  1000: { kind: 'top', type: 'motor3', what: 'motor trifásico' },
+  2001: { kind: 'poles', type: 'c_main3', what: 'contactos principales' },
+  3000: { kind: 'supply', phases: ['L1'] },
+  3001: { kind: 'supply', phases: ['N'] },
+  3002: { kind: 'skip', what: 'tierra' },
+  3004: { kind: 'supply', phases: ['L1', 'L2', 'L3', 'N'] },
+  3005: { kind: 'supply', phases: ['L1', 'L2', 'L3', null] },
+  3008: { kind: 'supply', phases: ['L1'] },
+  3009: { kind: 'supply', phases: ['N'] },
+  3011: { kind: 'supply', phases: ['L1', 'L2', 'L3'] },
+  5000: { kind: 'poles', type: 'fuse', what: 'fusible' },
+  6003: { kind: 'poles', type: 'fuse', split: true, what: 'fusibles' },
+  6006: { kind: 'poles', type: 'mcb4', what: 'interruptor 4P' },
+  6007: { kind: 'poles', type: 'thermal3', what: 'relé térmico' },
+  6009: { kind: 'poles', type: 'mcb3', what: 'magnetotérmico 3P' },
+  6010: { kind: 'poles', type: 'mcb1', what: 'magnetotérmico 1P' },
+  7000: { kind: 'poles', type: 'c_no', what: 'contacto NA' },
+  7001: { kind: 'poles', type: 'c_nc', what: 'contacto NC' },
+  7008: { kind: 'poles', type: 't_no', what: 'contacto temporizado NA' },
+  8000: { kind: 'poles', type: 'pb_no', what: 'pulsador NA' },
+  8001: { kind: 'poles', type: 'pb_nc', what: 'pulsador NC' },
+  8005: { kind: 'poles', type: 'pb_nc', what: 'pulsador NC' },
+  8008: { kind: 'poles', type: 'sw', what: 'interruptor' },
+  8013: { kind: 'poles', type: 'sw', on: true, what: 'final de carrera NC' },
+  8016: { kind: 'poles', type: 'th_no', what: 'contacto del térmico 97-98' },
+  8017: { kind: 'poles', type: 'th_nc', what: 'contacto del térmico 95-96' },
+  8018: { kind: 'poles', type: 'th_nc', pair: 'th_no', pitch: 9, what: 'contactos del térmico' },
+  9000: { kind: 'poles', type: 'coil', what: 'bobina' },
+  9003: { kind: 'poles', type: 'solenoid', what: 'electroválvula' },
+  9005: { kind: 'poles', type: 'tcoil', what: 'temporizador' },
+  9008: { kind: 'poles', type: 'lamp', what: 'piloto' },
+  7551: { kind: 'poles', type: 'sw', sensor: true, what: 'sensor' },
+  7553: { kind: 'poles', type: 'sw', sensor: true, what: 'sensor' },
+  20000: { kind: 'skip', what: 'hoja' },
+};
+
+const LAMP_COLORS = ['rojo', 'verde', 'amarillo', 'azul', 'blanco'];
+
+/** Para símbolos que no conocemos: se decide por los nombres de los bornes y la etiqueta. */
+function guessCode(r, names, coilTags) {
+  const tag = cleanTag(r.tag).toUpperCase();
+  const [a, b] = names;
+  if (names.length === 2) {
+    if (a === 'A1' && b === 'A2') return { kind: 'poles', type: /^(KT|T)\d*/.test(tag) ? 'tcoil' : /^(Y|EV)/.test(tag) ? 'solenoid' : 'coil', guessed: true };
+    if (a === 'X1' && b === 'X2') return { kind: 'poles', type: 'lamp', guessed: true };
+    if (a === '95' && b === '96') return { kind: 'poles', type: 'th_nc', guessed: true };
+    if (a === '97' && b === '98') return { kind: 'poles', type: 'th_no', guessed: true };
+    if (a === '67' && b === '68') return { kind: 'poles', type: 't_no', guessed: true };
+    if (a === '55' && b === '56') return { kind: 'poles', type: 't_nc', guessed: true };
+    const no = /3$/.test(a) && /4$/.test(b);
+    const nc = /1$/.test(a) && /2$/.test(b) && a !== '1';
+    if (no || nc) {
+      if (coilTags.has(tag)) return { kind: 'poles', type: no ? 'c_no' : 'c_nc', guessed: true };
+      if (r.code >= 8000 && r.code < 9000) return { kind: 'poles', type: no ? 'pb_no' : 'pb_nc', guessed: true };
+      return { kind: 'poles', type: 'sw', on: nc, sensor: true, guessed: true };
+    }
+    if (/^E|^R\d/.test(tag)) return { kind: 'poles', type: 'heater', guessed: true };
+    if (/^M/.test(tag)) return { kind: 'poles', type: 'motor1', guessed: true };
+    if (/^H/.test(tag)) return { kind: 'poles', type: 'lamp', guessed: true };
+    if (/^Y/.test(tag)) return { kind: 'poles', type: 'solenoid', guessed: true };
+    if (/^Q/.test(tag)) return { kind: 'poles', type: 'mcb1', guessed: true };
+    if (/^F/.test(tag)) return { kind: 'poles', type: 'fuse', guessed: true };
+    return { kind: 'poles', type: 'sw', sensor: true, guessed: true };
+  }
+  if (names.length >= 3 && /^U/.test(a) && /^V/.test(b)) return { kind: 'top', type: 'motor3', guessed: true };
+  if (names.length === 6 && names.join(',') === '1,3,5,2,4,6') {
+    if (/^K/.test(tag)) return { kind: 'poles', type: 'c_main3', guessed: true };
+    return { kind: 'poles', type: r.code >= 6000 && r.code < 7000 ? 'mcb3' : 'mcb3', guessed: true };
+  }
+  return null;
+}
+
+/**
+ * Convierte el texto de un .cad en un esquema de FrigoSIMU.
+ * Devuelve { project, notes: [texto], unknown: [...], check: {ok, splits, merges}, texts: [...] }.
+ */
+function importCadeSimu(txt, { name = 'Esquema de CADe SIMU' } = {}) {
+  const recs = parseCad(txt);
+  if (!recs.length) throw new Error('El archivo de CADe SIMU está vacío o no se ha podido leer.');
+  const notes = [];
+  const unknown = [];
+  const components = [];
+  const wires = [];
+  const texts = [];
+  let nId = 0;
+  const newId = (p) => `${p}${++nId}`;
+
+  // Puntos de conexión del archivo (en unidades de CADe SIMU).
+  const wireSegs = [];
+  for (const r of recs) {
+    if (!WIRES.has(r.code)) continue;
+    const [x1, y1, x2, y2] = r.n.slice(8, 12);
+    if (x1 === x2 && y1 === y2) continue;
+    wireSegs.push([x1, y1, x2, y2]);
+  }
+  const endpointKeys = new Set();
+  for (const [x1, y1, x2, y2] of wireSegs) {
+    endpointKeys.add(`${x1},${y1}`);
+    endpointKeys.add(`${x2},${y2}`);
+  }
+  const onWire = (px, py) => wireSegs.some(([x1, y1, x2, y2]) => onSeg(px, py, x1, y1, x2, y2));
+
+  const coilTags = new Set(recs.filter((r) => r.code === 9000 || r.code === 9005).map((r) => cleanTag(r.tag).toUpperCase()));
+  const plc = recs.filter((r) => r.code >= 10000 && r.code < 20000).length;
+
+  // 1. Piezas: posición de cada borne en el archivo.
+  const parts = [];
+  const seen = new Set();
+  for (const r of recs) {
+    if (WIRES.has(r.code) || r.code === JUNCTION || r.code === PE_WIRE || r.code < 1000 || (r.code >= 10000 && r.code < 20000)) {
+      if (r.code === TEXT && r.text) texts.push({ text: r.text, x: r.n[8], y: r.n[9], x2: r.n[10], y2: r.n[11] });
+      continue;
+    }
+    const flags = r.n.slice(0, 8);
+    const names = r.slots.filter((_, i) => flags[i] === 1).map((s) => s.trim());
+    let spec = CODES[r.code];
+    if (!spec) spec = guessCode(r, names, coilTags);
+    if (!spec) {
+      unknown.push({ code: r.code, tag: cleanTag(r.tag), terms: names, x: r.n[8], y: r.n[9] });
+      continue;
+    }
+    if (spec.kind === 'skip') continue;
+    // Algunos archivos repiten la misma pieza en el mismo sitio.
+    const dup = `${r.code},${r.n[8]},${r.n[9]},${r.n[17]},${r.tag}`;
+    if (seen.has(dup)) continue;
+    seen.add(dup);
+    const x = r.n[8];
+    const y = r.n[9];
+    const box = r.n.slice(12, 16);
+    const rot = ((r.n[17] || 0) % 4 + 4) % 4;
+    parts.push({ r, spec, names, x, y, box, rot });
+  }
+
+  // Posición (unidades CADe, absoluta) de un desplazamiento del símbolo girado.
+  const at = (p, dx, dy) => {
+    const [rx, ry] = rotatePt(dx, dy, p.rot * 90);
+    return [p.x + rx, p.y + ry];
+  };
+  const occupied = (px, py) => endpointKeys.has(`${px},${py}`) || onWire(px, py);
+
+  // Mapa de bornes: clave "x,y" CADe → {comp, term} y lista para comprobar.
+  const mapped = [];
+  // Otros bornes de piezas (unidas borne con borne, sin cable).
+  const termKeys = new Map();
+  const pending = [];
+
+  for (const p of parts) {
+    const { r, spec } = p;
+    const tag = cleanTag(r.tag);
+    const H = Math.max(3, p.box[3] - 3);
+    if (spec.kind === 'supply') {
+      spec.phases.forEach((ph, i) => {
+        if (!ph) return;
+        const [cx, cy] = at(p, 6 * i, 0);
+        pending.push({ kind: 'bus', phase: ph, cx, cy });
+      });
+      continue;
+    }
+    const count = spec.kind === 'top' ? Math.min(p.names.length, 3) : p.names.length;
+    const poles = spec.kind === 'top' ? count : Math.max(1, Math.floor(count / 2));
+    const pitch = spec.pitch || 6;
+    const cadeTop = [];
+    const cadeBot = [];
+    for (let i = 0; i < poles; i++) {
+      cadeTop.push(at(p, pitch * i, 0));
+      if (spec.kind !== 'top') cadeBot.push(at(p, pitch * i, H));
+    }
+    // El contacto 95-96-98 de CADe: el 98 (NA) va junto al 96.
+    const extra98 = r.code === 8017 && p.names.includes('98');
+    if (spec.split) {
+      // Fusibles trifásicos: tres fusibles.
+      for (let i = 0; i < poles; i++) {
+        pending.push({ kind: 'comp', type: spec.type, tag, name: r.desc, rot: p.rot, cadeTop: [cadeTop[i]], cadeBot: [cadeBot[i]], src: r, spec });
+      }
+      continue;
+    }
+    if (spec.pair) {
+      pending.push({ kind: 'comp', type: spec.type, tag, name: r.desc, rot: p.rot, cadeTop: [cadeTop[0]], cadeBot: [cadeBot[0]], src: r, spec });
+      pending.push({ kind: 'comp', type: spec.pair, tag, name: r.desc, rot: p.rot, cadeTop: [cadeTop[1]], cadeBot: [cadeBot[1]], src: r, spec });
+      continue;
+    }
+    const item = { kind: 'comp', type: spec.type, tag, name: r.desc, rot: p.rot, cadeTop, cadeBot, src: r, spec, names: p.names };
+    pending.push(item);
+    if (extra98) {
+      // Busca el borne 98 en la fila de abajo (a la derecha del 96).
+      for (const dx of [6, 9, 3, 12]) {
+        const [bx, by] = at(p, dx, H);
+        if (occupied(bx, by)) {
+          const [tx, ty] = at(p, dx, 0);
+          pending.push({ kind: 'comp', type: 'th_no', tag, name: r.desc, rot: p.rot, cadeTop: [[tx, ty]], cadeBot: [[bx, by]], src: r, spec, joinTop: cadeTop[0] });
+          break;
+        }
+      }
+    }
+  }
+  for (const it of pending) for (const pt of [...(it.cadeTop || []), ...(it.cadeBot || []), ...(it.kind === 'bus' ? [[it.cx, it.cy]] : [])]) {
+    const k = `${pt[0]},${pt[1]}`;
+    termKeys.set(k, (termKeys.get(k) || 0) + 1);
+  }
+  const attached = (px, py) => occupied(px, py) || (termKeys.get(`${px},${py}`) || 0) > 1;
+
+  // 2. Nuestras piezas y los tramos de cable que las unen a los puntos originales.
+  const stub = (from, to) => {
+    const [ax, ay] = from;
+    const [bx, by] = to;
+    if (ax === bx && ay === by) return;
+    const pts = [[ax, ay]];
+    if (ax !== bx && ay !== by) pts.push([ax, by]);
+    pts.push([bx, by]);
+    wires.push({ id: newId('w'), points: pts });
+  };
+  const toGrid = ([px, py]) => [px / S, py / S];
+
+  for (const it of pending) {
+    if (it.kind === 'bus') {
+      const c = { id: newId('c'), type: 'bus', x: it.cx / S, y: it.cy / S, rot: 0, props: { ...(TYPES.bus.defaults || {}), phase: it.phase, tag: '', name: '' } };
+      components.push(c);
+      mapped.push({ key: `${it.cx},${it.cy}`, comp: c.id, term: 'P' });
+      continue;
+    }
+    const T = TYPES[it.type];
+    const [ox, oy] = it.cadeTop[0];
+    const c = {
+      id: newId('c'),
+      type: it.type,
+      x: Math.round(ox / S),
+      y: Math.round(oy / S),
+      rot: it.rot * 90,
+      props: { tag: it.tag, name: it.name || '', ...(T.defaults || {}) },
+    };
+    if (it.name) c.props.name = it.name;
+    const r = it.src;
+    if (it.type === 'lamp') c.props.color = LAMP_COLORS[+r.slots[2] || 0] || 'rojo';
+    if (it.type === 'tcoil') {
+      const d = parseFloat(r.slots[3]);
+      if (Number.isFinite(d) && d > 0) c.props.delay = d;
+      if (r.slots[2] === '1') c.props.mode = 'tof';
+    }
+    if (it.type === 'sw') c.props.on = !!it.spec.on;
+    c.cade = { code: r.code, what: it.spec.what || null, guessed: !!it.spec.guessed, sensor: !!it.spec.sensor, nc: it.type === 'pb_nc' || it.type === 'c_nc' || (it.type === 'sw' && !!it.spec.on) };
+    components.push(c);
+    const [topT, botT] = ourRows(it.type);
+    const link = (cadePts, ourNames) => cadePts.forEach((pt, i) => {
+      const tn = ourNames[i];
+      if (!tn) return;
+      const t = T.terms.find((q) => q.n === tn);
+      const ours = termPos(c, t);
+      mapped.push({ key: `${pt[0]},${pt[1]}`, comp: c.id, term: tn });
+      if (attached(pt[0], pt[1])) stub(ours, toGrid(pt));
+    });
+    link(it.cadeTop, topT);
+    link(it.cadeBot || [], botT);
+    if (it.joinTop) stub(termPos(c, T.terms[0]), toGrid(it.joinTop));
+  }
+
+  // 3. Cables originales.
+  for (const [x1, y1, x2, y2] of wireSegs) wires.push({ id: newId('w'), points: [[x1 / S, y1 / S], [x2 / S, y2 / S]] });
+
+  // 4. Textos.
+  for (const t of texts) {
+    components.push({ id: newId('c'), type: 'label', x: t.x / S, y: t.y / S + 0.8, rot: 0, props: { text: t.text, size: 13 } });
+  }
+
+  const project = { version: 1, name, description: 'Importado de CADe SIMU.', components, wires };
+
+  // 5. Comprobación: mismas conexiones que en el archivo.
+  const check = verify(project, mapped, wireSegs);
+  if (plc) notes.push(`El archivo tiene ${plc} elementos de autómata o GRAFCET (PC_SIMU) que no se importan.`);
+  if (unknown.length) notes.push(`${unknown.length} símbolo${unknown.length > 1 ? 's' : ''} que no reconozco: ${unknown.map((u) => `${u.tag || '?'} (código ${u.code})`).join(', ')}.`);
+  if (!check.ok) notes.push(`Revisa el esquema: ${check.splits + check.merges} conexión${check.splits + check.merges > 1 ? 'es' : ''} no ha${check.splits + check.merges > 1 ? 'n' : ''} quedado igual que en el archivo.`);
+  return { project, notes, unknown, check, texts: texts.map((t) => ({ ...t, x: t.x / S, y: t.y / S })) };
+}
+
+function onSeg(px, py, x1, y1, x2, y2) {
+  if (x1 === x2) return px === x1 && py > Math.min(y1, y2) && py < Math.max(y1, y2);
+  if (y1 === y2) return py === y1 && px > Math.min(x1, x2) && px < Math.max(x1, x2);
+  return false;
+}
+
+/** Compara las redes del archivo con las del esquema importado. */
+function verify(project, mapped, wireSegs) {
+  // Redes del archivo (unión de puntos).
+  const parent = new Map();
+  const find = (k) => {
+    if (!parent.has(k)) parent.set(k, k);
+    let r = k;
+    while (parent.get(r) !== r) r = parent.get(r);
+    parent.set(k, r);
+    return r;
+  };
+  const union = (a, b) => parent.set(find(a), find(b));
+  for (const [x1, y1, x2, y2] of wireSegs) union(`${x1},${y1}`, `${x2},${y2}`);
+  const pts = new Set(mapped.map((m) => m.key));
+  for (const [x1, y1, x2, y2] of wireSegs) {
+    pts.add(`${x1},${y1}`);
+    pts.add(`${x2},${y2}`);
+  }
+  for (const k of pts) {
+    const [px, py] = k.split(',').map(Number);
+    for (const [x1, y1, x2, y2] of wireSegs) if (onSeg(px, py, x1, y1, x2, y2)) union(k, `${x1},${y1}`);
+  }
+  // Redes del esquema importado.
+  let sim;
+  try {
+    sim = new ElecSim(project, {});
+  } catch {
+    return { ok: false, splits: 1, merges: 0 };
+  }
+  const byCade = new Map();
+  const byOurs = new Map();
+  for (const m of mapped) {
+    const tn = sim.termNet.get(m.comp);
+    if (!tn || tn[m.term] === undefined) continue;
+    const cn = find(m.key);
+    const on = tn[m.term];
+    if (!byCade.has(cn)) byCade.set(cn, new Set());
+    byCade.get(cn).add(on);
+    if (!byOurs.has(on)) byOurs.set(on, new Set());
+    byOurs.get(on).add(cn);
+  }
+  let splits = 0;
+  let merges = 0;
+  for (const s of byCade.values()) if (s.size > 1) splits += s.size - 1;
+  for (const s of byOurs.values()) if (s.size > 1) merges += s.size - 1;
+  return { ok: splits === 0 && merges === 0, splits, merges };
+}
+
+return { parseCad, importCadeSimu };
+})();
+
+// ---- js/import/ladder.js
+__mods["js/import/ladder.js"] = (() => {
+// Dibuja un esquema a partir de una descripción en escalera (JSON), la que
+// devuelve Claude al interpretar una foto, un PDF o un archivo de otro programa.
+//
+// {
+//   "name": "Cámara de conservación",
+//   "install": "positiva" | "congelados" | "armario" | "ninguna",
+//   "power":   [ { "items": [ {type:"mcb3"}, {type:"c_main3", tag:"KM1"}, {type:"thermal3", tag:"F1"},
+//                             {type:"motor3", tag:"M1", func:"compresor"} ] } ],
+//   "control": { "protection": {type:"mcb2", tag:"Q2"},
+//                "rungs": [ [pieza, {"par": [[pieza, …], [pieza, …]]}, pieza], … ] }
+// }
+//
+// Cada escalón va de la fase (arriba) al neutro (abajo). Una rama "par" son
+// caminos en paralelo, cada uno una lista en serie (que a su vez puede tener
+// más ramas en paralelo).
+
+const { TYPES, termPos } = __mods["js/elec/components.js"];
+
+// Borne de entrada y salidas posibles de cada tipo en un escalón.
+const IO = {
+  pb_no: ['3', { '': '4' }],
+  pb_nc: ['1', { '': '2' }],
+  estop: ['1', { '': '2' }],
+  sw: ['1', { '': '2' }],
+  sel: ['C', { '': '1', 1: '1', 2: '2' }],
+  c_no: ['13', { '': '14' }],
+  c_nc: ['21', { '': '22' }],
+  t_no: ['67', { '': '68' }],
+  t_nc: ['55', { '': '56' }],
+  th_nc: ['95', { '': '96' }],
+  th_no: ['97', { '': '98' }],
+  thermostat: ['C', { '': 'NC', NC: 'NC', NA: 'NA' }],
+  pressostat: ['C', { '': 'NC', NC: 'NC', NA: 'NA' }],
+  door_nc: ['1', { '': '2' }],
+  door_no: ['3', { '': '4' }],
+  clk_c: ['C', { '': 'F', F: 'F', D: 'D' }],
+  coil: ['A1', { '': 'A2' }],
+  tcoil: ['A1', { '': 'A2' }],
+  lamp: ['X1', { '': 'X2' }],
+  motor1: ['1', { '': '2' }],
+  heater: ['1', { '': '2' }],
+  solenoid: ['A1', { '': 'A2' }],
+  clock: ['A1', { '': 'A2' }],
+  fuse: ['1', { '': '2' }],
+  mcb1: ['1', { '': '2' }],
+};
+const POWER = new Set(['mcb3', 'mcb4', 'fuse3', 'c_main3', 'thermal3', 'motor3']);
+const PROPS = ['name', 'func', 'probe', 'mode', 'sp', 'diff', 'kind', 'cut', 'reset', 'delay', 'color', 'In', 'Iset', 'interval', 'duration', 'first', 'on'];
+
+const COL = 6; // cuadros entre columnas en paralelo
+
+function ladderToProject(spec) {
+  const notes = [];
+  const components = [];
+  const wires = [];
+  let n = 0;
+  const add = (type, x, y, item = {}) => {
+    const T = TYPES[type];
+    const props = { tag: '', name: '', ...(T.defaults || {}) };
+    if (item.tag) props.tag = String(item.tag).replace(/^-+/, '');
+    for (const k of PROPS) {
+      if (item[k] === undefined || item[k] === null || item[k] === '') continue;
+      const def = (T.props || []).find((p) => p.key === k);
+      if (!def && k !== 'name') continue;
+      if (def && def.type === 'number') {
+        const v = parseFloat(item[k]);
+        if (Number.isFinite(v)) props[k] = v;
+      } else if (def && def.type === 'select') {
+        if (Object.prototype.hasOwnProperty.call(def.options, item[k])) props[k] = item[k];
+      } else if (def && def.type === 'bool') props[k] = !!item[k];
+      else props[k] = String(item[k]);
+    }
+    const c = { id: `c${++n}`, type, x, y, rot: 0, props };
+    components.push(c);
+    return c;
+  };
+  const wire = (...pts) => {
+    const out = [];
+    for (const p of pts) {
+      const last = out[out.length - 1];
+      if (last && last[0] !== p[0] && last[1] !== p[1]) out.push([last[0], p[1]]);
+      if (!last || last[0] !== p[0] || last[1] !== p[1]) out.push(p);
+    }
+    if (out.length >= 2) wires.push({ id: `w${wires.length + 1}`, points: out });
+  };
+  const T = (c, name) => termPos(c, TYPES[c.type].terms.find((t) => t.n === name));
+  const label = (text, x, y) => {
+    const c = add('label', x, y);
+    Object.assign(c.props, { text, size: 16 });
+  };
+
+  // ------------------------------------------------------------ potencia
+  const chains = (Array.isArray(spec.power) ? spec.power : []).map((ch) => (Array.isArray(ch) ? ch : ch && ch.items) || []).filter((ch) => ch.length);
+  let xCtl = 0;
+  if (chains.length) {
+    label('POTENCIA', 0, -5);
+    const sup = add('supply3', 0, 0);
+    const xMax = (chains.length - 1) * 8;
+    wire(T(sup, 'L1'), [0, 2], [xMax, 2]);
+    wire(T(sup, 'L2'), [2, 3], [xMax + 2, 3]);
+    wire(T(sup, 'L3'), [4, 4], [xMax + 4, 4]);
+    chains.forEach((items, j) => {
+      const cx = j * 8;
+      let tops = [[cx, 2], [cx + 2, 3], [cx + 4, 4]];
+      let y = 6;
+      for (const it of items) {
+        const type = it.type === 'fuse3' ? 'fuse' : it.type;
+        if (!POWER.has(it.type) && it.type !== 'fuse') {
+          notes.push(`En potencia no sé colocar «${it.type}»; lo quito.`);
+          continue;
+        }
+        let pins;
+        if (type === 'fuse') {
+          const f = [0, 2, 4].map((dx) => add('fuse', cx + dx, y, it));
+          pins = { top: f.map((c) => T(c, '1')), bot: f.map((c) => T(c, '2')) };
+        } else {
+          const c = add(type, cx, y, it);
+          if (type === 'motor3') pins = { top: [T(c, 'U'), T(c, 'V'), T(c, 'W')], bot: null };
+          else pins = { top: [T(c, '1'), T(c, '3'), T(c, '5')], bot: [T(c, '2'), T(c, '4'), T(c, '6')] };
+        }
+        tops.forEach((p, i) => wire(p, pins.top[i]));
+        if (!pins.bot) {
+          tops = null;
+          break;
+        }
+        tops = pins.bot;
+        y = pins.bot[0][1] + 2;
+      }
+    });
+    xCtl = xMax + 14;
+  }
+
+  // -------------------------------------------------------------- mando
+  const ctl = spec.control || {};
+  const rungs = (Array.isArray(ctl.rungs) ? ctl.rungs : []).filter((r) => Array.isArray(r) && r.length);
+  if (rungs.length) {
+    label('MANDO', xCtl, -5);
+    const sup = add('supply1', xCtl, 0);
+    let pL = T(sup, 'L');
+    let pN = T(sup, 'N');
+    const prot = ctl.protection && TYPES[ctl.protection.type] ? ctl.protection : null;
+    if (prot && (prot.type === 'mcb2' || prot.type === 'mcb1' || prot.type === 'fuse')) {
+      const c = add(prot.type, xCtl, 2, prot);
+      wire(pL, T(c, '1'));
+      pL = T(c, '2');
+      if (prot.type === 'mcb2') {
+        wire(pN, T(c, 'N1'));
+        pN = T(c, 'N2');
+      }
+    }
+    const yL = pL[1] + 2;
+    // Medidas.
+    const measure = (node) => {
+      if (Array.isArray(node)) {
+        const ms = node.map(measure).filter(Boolean);
+        if (!ms.length) return null;
+        return { kind: 's', items: ms, w: Math.max(...ms.map((m) => m.w)), h: ms.reduce((a, m) => a + m.h, 0) + ms.length - 1 };
+      }
+      if (node && Array.isArray(node.par)) {
+        const ms = node.par.map((b) => measure(Array.isArray(b) ? b : [b])).filter(Boolean);
+        if (!ms.length) return null;
+        if (ms.length === 1) return ms[0];
+        return { kind: 'p', items: ms, w: ms.reduce((a, m) => a + m.w, 0), h: Math.max(...ms.map((m) => m.h)) + 2 };
+      }
+      if (!node || !IO[node.type]) {
+        if (node && node.type) notes.push(`No sé dibujar «${node.type}» en el mando; lo quito.`);
+        return null;
+      }
+      const [, outs] = IO[node.type];
+      const out = outs[node.out || ''] || outs[''];
+      const t = TYPES[node.type].terms.find((q) => q.n === out);
+      return { kind: 'leaf', item: node, out, w: 1, h: t.x !== 0 ? 4 : 3 };
+    };
+    // Dibujo: entra por (x, y) y devuelve el punto de salida.
+    const draw = (m, x, y) => {
+      if (m.kind === 'leaf') {
+        const [inT] = IO[m.item.type];
+        const tin = TYPES[m.item.type].terms.find((q) => q.n === inT);
+        const c = add(m.item.type, x - tin.x, y - tin.y, m.item);
+        const o = T(c, m.out);
+        if (o[0] !== x) {
+          wire(o, [o[0], o[1] + 1], [x, o[1] + 1]);
+          return [x, o[1] + 1];
+        }
+        return o;
+      }
+      if (m.kind === 's') {
+        let p = draw(m.items[0], x, y);
+        for (const it of m.items.slice(1)) {
+          wire(p, [x, p[1] + 1]);
+          p = draw(it, x, p[1] + 1);
+        }
+        return p;
+      }
+      // Paralelo.
+      let cx = x;
+      const xs = [];
+      const exits = [];
+      for (const it of m.items) {
+        xs.push(cx);
+        wire([cx, y], [cx, y + 1]);
+        exits.push(draw(it, cx, y + 1));
+        cx += it.w * COL;
+      }
+      const yb = y + m.h;
+      exits.forEach((e, i) => wire(e, [xs[i], yb]));
+      wire([x, y], [xs[xs.length - 1], y]);
+      wire([x, yb], [xs[xs.length - 1], yb]);
+      return [x, yb];
+    };
+    const ms = rungs.map((r) => measure(r)).filter(Boolean);
+    const yN = yL + 1 + Math.max(...ms.map((m) => m.h)) + 2;
+    let x = xCtl + 6;
+    const xs = [];
+    for (const m of ms) {
+      xs.push(x);
+      wire([x, yL], [x, yL + 1]);
+      const e = draw(m, x, yL + 1);
+      wire(e, [x, yN]);
+      x += m.w * COL;
+    }
+    const xLast = xs[xs.length - 1];
+    wire(pL, [pL[0], yL], [xLast, yL]);
+    wire(pN, [pN[0], yN], [xLast, yN]);
+  }
+
+  if (!chains.length && !rungs.length) throw new Error('La descripción no tiene ni circuito de potencia ni de mando.');
+  // Los contactos del térmico necesitan su relé; si no está en potencia, se avisa.
+  const thTags = new Set(components.filter((c) => c.type === 'thermal3').map((c) => c.props.tag));
+  const orphanTh = components.filter((c) => (c.type === 'th_nc' || c.type === 'th_no') && !thTags.has(c.props.tag));
+  if (orphanTh.length) notes.push(`El contacto del térmico ${orphanTh[0].props.tag} no tiene relé térmico en el circuito de potencia: no disparará nunca.`);
+  return {
+    project: { version: 1, name: spec.name || 'Esquema importado', description: spec.description || 'Dibujado a partir de una imagen o descripción.', components, wires },
+    notes,
+    install: spec.install,
+  };
+}
+
+return { ladderToProject };
+})();
+
 // ---- js/elec/builder.js
 __mods["js/elec/builder.js"] = (() => {
 // Ayudante para construir esquemas desde código (ejemplos y pruebas).
@@ -8616,6 +9358,631 @@ function buildExample(id) {
 return { EXAMPLES, exampleList, buildExample };
 })();
 
+// ---- js/import/roles.js
+__mods["js/import/roles.js"] = (() => {
+// Qué es cada pieza de un esquema importado dentro de la instalación
+// frigorífica: compresor, ventiladores, termostato, presostatos, puerta…
+// Se adivina por la etiqueta, la descripción y los textos cercanos, y el
+// usuario lo confirma antes de cargarlo.
+
+const { TYPES } = __mods["js/elec/components.js"];
+const { DEFAULT_REFRIG, DEFAULT_FAULTS } = __mods["js/refrig/model.js"];
+const { getRefrigerant, psatDew, psatBubble, gauge } = __mods["js/refrig/refrigerants.js"];
+const { buildExample } = __mods["js/examples.js"];
+
+const INSTALLS = {
+  positiva: { label: 'Cámara de conservación (+2 °C)', example: 'positiva', sp: 2, diff: 2, teCut: -30 },
+  congelados: { label: 'Cámara de congelados (−20 °C)', example: 'congelados', sp: -20, diff: 2, teCut: -40 },
+  armario: { label: 'Armario o nevera (capilar)', example: 'armario', sp: 3, diff: 3, teCut: -35 },
+  ninguna: { label: 'Solo el esquema eléctrico', example: null },
+};
+
+const ROLE_OPTIONS = {
+  motor: { compresor: 'Compresor', vent_evap: 'Ventilador del evaporador', vent_cond: 'Ventilador del condensador', ninguna: 'Otro motor' },
+  heater: { desescarche: 'Resistencia de desescarche', ninguna: 'Otra resistencia' },
+  valve: { solenoide: 'Solenoide de líquido', ninguna: 'Otra válvula' },
+  lamp: { ninguna: 'Piloto de señalización', luz: 'Luz de la cámara' },
+  contact: {
+    manual: 'Pulsador o interruptor (lo accionas tú)',
+    termostato: 'Termostato de la cámara',
+    termostato_evap: 'Termostato de la batería (fin de desescarche)',
+    pa: 'Presostato de alta',
+    pb: 'Presostato de baja',
+    puerta: 'Final de carrera de la puerta',
+  },
+};
+
+const KIND_OF = { motor1: 'motor', motor3: 'motor', heater: 'heater', solenoid: 'valve', lamp: 'lamp' };
+const SWITCHES = new Set(['pb_no', 'pb_nc', 'sw', 'thermostat', 'pressostat', 'door_nc', 'door_no']);
+const RELAY_CONTACTS = new Set(['c_no', 'c_nc']);
+
+const norm = (s) => (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase();
+
+/** Textos del esquema cerca de una pieza (etiquetas sueltas). */
+function nearbyText(c, labels) {
+  let best = '';
+  let bd = 7;
+  for (const l of labels) {
+    const d = Math.hypot(l.x - c.x, l.y - c.y);
+    if (d < bd) {
+      bd = d;
+      best = l.text;
+    }
+  }
+  return best;
+}
+
+function guessContact(words, c) {
+  if (c.type === 'thermostat') return c.props.probe === 'evaporador' ? 'termostato_evap' : 'termostato';
+  if (c.type === 'pressostat') return c.props.kind === 'baja' ? 'pb' : 'pa';
+  if (c.type === 'door_nc' || c.type === 'door_no') return 'puerta';
+  if (/PRES.*ALTA|\bHP\b|\bPA\b|ALTA PRES/.test(words)) return 'pa';
+  if (/PRES.*BAJA|\bLP\b|\bPB\b|BAJA PRES/.test(words)) return 'pb';
+  if (/PRESOS/.test(words)) return 'pb';
+  if (/FIN.*DESESC|BATERIA|EVAP/.test(words) && /TERM|TH|TEMP/.test(words)) return 'termostato_evap';
+  if (/TERMOS|TERMOST|\bTH\d*\b|\bTER\b|TEMPERAT|\bB\d*T\b/.test(words)) return 'termostato';
+  if (/PUERTA|DOOR|\bSQ\d*\b|FINAL DE CARRERA|\bFC\d*\b/.test(words)) return 'puerta';
+  return 'manual';
+}
+
+function guessMotor(words, c, state) {
+  if (c.props.func && c.props.func !== 'ninguna') return c.props.func;
+  if (/COMPRES|\bCP\b|\bMC\b/.test(words)) return 'compresor';
+  if (/EVAP|INTERIOR/.test(words)) return 'vent_evap';
+  if (/COND|EXTERIOR/.test(words)) return 'vent_cond';
+  if (/VENT/.test(words)) return state.evapTaken ? 'vent_cond' : 'vent_evap';
+  return null;
+}
+
+/**
+ * Lista de piezas a confirmar: [{id, kind, tag, what, value, options}] y el
+ * tipo de instalación que parece. `texts`: [{text, x, y}] en cuadros.
+ */
+function roleCandidates(project, texts = []) {
+  const labels = [
+    ...texts,
+    ...project.components.filter((c) => c.type === 'label').map((c) => ({ text: c.props.text, x: c.x, y: c.y })),
+  ];
+  const comps = project.components.filter((c) => TYPES[c.type]);
+  const coilTags = new Set(comps.filter((c) => c.type === 'coil' || c.type === 'tcoil').map((c) => norm(c.props.tag)));
+  const all = norm([project.name, project.description, ...labels.map((l) => l.text)].join(' '));
+  const out = [];
+  const state = { evapTaken: false };
+  const motors = [];
+  for (const c of comps) {
+    const words = norm(`${c.props.tag} ${c.props.name || ''} ${nearbyText(c, labels)}`);
+    const tagWhat = `${c.props.tag || TYPES[c.type].label}${c.props.name ? ' · ' + c.props.name : ''}`;
+    const kind = KIND_OF[c.type];
+    if (kind === 'motor') {
+      const g = guessMotor(words, c, state);
+      if (g === 'vent_evap') state.evapTaken = true;
+      const item = { id: c.id, kind, tag: tagWhat, what: TYPES[c.type].label, value: g, options: ROLE_OPTIONS.motor };
+      motors.push({ item, c });
+      out.push(item);
+    } else if (kind) {
+      let value = Object.keys(ROLE_OPTIONS[kind])[0];
+      if (kind === 'lamp') value = c.props.func === 'luz' || /LUZ|ALUMBR|ILUMIN/.test(words) ? 'luz' : 'ninguna';
+      if (kind === 'heater' && c.props.func === 'ninguna' && !/DESESC|RESIST|DEFROST|\bR\d|\bE\d/.test(words) && /CARTER|CALEF/.test(words)) value = 'ninguna';
+      out.push({ id: c.id, kind, tag: tagWhat, what: TYPES[c.type].label, value, options: ROLE_OPTIONS[kind] });
+    } else if (SWITCHES.has(c.type) || (RELAY_CONTACTS.has(c.type) && !coilTags.has(norm(c.props.tag)))) {
+      // Pulsadores, interruptores y contactos sin bobina (sensores dibujados como contactos).
+      const orphan = RELAY_CONTACTS.has(c.type);
+      const value = guessContact(words, c);
+      out.push({
+        id: c.id,
+        kind: 'contact',
+        tag: tagWhat,
+        what: orphan ? `${TYPES[c.type].label} sin bobina` : (c.cade && c.cade.what) || TYPES[c.type].label,
+        value: orphan && value === 'manual' ? 'termostato' : value,
+        options: ROLE_OPTIONS.contact,
+      });
+    }
+  }
+  // Sin pistas: el primer motor trifásico (o el primero) es el compresor.
+  if (motors.length && !motors.some((m) => m.item.value === 'compresor')) {
+    const m = motors.find((x) => x.c.type === 'motor3' && !x.item.value) || motors.find((x) => !x.item.value);
+    if (m) m.item.value = 'compresor';
+  }
+  for (const m of motors) if (!m.item.value) m.item.value = 'ninguna';
+  let install = 'positiva';
+  if (!out.some((x) => x.kind === 'motor' && x.value === 'compresor')) install = 'ninguna';
+  else if (/CONGEL|NEGATIV|-\s?(18|20|25)\s?[°º]?C/.test(all)) install = 'congelados';
+  else if (/NEVERA|ARMARIO|CAPILAR|ARCON|BOTELLERO|FRIGORIFICO DOMEST/.test(all)) install = 'armario';
+  return { items: out, install };
+}
+
+/** Aplica las funciones elegidas y prepara la instalación frigorífica. */
+function applyRoles(project, choices, install) {
+  const p = JSON.parse(JSON.stringify(project));
+  const I = INSTALLS[install] || INSTALLS.positiva;
+  const refrig = I.example ? { ...DEFAULT_REFRIG, ...(buildExample(I.example).refrig || {}), enabled: true } : { ...DEFAULT_REFRIG, enabled: false };
+  const ref = getRefrigerant(refrig.refrigerant);
+  const byId = new Map(p.components.map((c) => [c.id, c]));
+  for (const [id, value] of Object.entries(choices)) {
+    const c = byId.get(id);
+    if (!c) continue;
+    const kind = KIND_OF[c.type];
+    if (kind) {
+      c.props.func = value;
+      continue;
+    }
+    const wasNC = c.type === 'pb_nc' || c.type === 'c_nc' || c.type === 'door_nc' || (c.type === 'sw' && c.props.on) || (c.cade && c.cade.nc);
+    const keep = { tag: c.props.tag, name: c.props.name || '' };
+    const become = (type, props) => {
+      c.type = type;
+      c.props = { ...(TYPES[type].defaults || {}), ...keep, ...props };
+    };
+    switch (value) {
+      case 'termostato':
+        become('thermostat', { probe: 'camara', mode: 'frio', sp: I.sp ?? 2, diff: I.diff ?? 2, name: keep.name || 'Cámara' });
+        break;
+      case 'termostato_evap':
+        become('thermostat', { probe: 'evaporador', mode: 'frio', sp: 10, diff: 5, name: keep.name || 'Fin desesc.' });
+        break;
+      case 'pa':
+        become('pressostat', { kind: 'alta', cut: round1(gauge(psatBubble(ref, 60))), diff: 4, reset: 'manual', name: keep.name || 'Alta' });
+        break;
+      case 'pb': {
+        const cut = Math.max(0, round1(gauge(psatDew(ref, I.teCut ?? -30))));
+        become('pressostat', { kind: 'baja', cut, diff: 1.5, reset: 'auto', name: keep.name || 'Baja' });
+        break;
+      }
+      case 'puerta':
+        become(wasNC ? 'door_nc' : 'door_no', { name: keep.name || 'Puerta' });
+        break;
+      default:
+        // Manual: un contacto de relé sin bobina pasa a ser un interruptor.
+        if (RELAY_CONTACTS.has(c.type)) become('sw', { on: !!wasNC });
+        else if (c.type === 'thermostat' || c.type === 'pressostat') become('sw', { on: true });
+    }
+  }
+  for (const c of p.components) delete c.cade;
+  // Nombres útiles para la puesta en marcha automática.
+  const pbs = p.components.filter((c) => c.type === 'pb_no');
+  if (pbs.length && !pbs.some((c) => /marcha/i.test(c.props.name || ''))) pbs[0].props.name = 'Marcha';
+  p.refrig = refrig;
+  p.faults = { ...DEFAULT_FAULTS };
+  const th = p.components.find((c) => c.type === 'thermostat' && c.props.probe === 'camara');
+  if (th && I.sp !== undefined) p.refrig.TroomInit = +th.props.sp + +th.props.diff + 4;
+  return p;
+}
+
+const round1 = (v) => Math.round(v * 10) / 10;
+
+return { INSTALLS, ROLE_OPTIONS, roleCandidates, applyRoles };
+})();
+
+// ---- js/import/ai.js
+__mods["js/import/ai.js"] = (() => {
+// Interpretar con Claude un esquema que no es de CADe SIMU: una foto, una
+// captura, un PDF o el texto de un archivo de otro programa. Claude devuelve
+// la descripción en escalera que dibuja ladder.js.
+
+const EXAMPLE = {
+  name: 'Cámara de conservación',
+  install: 'positiva',
+  power: [{ items: [{ type: 'mcb3', tag: 'Q1' }, { type: 'c_main3', tag: 'KM1' }, { type: 'thermal3', tag: 'F1', Iset: 3.2 }, { type: 'motor3', tag: 'M1', name: 'Compresor', func: 'compresor' }] }],
+  control: {
+    protection: { type: 'mcb2', tag: 'Q2' },
+    rungs: [
+      [{ type: 'pb_nc', tag: 'S0', name: 'Paro' }, { par: [[{ type: 'pb_no', tag: 'S1', name: 'Marcha' }], [{ type: 'c_no', tag: 'KA1' }]] }, { type: 'coil', tag: 'KA1' }],
+      [{ type: 'c_no', tag: 'KA1' }, {
+        par: [
+          [{ type: 'th_nc', tag: 'F1' }, { type: 'pressostat', tag: 'PA', kind: 'alta', cut: 27 }, { type: 'pressostat', tag: 'PB', kind: 'baja', cut: 1 }, { type: 'thermostat', tag: 'TH1', probe: 'camara', sp: 2, diff: 2 }, { type: 'coil', tag: 'KM1', name: 'Compresor' }],
+          [{ type: 'c_no', tag: 'KM1' }, { type: 'motor1', tag: 'M2', name: 'Vent. condensador', func: 'vent_cond' }],
+          [{ type: 'door_nc', tag: 'SQ1' }, { type: 'motor1', tag: 'M3', name: 'Vent. evaporador', func: 'vent_evap' }],
+          [{ type: 'door_no', tag: 'SQ1' }, { type: 'lamp', tag: 'H1', name: 'Luz cámara', func: 'luz', color: 'blanco' }],
+        ],
+      }],
+    ],
+  },
+  notes: [],
+};
+
+const RULES = `Eres técnico frigorista y electricista. Convierte el esquema eléctrico en un JSON para el simulador FrigoSIMU.
+
+Responde SOLO con un objeto JSON con esta forma:
+{"name": texto, "install": "positiva"|"congelados"|"armario"|"ninguna", "power": [{"items": [...]}], "control": {"protection": pieza|null, "rungs": [[...], ...]}, "notes": [texto, ...]}
+
+POTENCIA: cada elemento de "power" es un motor trifásico con sus aparatos, en "items" de arriba abajo (de la red al motor). Tipos: "mcb3" (magnetotérmico o guardamotor 3P), "fuse3" (fusibles), "c_main3" (contactos principales; tag = el del contactor), "thermal3" (relé térmico; Iset en A), "motor3" (func).
+MANDO: "protection" es la protección del mando ("mcb2" 1P+N, "mcb1" o "fuse"). Cada escalón de "rungs" va de la fase (arriba) al neutro (abajo): una lista de piezas en serie. Las ramas en paralelo se escriben {"par": [[piezas en serie], [piezas en serie], ...]} y pueden anidarse.
+Tipos del mando:
+- "pb_no" pulsador NA (marcha), "pb_nc" pulsador NC (paro), "estop" seta de emergencia, "sw" interruptor ("on": true si arranca cerrado), "sel" selector ("out": "1" o "2").
+- "c_no" / "c_nc" contacto NA / NC de un contactor o relé (tag = el de su bobina). "t_no" / "t_nc" contacto temporizado (tag = el del temporizador).
+- "th_nc" / "th_no" contacto 95-96 / 97-98 del relé térmico (tag = el del térmico).
+- "thermostat" termostato ("probe": "camara" o "evaporador", "sp" y "diff" en °C; su contacto C-NC está cerrado mientras pide frío).
+- "pressostat" presostato ("kind": "alta" o "baja", "cut" en bar, "diff"; su contacto C-NC abre al disparar).
+- "door_nc" final de carrera de la puerta que abre al abrirla (ventiladores); "door_no" que cierra al abrirla (luz).
+- "clock" motor del reloj de desescarche; "clk_c" su contacto ("out": "F" en frío, "D" en desescarche; tag = el del reloj).
+- Cargas: "coil" bobina de contactor o relé, "tcoil" temporizador ("delay" en s, "mode" "ton" o "tof"), "lamp" piloto ("color": verde, rojo, amarillo, blanco, azul; "func": "luz" si es la luz de la cámara), "motor1" motor monofásico (ventiladores), "heater" resistencia ("func": "desescarche"), "solenoid" válvula solenoide de líquido.
+- "fuse" o "mcb1" protección de una sola rama.
+"func" de los motores: "compresor", "vent_evap" (ventilador del evaporador), "vent_cond" (ventilador del condensador) o "ninguna".
+Cada pieza: {"type", "tag", "name"} y las propiedades que tenga. Copia las etiquetas tal cual (KM1, S1, TH1...).
+Reglas: un autoenclavamiento es {"par": [[pulsador de marcha], [contacto NA de la bobina]]} seguido de la bobina. Si varias ramas cuelgan de un mismo contacto, pon ese contacto y detrás un "par" con las ramas. Todas las bobinas y cargas acaban en el neutro. Si no es una instalación frigorífica usa "install": "ninguna". Si algo no se lee bien, haz la interpretación más probable y explícalo en "notes" (en español, frases cortas).
+
+Ejemplo de respuesta:
+${JSON.stringify(EXAMPLE)}`;
+
+/** Texto de la petición a Claude. */
+function buildPrompt({ kind, fileName, text, description }) {
+  let what;
+  if (kind === 'images') what = `Las imágenes son un esquema eléctrico${fileName ? ` (${fileName})` : ''}. Léelo con cuidado: símbolos, etiquetas y cables.`;
+  else if (kind === 'file') what = `Este es el contenido del archivo «${fileName}» de un programa de esquemas eléctricos. Interprétalo:\n\n${text}`;
+  else what = `El usuario describe así el esquema que quiere:\n\n${description}`;
+  return `${RULES}\n\n${what}`;
+}
+
+/** Reduce un archivo de texto grande a lo esencial para que quepa en la petición. */
+function condenseFile(text, max = 42000) {
+  let t = text.replace(/\r/g, '').replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n');
+  // XML: quita atributos de dibujo que no aportan nada al circuito.
+  t = t.replace(/\s(?:style|font|color|antialias|width|height|rx|ry|x\d?|y\d?|length\d?|orientation|angle|rotation)="[^"]*"/g, '');
+  if (t.length > max) t = `${t.slice(0, max)}\n[... archivo recortado ...]`;
+  return t;
+}
+
+/** Comprueba lo mínimo del JSON que devuelve Claude. */
+function checkSpec(spec) {
+  if (!spec || typeof spec !== 'object' || Array.isArray(spec)) throw new Error('La respuesta no es un esquema.');
+  const rungs = spec.control && Array.isArray(spec.control.rungs) ? spec.control.rungs : [];
+  const power = Array.isArray(spec.power) ? spec.power : [];
+  if (!rungs.length && !power.length) throw new Error('No he encontrado ningún circuito en la respuesta.');
+  return spec;
+}
+
+return { buildPrompt, condenseFile, checkSpec };
+})();
+
+// ---- js/ui/importdlg.js
+__mods["js/ui/importdlg.js"] = (() => {
+// Diálogo "Abrir o importar un esquema": FrigoSIMU (.json), CADe SIMU (.cad)
+// y, con Claude, fotos, capturas, PDF o archivos de otros programas. Antes de
+// cargarlo se revisa qué es cada pieza en la instalación frigorífica.
+
+const { h } = __mods["js/ui/dom.js"];
+const { importCadeSimu } = __mods["js/import/cadesimu.js"];
+const { ladderToProject } = __mods["js/import/ladder.js"];
+const { roleCandidates, applyRoles, INSTALLS } = __mods["js/import/roles.js"];
+const { buildPrompt, condenseFile, checkSpec } = __mods["js/import/ai.js"];
+
+const IMG = /\.(png|jpe?g|webp|gif)$/i;
+const PDFJS = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/';
+
+class ImportDialog {
+  constructor(app) {
+    this.app = app;
+    this.back = h('div', { class: 'modal-back', hidden: true });
+    this.box = h('div', { class: 'modal keep-card', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'imp-title' });
+    this.back.append(this.box);
+    document.body.append(this.back);
+    this.back.addEventListener('pointerdown', (e) => {
+      if (e.target === this.back && !this.busy) this.close();
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !this.back.hidden) {
+        e.stopPropagation();
+        this.cancel();
+      }
+    }, true);
+    this.sample = null;
+    this.limits = null;
+    // Claude solo está disponible dentro de claude.ai.
+    const cl = typeof window !== 'undefined' ? window.claude : null;
+    if (cl && typeof cl.use === 'function') {
+      cl.use('sample').then(async (s) => {
+        this.sample = s;
+        if (s) this.limits = await s.limits().catch(() => null);
+        if (!this.back.hidden && this.step === 'pick') this.showPick();
+      }).catch(() => {});
+    }
+  }
+
+  open(file) {
+    this.back.hidden = false;
+    if (file) this.handleFile(file);
+    else this.showPick();
+  }
+
+  close() {
+    this.back.hidden = true;
+    this.box.innerHTML = '';
+    this.step = null;
+  }
+
+  cancel() {
+    if (this.ctl) this.ctl.abort();
+    this.busy = false;
+    this.close();
+  }
+
+  frame(title, ...kids) {
+    this.box.innerHTML = '';
+    this.box.append(
+      h('header', { class: 'modal-head' }, h('h2', { id: 'imp-title' }, title), h('button', { class: 'card-x', type: 'button', 'aria-label': 'Cerrar', onclick: () => this.cancel() }, '×')),
+      h('div', { class: 'modal-body' }, ...kids),
+    );
+  }
+
+  // ----------------------------------------------------------- 1. elegir
+  showPick() {
+    this.step = 'pick';
+    const ai = !!this.sample;
+    const input = h('input', { type: 'file', id: 'imp-file', hidden: true });
+    input.addEventListener('change', () => input.files[0] && this.handleFile(input.files[0]));
+    const drop = h('label', { class: 'imp-drop', for: 'imp-file' },
+      h('strong', {}, 'Suelta aquí el archivo o toca para elegirlo'),
+      h('span', {}, ai
+        ? 'CADe SIMU (.cad), FrigoSIMU (.json), una foto o captura del esquema, un PDF o el archivo de otro programa.'
+        : 'CADe SIMU (.cad) o FrigoSIMU (.json).'),
+      input);
+    drop.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      drop.classList.add('over');
+    });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault();
+      drop.classList.remove('over');
+      const f = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) this.handleFile(f);
+    });
+    const kids = [
+      h('p', { class: 'imp-intro' }, 'Abre un esquema eléctrico tuyo y ponlo a funcionar con la cámara frigorífica: cada motor, termostato o presostato mueve el circuito frigorífico igual que en el esquema.'),
+      drop,
+    ];
+    if (ai) {
+      const ta = h('textarea', { id: 'imp-desc', rows: 3, placeholder: 'Ejemplo: cámara con marcha-paro, termostato, presostatos de alta y baja, ventilador del evaporador que para al abrir la puerta y luz.' });
+      kids.push(
+        h('div', { class: 'imp-or' }, 'o descríbelo con palabras'),
+        h('label', { class: 'field', for: 'imp-desc' }, ta),
+        h('div', { class: 'row' }, h('button', { class: 'btn primary', type: 'button', onclick: () => ta.value.trim() && this.fromAI({ kind: 'text', description: ta.value.trim() }) }, 'Dibujar el esquema con Claude')),
+        h('p', { class: 'note' }, 'Las fotos, los PDF, los archivos de otros programas y las descripciones los interpreta Claude con tu cuenta. Revisa siempre el resultado.'),
+      );
+    } else {
+      kids.push(h('p', { class: 'note' }, 'Para leer fotos, PDF o archivos de otros programas, abre FrigoSIMU en claude.ai: allí Claude interpreta el esquema.'));
+    }
+    this.frame('Abrir o importar un esquema', ...kids);
+  }
+
+  // ----------------------------------------------------------- 2. leer
+  async handleFile(file) {
+    const name = file.name || 'esquema';
+    try {
+      if (/\.json$/i.test(name)) {
+        this.close();
+        this.app.openFile(file);
+        return;
+      }
+      if (/\.cad$/i.test(name) || (await looksLikeCade(file))) {
+        const txt = new TextDecoder('windows-1252').decode(await file.arrayBuffer());
+        const res = importCadeSimu(txt, { name: name.replace(/\.cad$/i, '') });
+        this.review({ ...res, source: 'CADe SIMU', fileName: name });
+        return;
+      }
+      if (!this.sample) {
+        this.error(`No sé abrir «${name}» sin Claude. Aquí se pueden abrir archivos de CADe SIMU (.cad) y de FrigoSIMU (.json).`);
+        return;
+      }
+      if (IMG.test(name) || /^image\//.test(file.type)) {
+        await this.fromAI({ kind: 'images', images: [file], fileName: name });
+        return;
+      }
+      if (/\.pdf$/i.test(name) || file.type === 'application/pdf') {
+        this.working('Leyendo el PDF…');
+        let images;
+        try {
+          images = await pdfToImages(file, this.maxImages());
+        } catch (e) {
+          this.error(`No he podido leer el PDF (${e.message}). Haz una captura de pantalla del esquema y súbela como imagen.`);
+          return;
+        }
+        await this.fromAI({ kind: 'images', images, fileName: name });
+        return;
+      }
+      const txt = await file.text();
+      if (!txt.trim() || /[\u0000-\u0008]/.test(txt.slice(0, 2000))) {
+        this.error(`«${name}» no es un archivo de texto. Exporta el esquema a PDF o haz una captura de pantalla y súbela.`);
+        return;
+      }
+      await this.fromAI({ kind: 'file', text: condenseFile(txt), fileName: name });
+    } catch (e) {
+      this.error(e.message || String(e));
+    }
+  }
+
+  maxImages() {
+    return (this.limits && this.limits.images && this.limits.images.maxCount) || 1;
+  }
+
+  working(text, stop) {
+    this.step = 'work';
+    const kids = [h('div', { class: 'imp-work' }, h('span', { class: 'imp-spin', 'aria-hidden': 'true' }), h('p', { id: 'imp-status' }, text))];
+    if (stop) kids.push(h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => this.cancel() }, 'Parar')));
+    this.frame('Importando…', ...kids);
+  }
+
+  error(msg) {
+    this.busy = false;
+    this.frame('No se ha podido importar',
+      h('p', { class: 'imp-err' }, msg),
+      h('div', { class: 'row' }, h('button', { class: 'btn', type: 'button', onclick: () => this.showPick() }, 'Probar con otro archivo')));
+  }
+
+  async fromAI(req) {
+    const s = this.sample;
+    if (!s) return this.error('Claude no está disponible aquí.');
+    this.busy = true;
+    this.ctl = new AbortController();
+    this.working(req.kind === 'text' ? 'Claude está dibujando el esquema…' : 'Claude está leyendo el esquema… Puede tardar uno o dos minutos.', true);
+    try {
+      let images;
+      if (req.images) {
+        const max = this.maxImages();
+        images = req.images.slice(0, max);
+        if (this.limits && !this.limits.images) throw new Error('Aquí no se pueden enviar imágenes a Claude.');
+      }
+      const spec = await s.json(buildPrompt(req), { signal: this.ctl.signal, modelTier: 'complex', images, onText: () => {
+        const st = document.getElementById('imp-status');
+        if (st) st.textContent = 'Claude está escribiendo el esquema…';
+      } });
+      checkSpec(spec);
+      const res = ladderToProject(spec);
+      const notes = [...(Array.isArray(spec.notes) ? spec.notes.map(String) : []), ...res.notes];
+      this.busy = false;
+      this.review({ project: res.project, notes, check: null, texts: [], install: spec.install, source: 'Claude', fileName: req.fileName || '' });
+    } catch (e) {
+      this.busy = false;
+      if (e && e.code === 'cancelled') return;
+      const msg = {
+        not_granted: 'No has dado permiso para usar Claude en esta página.',
+        rate_limited: 'Has hecho muchas peticiones seguidas o has llegado a tu límite de uso. Prueba dentro de un rato.',
+        image_rejected: 'Claude no ha aceptado la imagen. Prueba con otra captura (PNG o JPG).',
+        invalid_json: 'Claude no ha devuelto un esquema válido. Prueba otra vez o con una imagen más nítida.',
+        refused: 'Claude no ha querido interpretar este archivo.',
+      }[e && e.code] || (e && e.message) || 'Error desconocido.';
+      this.error(msg);
+    }
+  }
+
+  // ----------------------------------------------------------- 3. revisar
+  review(res) {
+    this.step = 'review';
+    const { items, install: guess } = roleCandidates(res.project, res.texts || []);
+    let install = INSTALLS[res.install] ? res.install : guess;
+    const choices = Object.fromEntries(items.map((i) => [i.id, i.value]));
+    const n = res.project.components.filter((c) => c.type !== 'label').length;
+    const summary = h('p', { class: 'imp-sum' },
+      `${n} piezas y ${res.project.wires.length} tramos de cable${res.fileName ? ` de «${res.fileName}»` : ''}. `,
+      res.check ? (res.check.ok
+        ? h('span', { class: 'imp-ok' }, 'Conexiones comprobadas: iguales que en CADe SIMU.')
+        : h('span', { class: 'imp-bad' }, `${res.check.splits + res.check.merges} conexiones no coinciden con el archivo: revísalas en el editor.`))
+        : res.source === 'Claude' ? h('span', {}, 'Dibujado por Claude a partir de lo que ha visto: compáralo con tu esquema.') : null);
+    const notes = (res.notes || []).length ? h('ul', { class: 'imp-notes' }, res.notes.map((t) => h('li', {}, t))) : null;
+
+    const insts = h('div', { class: 'segs imp-inst', role: 'radiogroup', 'aria-label': 'Tipo de instalación' });
+    for (const [k, v] of Object.entries(INSTALLS)) {
+      const b = h('button', { type: 'button', class: `segb${k === install ? ' on' : ''}`, role: 'radio', 'aria-checked': String(k === install) }, v.label);
+      b.addEventListener('click', () => {
+        install = k;
+        for (const x of insts.children) {
+          x.classList.toggle('on', x === b);
+          x.setAttribute('aria-checked', String(x === b));
+        }
+        warn();
+      });
+      insts.append(b);
+    }
+
+    const rows = items.map((it) => {
+      const sel = h('select', { id: `imp-r-${it.id}`, 'aria-label': it.tag }, Object.entries(it.options).map(([k, l]) => h('option', { value: k, selected: k === it.value }, l)));
+      sel.addEventListener('change', () => {
+        choices[it.id] = sel.value;
+        warn();
+      });
+      return h('tr', {}, h('th', {}, h('b', {}, it.tag), h('small', {}, it.what)), h('td', {}, sel));
+    });
+    const table = rows.length
+      ? h('div', { class: 'imp-scroll' }, h('table', { class: 'imp-table' }, h('tbody', {}, rows)))
+      : h('p', { class: 'note' }, 'No hay motores, resistencias ni contactos que asignar.');
+    const warnEl = h('p', { class: 'imp-bad', hidden: true });
+    const fanEl = h('p', { class: 'note', hidden: true });
+    const warn = () => {
+      const comp = Object.entries(choices).filter(([id, v]) => v === 'compresor' && items.find((i) => i.id === id && i.kind === 'motor')).length;
+      let msg = '';
+      if (install !== 'ninguna' && !comp) msg = 'Elige qué motor es el compresor: sin compresor el circuito frigorífico no se mueve.';
+      else if (comp > 1) msg = 'Hay más de un motor marcado como compresor: se usará el que tenga tensión.';
+      warnEl.textContent = msg;
+      warnEl.hidden = !msg;
+      const vals = Object.values(choices);
+      const noFans = ['vent_evap', 'vent_cond'].filter((f) => !vals.includes(f));
+      fanEl.textContent = install !== 'ninguna' && noFans.length
+        ? `El esquema no tiene ${noFans.map((f) => (f === 'vent_evap' ? 'ventilador del evaporador' : 'ventilador del condensador')).join(' ni ')}: supondré que ${noFans.length > 1 ? 'giran' : 'gira'} (el del evaporador siempre, el del condensador con el compresor).`
+        : '';
+      fanEl.hidden = !fanEl.textContent;
+    };
+    warn();
+
+    const load = (mode) => {
+      const p = applyRoles(res.project, choices, install);
+      this.close();
+      this.app.loadImported(p, mode);
+    };
+    this.frame('Revisa cómo encaja en la cámara',
+      summary,
+      notes,
+      h('h3', {}, 'Tipo de instalación'),
+      insts,
+      h('h3', {}, 'Qué es cada pieza'),
+      h('p', { class: 'note' }, 'CADe SIMU no sabe de frío: dime qué hace cada motor y qué mide cada contacto. Lo he adivinado por las etiquetas y los textos del esquema.'),
+      table,
+      warnEl,
+      fanEl,
+      h('div', { class: 'row imp-actions' },
+        h('button', { class: 'btn primary', type: 'button', onclick: () => load('sim') }, 'Cargar y ponerlo en marcha'),
+        h('button', { class: 'btn', type: 'button', onclick: () => load('edit') }, 'Abrir en el editor'),
+        h('button', { class: 'btn', type: 'button', onclick: () => this.cancel() }, 'Cancelar')),
+    );
+  }
+}
+
+async function looksLikeCade(file) {
+  if (file.size > 5e6) return false;
+  const head = new TextDecoder('latin1').decode(await file.slice(0, 16).arrayBuffer());
+  return /^\s*CADe_SIMU/.test(head);
+}
+
+// PDF → imágenes con pdf.js (se carga solo cuando hace falta).
+let pdfjsReady = null;
+function loadScript(src) {
+  return new Promise((ok, ko) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload = ok;
+    s.onerror = () => ko(new Error('no se ha podido cargar el lector de PDF'));
+    document.head.append(s);
+  });
+}
+async function pdfToImages(file, max) {
+  if (!pdfjsReady) {
+    pdfjsReady = (async () => {
+      await loadScript(`${PDFJS}pdf.min.js`);
+      await loadScript(`${PDFJS}pdf.worker.min.js`);
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = `${PDFJS}pdf.worker.min.js`;
+      return window.pdfjsLib;
+    })();
+  }
+  let lib;
+  try {
+    lib = await pdfjsReady;
+  } catch (e) {
+    pdfjsReady = null;
+    throw e;
+  }
+  const doc = await lib.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const out = [];
+  const pages = Math.min(doc.numPages, Math.max(1, max));
+  for (let i = 1; i <= pages; i++) {
+    const page = await doc.getPage(i);
+    const vp0 = page.getViewport({ scale: 1 });
+    const scale = Math.min(3, 2200 / Math.max(vp0.width, vp0.height));
+    const vp = page.getViewport({ scale });
+    const cv = document.createElement('canvas');
+    cv.width = Math.round(vp.width);
+    cv.height = Math.round(vp.height);
+    const g = cv.getContext('2d');
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, cv.width, cv.height);
+    await page.render({ canvasContext: g, viewport: vp }).promise;
+    out.push(await new Promise((ok) => cv.toBlob(ok, 'image/png')));
+  }
+  if (!out.length) throw new Error('el PDF no tiene páginas');
+  return out;
+}
+
+
+return { ImportDialog };
+})();
+
 // ---- js/main.js
 __mods["js/main.js"] = (() => {
 // FrigoSIMU — aplicación principal.
@@ -8644,6 +10011,7 @@ const { Readings, readingVM } = __mods["js/ui/readings.js"];
 const { partCard, compCard } = __mods["js/ui/partcards.js"];
 const { DiagPage } = __mods["js/ui/diagpage.js"];
 const { Practice } = __mods["js/ui/practice.js"];
+const { ImportDialog } = __mods["js/ui/importdlg.js"];
 const { EXAMPLES, buildExample } = __mods["js/examples.js"];
 
 const LS_PROJECT = 'frigosimu.project';
@@ -8838,6 +10206,7 @@ class App {
     this.readings = new Readings(this.$('readings'), { onPart: (part, e) => this.openPart(part, e) });
     this.diagPage = new DiagPage(this.$('diagpage'), this);
     this.practice = new Practice(this, this.$('practice'));
+    this.importer = new ImportDialog(this);
 
     this.buildPalette();
     this.bindToolbar();
@@ -8991,6 +10360,16 @@ class App {
     return this.project.refrig.enabled !== false;
   }
 
+  /** Carga un esquema importado (CADe SIMU, foto, PDF…) ya revisado. */
+  loadImported(p, mode = 'sim') {
+    this.setMode(mode === 'edit' ? 'edit' : 'sim');
+    this.loadProject(p, { undoable: true });
+    if (mode !== 'edit') {
+      const comp = p.components.some((c) => c.props && c.props.func === 'compresor');
+      if (p.refrig.enabled !== false && !comp) this.snack('No hay ningún motor marcado como compresor: el circuito frigorífico no se moverá.');
+    }
+  }
+
   // ============================================================ simulación
   startSim({ quiet = false } = {}) {
     this.cards.close();
@@ -9029,8 +10408,14 @@ class App {
     if (this.refrigOn()) {
       const names = { compresor: 'compresor', vent_evap: 'ventilador del evaporador', vent_cond: 'ventilador del condensador' };
       const missing = Object.keys(names).filter((fn) => !this.project.components.some((c) => c.props.func === fn));
-      if (missing.length) {
-        this.log('warn', `El esquema no tiene ${missing.map((m) => names[m]).join(', ')}. En «Editar esquema» asigna la función frigorífica a los motores para que el circuito frigorífico los tenga en cuenta.`, 0);
+      if (missing.includes('compresor')) {
+        this.log('warn', 'El esquema no tiene ningún motor con la función «compresor»: el circuito frigorífico no se moverá. Asígnala en «Editar esquema» (propiedades del motor).', 0);
+      }
+      const fans = missing.filter((m) => m !== 'compresor');
+      if (fans.length) {
+        this.log('info', this.project.refrig.assumeFans !== false
+          ? `El esquema no tiene ${fans.map((m) => names[m]).join(' ni ')}: se supone que ${fans.length > 1 ? 'giran' : 'gira'} (el del evaporador siempre, el del condensador con el compresor).`
+          : `El esquema no tiene ${fans.map((m) => names[m]).join(' ni ')} y no se suponen: la batería y el condensador solo intercambian calor por convección natural.`, 0);
       }
       this.pressMarcha(quiet);
     } else {
@@ -9425,6 +10810,7 @@ class App {
         const m = this.sim.fridge;
         if (RESIZE.has(key)) m.setParams({ ...m.p, [key]: value });
         else m.p[key] = value;
+        if (key === 'assumeFans') this.sim.io = this.sim._io();
       }
     };
     if (this.sim && this.refrigOn() && PREDICT_REFRIG.has(key)) {
@@ -10105,7 +11491,17 @@ class App {
         this.loadProject(blankProject(v === 'blank-3f' ? '3f' : '1f'), { undoable: true });
       } else if (v) this.loadProject(buildExample(v), { undoable: true });
     });
-    $('btn-open').addEventListener('click', () => $('file-input').click());
+    $('btn-open').addEventListener('click', () => this.importer.open());
+    // Arrastrar un archivo sobre la página también lo importa.
+    document.addEventListener('dragover', (e) => {
+      if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) e.preventDefault();
+    });
+    document.addEventListener('drop', (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f || (e.target.closest && e.target.closest('.modal'))) return;
+      e.preventDefault();
+      this.importer.open(f);
+    });
     $('file-input').addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) this.openFile(f);

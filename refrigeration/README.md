@@ -86,6 +86,32 @@ carrera de puerta leen el circuito frigorífico. En *Instalación frigorífica*
 se elige refrigerante, potencia, expansión y averías de partida, o se quita el
 circuito frigorífico para simular solo el esquema eléctrico.
 
+## Importar tus esquemas
+
+Con **Importar** (o arrastrando el archivo a la página) puedes poner a
+funcionar con la cámara los esquemas que ya tienes:
+
+- **CADe SIMU (.cad):** se lee el archivo tal cual. Cada pieza queda donde la
+  pusiste, con tus etiquetas, tus textos y tus cables, y se comprueba que
+  todas las conexiones son iguales que en el original. Se reconocen
+  alimentaciones, magnetotérmicos, fusibles, contactores y sus contactos,
+  relés térmicos, temporizadores, pulsadores, interruptores, finales de
+  carrera, bobinas, pilotos, electroválvulas y motores. Los símbolos que no
+  se reconocen se avisan.
+- **Una foto, una captura, un PDF o el archivo de otro programa**
+  (QElectroTech, AutoCAD…), **o una descripción con palabras:** en la versión
+  publicada en claude.ai, Claude interpreta el esquema y FrigoSIMU lo dibuja en
+  escalera. Revisa siempre el resultado.
+
+Como CADe SIMU no sabe de frío, antes de cargarlo se revisa qué es cada pieza
+en la instalación: qué motor es el compresor y cuáles los ventiladores, si
+una resistencia es de desescarche y si un pulsador, interruptor o contacto sin
+bobina es en realidad el termostato, un presostato o el final de carrera de la
+puerta. FrigoSIMU lo adivina por las etiquetas y los textos del esquema, y
+elige el tipo de instalación (conservación, congelados o armario). Si el
+esquema no dibuja los ventiladores, se supone que giran (se puede cambiar en
+*Ajustes y averías*).
+
 ## Ejemplos incluidos
 
 - **Cámara de conservación +2 °C** (R404A, VET): marcha/paro con
@@ -155,6 +181,7 @@ js/link.js                   acoplamiento eléctrico ↔ frigorífico
 js/narrator.js               explicaciones de lo que pasa
 js/diagnose.js               diagnóstico a partir de lecturas
 js/ui/                       lecturas, tarjetas, paneles, gráficas, diagnóstico y práctica
+js/import/                   importar: CADe SIMU (.cad), dibujo en escalera, funciones frigoríficas y petición a Claude
 js/examples.js               esquemas de ejemplo
 tools/gen_refrigerants.py    regenera js/refrig/refdata.js
 build.mjs                    genera dist/FrigoSIMU.html
@@ -162,9 +189,9 @@ test/                        pruebas (node --test)
 ```
 
 ```sh
-npm test         # pruebas del modelo, del motor eléctrico, de los ejemplos y del diagnóstico
+npm test         # pruebas del modelo, del motor eléctrico, de los ejemplos, del diagnóstico y de la importación
 npm run build    # regenera dist/FrigoSIMU.html
 ```
 
-Los esquemas se guardan como `.json` (*Guardar* / *Abrir*) y el último esquema
-se recuerda en el navegador.
+Los esquemas se guardan como `.json` (*Guardar* / *Importar*) y el último
+esquema se recuerda en el navegador.

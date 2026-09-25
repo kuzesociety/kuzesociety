@@ -206,6 +206,7 @@ export class Panels {
       bind(seg('Expansión', { txv: 'VET + recipiente', capilar: 'Tubo capilar' }, P().expansion, (v) => app.setRefrig('expansion', v)), () => P().expansion),
       bind(stepper('Recalentamiento de la VET', P().shSet, { step: 0.5, min: 2, max: 15, unit: 'K' }, (v) => app.setRefrig('shSet', v)), () => P().shSet),
       bind(stepper('Resistencia de desescarche', P().heaterKW, { step: 0.1, min: 0.1, max: 20, unit: 'kW' }, (v) => app.setRefrig('heaterKW', v)), () => P().heaterKW),
+      bind(toggle('Si el esquema no tiene ventiladores, suponer que giran', P().assumeFans !== false, (v) => app.setRefrig('assumeFans', v)), () => P().assumeFans !== false),
     );
 
     const cols = [col1, col2];

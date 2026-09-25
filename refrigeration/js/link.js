@@ -75,11 +75,26 @@ export class CoupledSim {
       refrig: () => (this.refrigOn ? this.fridge.out : null),
       setDoor: (open) => this.setDoor(open),
     });
-    this.io = ioFromElec(this.elec);
+    this.io = this._io();
     this.time = 0;
     this.elec.tick(0);
     this.elec.solve();
-    this.io = ioFromElec(this.elec);
+    this.io = this._io();
+  }
+
+  /**
+   * Salidas del esquema para el circuito frigorífico. Si el esquema no tiene
+   * ventiladores (muchos esquemas de clase solo dibujan el compresor), se
+   * supone que el del evaporador gira siempre y el del condensador con el
+   * compresor, salvo que la instalación diga lo contrario.
+   */
+  _io() {
+    const io = ioFromElec(this.elec);
+    if (this.project.refrig && this.project.refrig.assumeFans !== false) {
+      if (!io.present.evapFan) io.evapFan = !this.elec.fault;
+      if (!io.present.condFan) io.condFan = io.comp === 'run';
+    }
+    return io;
   }
 
   setDoor(open) {
@@ -97,7 +112,7 @@ export class CoupledSim {
       this.elec.tick(h);
       if (this.elec.dirty) {
         this.elec.solve();
-        this.io = ioFromElec(this.elec);
+        this.io = this._io();
         changed = true;
       }
       if (this.refrigOn) this.fridge.step(h, this.io);
@@ -112,7 +127,7 @@ export class CoupledSim {
   resolve() {
     if (this.elec.dirty) {
       this.elec.solve();
-      this.io = ioFromElec(this.elec);
+      this.io = this._io();
       return true;
     }
     return false;

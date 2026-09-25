@@ -32,6 +32,7 @@ export const DEFAULT_REFRIG = {
   internalKW: 0.08, // cargas internas fijas (kW)
   heaterKW: 1.5, // potencia de la resistencia de desescarche (kW)
   humidity: 1, // factor de formación de escarcha
+  assumeFans: true, // si el esquema no tiene ventiladores, se supone que giran
 };
 
 export const DEFAULT_FAULTS = {

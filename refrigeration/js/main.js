@@ -24,6 +24,7 @@ import { Readings, readingVM } from './ui/readings.js';
 import { partCard, compCard } from './ui/partcards.js';
 import { DiagPage } from './ui/diagpage.js';
 import { Practice } from './ui/practice.js';
+import { ImportDialog } from './ui/importdlg.js';
 import { EXAMPLES, buildExample } from './examples.js';
 
 const LS_PROJECT = 'frigosimu.project';
@@ -218,6 +219,7 @@ class App {
     this.readings = new Readings(this.$('readings'), { onPart: (part, e) => this.openPart(part, e) });
     this.diagPage = new DiagPage(this.$('diagpage'), this);
     this.practice = new Practice(this, this.$('practice'));
+    this.importer = new ImportDialog(this);
 
     this.buildPalette();
     this.bindToolbar();
@@ -371,6 +373,16 @@ class App {
     return this.project.refrig.enabled !== false;
   }
 
+  /** Carga un esquema importado (CADe SIMU, foto, PDF…) ya revisado. */
+  loadImported(p, mode = 'sim') {
+    this.setMode(mode === 'edit' ? 'edit' : 'sim');
+    this.loadProject(p, { undoable: true });
+    if (mode !== 'edit') {
+      const comp = p.components.some((c) => c.props && c.props.func === 'compresor');
+      if (p.refrig.enabled !== false && !comp) this.snack('No hay ningún motor marcado como compresor: el circuito frigorífico no se moverá.');
+    }
+  }
+
   // ============================================================ simulación
   startSim({ quiet = false } = {}) {
     this.cards.close();
@@ -409,8 +421,14 @@ class App {
     if (this.refrigOn()) {
       const names = { compresor: 'compresor', vent_evap: 'ventilador del evaporador', vent_cond: 'ventilador del condensador' };
       const missing = Object.keys(names).filter((fn) => !this.project.components.some((c) => c.props.func === fn));
-      if (missing.length) {
-        this.log('warn', `El esquema no tiene ${missing.map((m) => names[m]).join(', ')}. En «Editar esquema» asigna la función frigorífica a los motores para que el circuito frigorífico los tenga en cuenta.`, 0);
+      if (missing.includes('compresor')) {
+        this.log('warn', 'El esquema no tiene ningún motor con la función «compresor»: el circuito frigorífico no se moverá. Asígnala en «Editar esquema» (propiedades del motor).', 0);
+      }
+      const fans = missing.filter((m) => m !== 'compresor');
+      if (fans.length) {
+        this.log('info', this.project.refrig.assumeFans !== false
+          ? `El esquema no tiene ${fans.map((m) => names[m]).join(' ni ')}: se supone que ${fans.length > 1 ? 'giran' : 'gira'} (el del evaporador siempre, el del condensador con el compresor).`
+          : `El esquema no tiene ${fans.map((m) => names[m]).join(' ni ')} y no se suponen: la batería y el condensador solo intercambian calor por convección natural.`, 0);
       }
       this.pressMarcha(quiet);
     } else {
@@ -805,6 +823,7 @@ class App {
         const m = this.sim.fridge;
         if (RESIZE.has(key)) m.setParams({ ...m.p, [key]: value });
         else m.p[key] = value;
+        if (key === 'assumeFans') this.sim.io = this.sim._io();
       }
     };
     if (this.sim && this.refrigOn() && PREDICT_REFRIG.has(key)) {
@@ -1485,7 +1504,17 @@ class App {
         this.loadProject(blankProject(v === 'blank-3f' ? '3f' : '1f'), { undoable: true });
       } else if (v) this.loadProject(buildExample(v), { undoable: true });
     });
-    $('btn-open').addEventListener('click', () => $('file-input').click());
+    $('btn-open').addEventListener('click', () => this.importer.open());
+    // Arrastrar un archivo sobre la página también lo importa.
+    document.addEventListener('dragover', (e) => {
+      if (e.dataTransfer && [...(e.dataTransfer.types || [])].includes('Files')) e.preventDefault();
+    });
+    document.addEventListener('drop', (e) => {
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!f || (e.target.closest && e.target.closest('.modal'))) return;
+      e.preventDefault();
+      this.importer.open(f);
+    });
     $('file-input').addEventListener('change', (e) => {
       const f = e.target.files && e.target.files[0];
       if (f) this.openFile(f);

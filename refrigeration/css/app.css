@@ -747,6 +747,82 @@ button, select, input, textarea { font: inherit; color: inherit; }
 .btn.door-btn.open { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-color: var(--warn); color: var(--ink); }
 .note { font-size: 12px; color: var(--muted); margin: 0; }
 
+/* Importar un esquema */
+.modal-back {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--ink) 38%, transparent);
+}
+.modal {
+  width: min(680px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-lg);
+}
+.modal-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.modal-head h2 { margin: 0; font: 600 20px/1.2 var(--font-display); letter-spacing: 0.01em; text-wrap: balance; }
+.modal-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 16px 18px; }
+.modal-body h3 { margin: 4px 0 0; font: 600 13px var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.imp-intro { margin: 0; color: var(--ink-2); line-height: 1.5; }
+.imp-drop {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 26px 16px;
+  border: 2px dashed var(--line-strong);
+  border-radius: 12px;
+  background: var(--panel-2);
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.imp-drop strong { font-size: 15px; }
+.imp-drop span { font-size: 13px; color: var(--muted); max-width: 46ch; }
+.imp-drop:hover, .imp-drop.over { border-color: var(--accent); background: var(--accent-soft); }
+.imp-drop:focus-within { outline: 2px solid var(--focus); outline-offset: 2px; }
+.imp-or { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; }
+.imp-or::before, .imp-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.modal textarea { width: 100%; resize: vertical; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: var(--panel); }
+.imp-work { display: flex; align-items: center; gap: 12px; padding: 18px 4px; }
+.imp-work p { margin: 0; }
+.imp-spin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid var(--line); border-top-color: var(--accent); animation: imp-spin 0.9s linear infinite; flex: none; }
+@keyframes imp-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .imp-spin { animation-duration: 3s; } }
+.imp-err { margin: 0; color: var(--bad); }
+.imp-sum { margin: 0; line-height: 1.5; }
+.imp-ok { color: var(--ok); font-weight: 600; }
+.imp-bad { margin: 0; color: var(--bad); font-weight: 600; }
+.imp-notes { margin: 0; padding-left: 20px; font-size: 13px; color: var(--ink-2); }
+.imp-inst { flex-wrap: wrap; }
+.imp-scroll { overflow-x: auto; }
+.imp-table { width: 100%; border-collapse: collapse; }
+.imp-table th, .imp-table td { padding: 6px 4px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.imp-table th { font-weight: 400; }
+.imp-table th b { display: block; font-weight: 600; }
+.imp-table th small { color: var(--muted); font-size: 12px; }
+.imp-table select { width: 100%; min-width: 190px; height: 32px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); padding: 0 6px; }
+.imp-actions { margin-top: 4px; }
+@media (max-width: 560px) {
+  .modal-back { padding: 8px; padding-top: calc(8px + env(safe-area-inset-top, 0px)); padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+  .modal-head h2 { font-size: 18px; }
+  .imp-table tr { display: flex; flex-direction: column; gap: 4px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .imp-table th, .imp-table td { display: block; padding: 0; border: 0; }
+  .imp-table th b { display: inline; margin-right: 6px; }
+  .imp-table select { min-width: 0; }
+  .imp-actions .btn { flex: 1 1 auto; justify-content: center; }
+}
+
 /* Aviso flotante */
 .snack {
   position: fixed;
