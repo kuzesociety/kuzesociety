@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>FrigoSIMU</title>
+<meta name="description" content="Simulador de esquemas eléctricos (estilo CADe SIMU) con el circuito frigorífico animado: presiones, temperaturas y flujo en cada línea.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23ad5724'/%3E%3Cpath d='M12 3.5v17M4.6 7.75l14.8 8.5M4.6 16.25l14.8-8.5' stroke='white' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5.5v13l11-6.5z" fill="currentColor"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M7 5h3.5v14H7zM13.5 5H17v14h-3.5z" fill="currentColor"/></symbol>
+  <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 7 4 12l5 5M4.5 12H15a5 5 0 0 1 0 10h-2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="m15 7 5 5-5 5M19.5 12H9a5 5 0 0 0 0 10h2" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-cursor" viewBox="0 0 24 24"><path d="M6 3.5 18.5 12l-5.6 1.3 3.4 6.2-2.3 1.2-3.4-6.2L6 18.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-wire" viewBox="0 0 24 24"><path d="M4 19h6V6h10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle cx="4" cy="19" r="2" fill="currentColor"/><circle cx="20" cy="6" r="2" fill="currentColor"/></symbol>
+  <symbol id="i-rotate" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95M19 4v4.5h-4.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-open" viewBox="0 0 24 24"><path d="M3.5 7.5V18a1 1 0 0 0 1 1h15a1 1 0 0 0 1-1V9.5a1 1 0 0 0-1-1H12l-2-2.5H4.5a1 1 0 0 0-1 1z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+  <symbol id="i-save" viewBox="0 0 24 24"><path d="M12 4v11m0 0 4.5-4.5M12 15l-4.5-4.5M5 19h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+  <symbol id="i-theme" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor"/></symbol>
+  <symbol id="i-snow" viewBox="0 0 24 24"><path d="M12 2.5v19M3.8 7.25l16.4 9.5M3.8 16.75l16.4-9.5M9 4.5l3 2.5 3-2.5M9 19.5l3-2.5 3 2.5M4.2 11l2.8 1-.5-3.2M19.8 13l-2.8-1 .5 3.2M4.2 13l2.8-1-.5 3.2M19.8 11 17 12l.5-3.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-parts" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.8"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M16.75 13.5v6.5M13.5 16.75H20" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+</svg>
+
+<div id="app" class="app" data-view="elec">
+  <header class="topbar">
+    <div class="brand" title="FrigoSIMU">
+      <svg class="brand-mark"><use href="#i-snow"/></svg>
+      <span class="brand-name">Frigo<b>SIMU</b></span>
+    </div>
+
+    <div class="tb-group file-group" role="group" aria-label="Archivo">
+      <label class="select-btn" title="Abrir un ejemplo o un esquema en blanco">
+        <span class="sr-only">Ejemplos</span>
+        <select id="sel-example"></select>
+      </label>
+      <button class="btn icon" id="btn-open" title="Abrir un esquema (.json)"><svg><use href="#i-open"/></svg><span class="lbl">Abrir</span></button>
+      <button class="btn icon" id="btn-save" title="Descargar el esquema (.json)"><svg><use href="#i-save"/></svg><span class="lbl">Guardar</span></button>
+      <input type="file" id="file-input" accept=".json,application/json" hidden>
+    </div>
+
+    <div class="tb-group edit-only" role="group" aria-label="Edición">
+      <button class="btn icon" id="btn-undo" title="Deshacer (Ctrl+Z)"><svg><use href="#i-undo"/></svg></button>
+      <button class="btn icon" id="btn-redo" title="Rehacer (Ctrl+Y)"><svg><use href="#i-redo"/></svg></button>
+      <span class="tb-sep"></span>
+      <button class="btn icon tool" id="tool-select" data-tool="select" title="Seleccionar y mover (V)"><svg><use href="#i-cursor"/></svg></button>
+      <button class="btn icon tool" id="tool-wire" data-tool="wire" title="Dibujar cable (W)"><svg><use href="#i-wire"/></svg><span class="lbl">Cable</span></button>
+      <button class="btn icon" id="btn-rotate" title="Girar 90° (R)"><svg><use href="#i-rotate"/></svg></button>
+      <button class="btn icon" id="btn-delete" title="Borrar (Supr)"><svg><use href="#i-trash"/></svg></button>
+    </div>
+
+    <span class="tb-break" aria-hidden="true"></span>
+    <div class="tb-group sim-group" role="group" aria-label="Simulación">
+      <button class="btn primary" id="btn-sim" title="Simular / volver a editar"><svg><use href="#i-play"/></svg><span>Simular</span></button>
+      <button class="btn icon sim-only" id="btn-pause" title="Pausa (P)"><svg><use href="#i-pause"/></svg></button>
+      <label class="speed" title="Velocidad de la simulación">
+        <span class="sr-only">Velocidad</span>
+        <select id="sel-speed">
+          <option value="1">×1</option>
+          <option value="5">×5</option>
+          <option value="10">×10</option>
+          <option value="20" selected>×20</option>
+          <option value="60">×60</option>
+          <option value="120">×120</option>
+          <option value="300">×300</option>
+        </select>
+      </label>
+      <output class="sim-clock" id="sim-clock" title="Tiempo simulado">0:00:00</output>
+    </div>
+
+    <div class="tb-group tb-right" role="group" aria-label="Vista">
+      <button class="btn toggle" id="btn-fridge" aria-pressed="true" title="Asociar un circuito frigorífico a este esquema"><svg><use href="#i-snow"/></svg><span class="lbl">Circuito frigorífico</span></button>
+      <button class="btn icon" id="btn-theme" title="Tema claro / oscuro"><svg><use href="#i-theme"/></svg></button>
+    </div>
+  </header>
+
+  <nav class="viewtabs" aria-label="Vista">
+    <button data-view="elec" class="on">Eléctrico</button>
+    <button data-view="fridge">Frigorífico</button>
+    <button class="edit-only" id="btn-parts-mobile"><svg><use href="#i-parts"/></svg>Componentes</button>
+  </nav>
+
+  <aside class="palette" id="palette" aria-label="Componentes"></aside>
+
+  <main class="stage" id="stage">
+    <section class="pane pane-elec" aria-label="Esquema eléctrico">
+      <div class="pane-head">
+        <h2>Esquema eléctrico</h2>
+        <span class="mode-chip" id="mode-chip">EDICIÓN</span>
+        <span class="pane-spacer"></span>
+        <button class="btn icon small" id="btn-zoom-out" title="Alejar (−)"><svg><use href="#i-minus"/></svg></button>
+        <button class="btn icon small" id="btn-zoom-in" title="Acercar (+)"><svg><use href="#i-plus"/></svg></button>
+        <button class="btn icon small" id="btn-fit" title="Ver todo (F)"><svg><use href="#i-fit"/></svg></button>
+      </div>
+      <div class="canvas-wrap">
+        <svg id="elec-svg" class="elec" role="img" aria-label="Esquema eléctrico"></svg>
+        <div class="banner" id="elec-banner" hidden></div>
+      </div>
+      <div class="hint" id="elec-hint"></div>
+    </section>
+    <div class="splitter" id="splitter" role="separator" aria-orientation="vertical" tabindex="0" title="Arrastra para repartir el espacio"></div>
+    <section class="pane pane-fridge" aria-label="Circuito frigorífico">
+      <div class="pane-head">
+        <h2>Circuito frigorífico</h2>
+        <div class="chips" id="chips"></div>
+      </div>
+      <div class="canvas-wrap fridge-wrap">
+        <svg id="fridge-svg" class="fridge" role="img" aria-label="Circuito frigorífico animado"></svg>
+        <div class="toast" id="toast" aria-live="polite" hidden></div>
+        <div class="fridge-off" id="fridge-off" hidden>
+          <p>Este esquema no tiene circuito frigorífico asociado.</p>
+          <button class="btn primary" id="btn-fridge-on"><svg><use href="#i-snow"/></svg><span>Es un circuito frigorífico</span></button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <section class="dock" id="dock">
+    <div class="dock-resize" id="dock-resize" title="Arrastra para cambiar la altura"></div>
+    <div class="tabs" role="tablist">
+      <button role="tab" data-tab="props" aria-selected="true">Propiedades</button>
+      <button role="tab" data-tab="room" aria-selected="false">Cámara y averías</button>
+      <button role="tab" data-tab="chart" aria-selected="false">Gráficas</button>
+      <button role="tab" data-tab="ph" aria-selected="false">Diagrama P-h</button>
+      <button role="tab" data-tab="diag" aria-selected="false">Diagnóstico</button>
+      <button role="tab" data-tab="log" aria-selected="false">Registro <span class="badge" id="log-badge" hidden></span></button>
+      <span class="pane-spacer"></span>
+      <button class="btn icon small" id="btn-dock" title="Plegar / desplegar el panel"><svg><use href="#i-chev"/></svg></button>
+    </div>
+    <div class="panels">
+      <div class="panel" data-panel="props" id="panel-props"></div>
+      <div class="panel" data-panel="room" id="panel-room" hidden></div>
+      <div class="panel chart-panel" data-panel="chart" hidden>
+        <div class="chart-tools">
+          <span>Ventana:</span>
+          <button class="seg" data-win="900">15 min</button>
+          <button class="seg on" data-win="1800">30 min</button>
+          <button class="seg" data-win="3600">1 h</button>
+          <button class="seg" data-win="14400">4 h</button>
+          <span class="chart-legend"><i class="lg-run"></i>compresor en marcha <i class="lg-heat"></i>desescarche <i class="lg-door"></i>puerta abierta</span>
+        </div>
+        <canvas id="chart"></canvas>
+      </div>
+      <div class="panel chart-panel" data-panel="ph" hidden><canvas id="ph"></canvas></div>
+      <div class="panel" data-panel="diag" id="panel-diag" hidden></div>
+      <div class="panel" data-panel="log" hidden>
+        <div class="log-tools">
+          <label><input type="checkbox" id="log-only-explain"> Solo explicaciones del circuito frigorífico</label>
+          <button class="btn small" id="btn-log-clear">Borrar registro</button>
+        </div>
+        <ol class="log" id="log"></ol>
+      </div>
+    </div>
+  </section>
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
