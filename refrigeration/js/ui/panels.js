@@ -1,35 +1,12 @@
-// Paneles inferiores: propiedades, cámara/averías, diagnóstico y registro.
+// Paneles inferiores: propiedades (editor), ajustes de la instalación y
+// averías, y registro.
 
 import { TYPES } from '../elec/components.js';
-import { REFRIGERANTS, REFRIGERANT_IDS } from '../refrig/refrigerants.js';
-import { DEFAULT_REFRIG, DEFAULT_FAULTS } from '../refrig/model.js';
-import { diagnose } from '../narrator.js';
+import { REFRIGERANTS, SIM_REFRIGERANT_IDS } from '../refrig/refrigerants.js';
+import { h, fmt, clockText } from './dom.js';
+import { stepper, slider, toggle, seg, select, section } from './cards.js';
 
-export function h(tag, attrs = {}, ...kids) {
-  const e = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs || {})) {
-    if (v === undefined || v === null || v === false) continue;
-    if (k === 'class') e.className = v;
-    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
-    else if (k === 'html') e.innerHTML = v;
-    else if (v === true) e.setAttribute(k, '');
-    else e.setAttribute(k, v);
-  }
-  for (const kid of kids.flat()) {
-    if (kid === null || kid === undefined || kid === false) continue;
-    e.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
-  }
-  return e;
-}
-
-const fmt = (v, d = 1) => (Number.isFinite(v) ? v.toLocaleString('es-ES', { minimumFractionDigits: d, maximumFractionDigits: d }) : '—');
-
-export function clockText(t) {
-  const s = Math.floor(t);
-  return `${Math.floor(s / 3600)}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
-}
-
-const DESCRIPTIONS = {
+export const DESCRIPTIONS = {
   supply3: 'Red trifásica: L1, L2 y L3 a 400 V entre fases y N (230 V fase-neutro).',
   supply1: 'Red monofásica de 230 V (L y N).',
   bus: 'Borne suelto de una fase o del neutro. Útil para las barras del circuito de mando.',
@@ -71,8 +48,6 @@ export class Panels {
   constructor(app) {
     this.app = app;
     this.props = document.getElementById('panel-props');
-    this.room = document.getElementById('panel-room');
-    this.diag = document.getElementById('panel-diag');
     this.logEl = document.getElementById('log');
     this.logOnly = document.getElementById('log-only-explain');
     this.entries = [];
@@ -180,94 +155,93 @@ export class Panels {
     this.liveBox.textContent = liveText(app.sim, c);
   }
 
-  // ------------------------------------------------------- cámara y averías
-  renderRoom() {
+  // ------------------------------------------- instalación y averías
+  /**
+   * Ajustes de la instalación frigorífica y averías. Sirve para la pestaña
+   * del simulador (cambios en vivo) y para la del editor (valores de partida).
+   */
+  renderRoom(el, { edit = false } = {}) {
     const { app } = this;
-    const el = this.room;
     el.innerHTML = '';
-    const P = { ...DEFAULT_REFRIG, ...(app.project.refrig || {}) };
-    const F = { ...DEFAULT_FAULTS, ...(app.project.faults || {}) };
-    const sim = !!app.sim;
-
-    const door = h('button', { class: 'btn door-btn', id: 'room-door', onclick: () => app.toggleDoor() }, 'Abrir la puerta');
-    this.doorBtn = door;
-    const tamb = rangeField('room-tamb', 'Temperatura exterior', P.Tamb, -5, 45, 1, '°C', (v) => app.setRefrig('Tamb', v));
-    const load = h('button', { class: 'btn', id: 'room-load', disabled: !sim, onclick: () => app.addProductLoad() }, 'Meter género caliente');
-    const col1 = h('div', { class: 'stack' },
-      h('h4', {}, 'Cámara'),
-      h('div', { class: 'row' }, door, load),
-      tamb,
-      h('p', { class: 'note' }, 'La puerta también se abre haciendo clic en ella en el dibujo o en un contacto de puerta del esquema.'),
-    );
-
-    const refSel = selectField('room-ref', 'Refrigerante', P.refrigerant, Object.fromEntries(REFRIGERANT_IDS.map((id) => [id, REFRIGERANTS[id].label])), (v) => app.setRefrig('refrigerant', v), sim);
-    const capF = numField('room-cap', 'Potencia frigorífica (kW a −10/+40 °C)', P.capacityKW, 0.2, 50, 0.1, (v) => app.setRefrig('capacityKW', v), sim);
-    const expSel = selectField('room-exp', 'Expansión', P.expansion, { txv: 'Válvula termostática (VET) + recipiente', capilar: 'Tubo capilar (sin recipiente)' }, (v) => app.setRefrig('expansion', v), sim);
-    const shF = numField('room-sh', 'Recalentamiento de la VET (K)', P.shSet, 2, 15, 0.5, (v) => app.setRefrig('shSet', v), false);
-    const t0 = numField('room-t0', 'Temperatura inicial de la cámara (°C)', P.TroomInit, -30, 35, 1, (v) => app.setRefrig('TroomInit', v), sim);
-    const heat = numField('room-heat', 'Resistencia de desescarche (kW)', P.heaterKW, 0.1, 20, 0.1, (v) => app.setRefrig('heaterKW', v), sim);
-    const col2 = h('div', { class: 'stack' },
-      h('h4', {}, 'Instalación'),
-      refSel, capF, expSel, shF, t0, heat,
-      sim && h('p', { class: 'note' }, 'Para cambiar refrigerante, potencia o expansión, detén la simulación.'),
-    );
-
-    const fr = (key, label, min, max, step, unit, map = (v) => v, unmap = (v) => v) =>
-      rangeField(`f-${key}`, label, unmap(F[key]), min, max, step, unit, (v) => app.setFault(key, map(v)));
-    const chk = (key, label) => {
-      const i = h('input', { type: 'checkbox', id: `f-${key}`, checked: !!F[key] });
-      i.addEventListener('change', () => app.setFault(key, i.checked));
-      return h('label', { class: 'field check', for: `f-${key}` }, i, label);
+    const P = () => app.params();
+    const F = () => app.faults();
+    const sync = [];
+    const bind = (ctl, get) => {
+      sync.push({ ctl, get, last: get() });
+      return ctl;
     };
-    const txv = selectField('f-txv', 'Válvula de expansión', F.txv, { ok: 'Correcta', cerrada: 'Bloqueada casi cerrada / bulbo descargado', abierta: 'Bloqueada abierta' }, (v) => app.setFault('txv', v), false);
-    const col3 = h('div', { class: 'stack' },
-      h('h4', {}, 'Averías'),
-      fr('chargePct', 'Carga de refrigerante', 20, 140, 1, '%'),
-      fr('condDirt', 'Condensador sucio', 0, 100, 5, '%', (v) => v / 100, (v) => Math.round(v * 100)),
-      fr('filterClog', 'Filtro deshidratador obstruido', 0, 100, 5, '%', (v) => v / 100, (v) => Math.round(v * 100)),
-      txv,
-      chk('condFanBroken', 'Ventilador del condensador averiado'),
-      chk('evapFanBroken', 'Ventilador del evaporador averiado'),
-      chk('compValves', 'Compresor con válvulas rotas'),
-      chk('compLocked', 'Compresor agarrotado'),
-      chk('solenoidStuck', 'Solenoide que no abre'),
-      chk('solenoidLeak', 'Solenoide que no cierra del todo'),
-      chk('doorSeal', 'Burlete de la puerta dañado'),
-      chk('nonCondensables', 'Aire (incondensables) en el circuito'),
-      h('div', { class: 'row' }, h('button', { class: 'btn small', onclick: () => app.clearFaults() }, 'Quitar todas las averías')),
+    const th = app.thermostat();
+    const pct = (v) => Math.round(v * 100);
+
+    const col1 = h('div', { class: 'stack' }, h('h4', {}, 'Cámara'));
+    if (!edit) {
+      col1.append(
+        bind(toggle('Puerta abierta', app.out() && app.out().door, (v) => {
+          if (app.out() && v !== app.out().door) app.toggleDoor();
+        }), () => !!(app.out() && app.out().door)),
+        h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: () => app.addProductLoad() }, 'Meter género caliente')),
+      );
+    }
+    if (th) {
+      col1.append(
+        bind(stepper(`Consigna ${th.props.tag} (para a)`, +th.props.sp, { step: 0.5, min: -35, max: 20, unit: '°C' }, (v) => app.setThermostat('sp', v)), () => +th.props.sp),
+        bind(stepper('Diferencial', +th.props.diff, { step: 0.5, min: 0.5, max: 10, unit: 'K' }, (v) => app.setThermostat('diff', v)), () => +th.props.diff),
+      );
+    }
+    col1.append(
+      bind(stepper('Temperatura exterior', P().Tamb, { step: 1, min: -10, max: 46, unit: '°C' }, (v) => app.setRefrig('Tamb', v)), () => P().Tamb),
+      bind(stepper(edit ? 'Temperatura inicial de la cámara' : 'Cámara al reiniciar', P().TroomInit, { step: 1, min: -30, max: 35, unit: '°C' }, (v) => app.setRefrig('TroomInit', v)), () => P().TroomInit),
+      bind(seg('Aislamiento', { 0.025: 'Bueno', 0.04: 'Normal', 0.07: 'Malo' }, String(P().roomUA), (v) => app.setRefrig('roomUA', +v)), () => String(P().roomUA)),
     );
-    el.append(h('div', { class: 'room-cols' }, col1, col2, col3));
-    this.updateRoomLive();
+
+    const col2 = h('div', { class: 'stack' }, h('h4', {}, 'Instalación'));
+    if (edit) {
+      col2.append(toggle('Circuito frigorífico asociado', P().enabled !== false, (v) => app.setRefrigEnabled(v)),
+        h('p', { class: 'note' }, 'Desactívalo para simular solo el esquema eléctrico, como en CADe SIMU.'));
+    }
+    const refOpts = Object.fromEntries(SIM_REFRIGERANT_IDS.map((id) => [id, REFRIGERANTS[id].label]));
+    col2.append(
+      bind(select('Refrigerante', refOpts, P().refrigerant, (v) => app.setRefrig('refrigerant', v)), () => P().refrigerant),
+      bind(stepper('Potencia frigorífica (−10/+40 °C)', P().capacityKW, { step: 0.1, min: 0.2, max: 50, unit: 'kW' }, (v) => app.setRefrig('capacityKW', v)), () => P().capacityKW),
+      bind(seg('Expansión', { txv: 'VET + recipiente', capilar: 'Tubo capilar' }, P().expansion, (v) => app.setRefrig('expansion', v)), () => P().expansion),
+      bind(stepper('Recalentamiento de la VET', P().shSet, { step: 0.5, min: 2, max: 15, unit: 'K' }, (v) => app.setRefrig('shSet', v)), () => P().shSet),
+      bind(stepper('Resistencia de desescarche', P().heaterKW, { step: 0.1, min: 0.1, max: 20, unit: 'kW' }, (v) => app.setRefrig('heaterKW', v)), () => P().heaterKW),
+    );
+
+    const cols = [col1, col2];
+    if (!app.practiceHideFaults) {
+      const chk = (key, label) => bind(toggle(label, F()[key], (v) => app.setFault(key, v), { danger: true }), () => !!F()[key]);
+      const col3 = h('div', { class: 'stack' }, h('h4', {}, edit ? 'Averías de partida' : 'Averías'),
+        bind(slider('Carga de refrigerante', Math.round(F().chargePct), { min: 20, max: 140, step: 1, unit: '%' }, (v) => app.setFault('chargePct', v)), () => Math.round(F().chargePct)),
+        bind(seg('Fuga', { 0: 'Sin fuga', 5: 'Lenta', 20: 'Media', 60: 'Rápida' }, String(F().leakRate || 0), (v) => app.setFault('leakRate', +v)), () => String(F().leakRate || 0)),
+        bind(slider('Condensador sucio', pct(F().condDirt), { min: 0, max: 100, step: 5, unit: '%' }, (v) => app.setFault('condDirt', v / 100)), () => pct(F().condDirt)),
+        bind(slider('Filtro deshidratador obstruido', pct(F().filterClog), { min: 0, max: 100, step: 5, unit: '%' }, (v) => app.setFault('filterClog', v / 100)), () => pct(F().filterClog)),
+        bind(seg('Válvula de expansión', { ok: 'Correcta', cerrada: 'Casi cerrada', abierta: 'Atascada abierta' }, F().txv, (v) => app.setFault('txv', v)), () => F().txv),
+        chk('condFanBroken', 'Ventilador del condensador averiado'),
+        chk('evapFanBroken', 'Ventilador del evaporador averiado'),
+        chk('compValves', 'Compresor con válvulas rotas'),
+        chk('compLocked', 'Compresor agarrotado'),
+        chk('solenoidStuck', 'Solenoide que no abre'),
+        chk('solenoidLeak', 'Solenoide que no cierra del todo'),
+        chk('doorSeal', 'Burlete de la puerta dañado'),
+        chk('nonCondensables', 'Aire (incondensables) en el circuito'),
+        h('div', { class: 'row' }, h('button', { class: 'btn small', type: 'button', onclick: () => app.clearFaults() }, 'Quitar todas las averías')),
+      );
+      cols.push(col3);
+    }
+    el.append(h('div', { class: 'room-cols' }, ...cols));
+    el._sync = sync;
   }
 
-  updateRoomLive() {
-    const o = this.app.fridgeOut();
-    if (this.doorBtn && o) {
-      this.doorBtn.textContent = o.door ? 'Cerrar la puerta' : 'Abrir la puerta';
-      this.doorBtn.classList.toggle('open', o.door);
+  /** Pone los mandos del panel al día si algo ha cambiado desde fuera. */
+  syncRoom(el) {
+    for (const s of el._sync || []) {
+      const v = s.get();
+      if (v !== s.last) {
+        s.last = v;
+        s.ctl.setValue(v);
+      }
     }
-  }
-
-  // ----------------------------------------------------------- diagnóstico
-  renderDiag() {
-    const { app } = this;
-    const el = this.diag;
-    const o = app.fridgeOut();
-    if (!o || !app.refrigOn()) {
-      el.innerHTML = '<p class="note">Activa el circuito frigorífico para ver las lecturas.</p>';
-      return;
-    }
-    const P = { ...DEFAULT_REFRIG, ...(app.project.refrig || {}) };
-    const runFor = app.narrator.runSince !== null && app.sim ? o.t - app.narrator.runSince : 0;
-    const { rows, findings } = diagnose(o, P, app.project.faults || {}, runFor);
-    const label = { ok: 'normal', high: 'alto', low: 'bajo', warn: 'vigilar', na: '—', info: 'lectura' };
-    const table = h('table', {}, h('tbody', {}, rows.map((r) =>
-      h('tr', {}, h('td', {}, r.k), h('td', { class: 'v' }, r.v), h('td', {}, h('span', { class: `pill ${r.st}` }, label[r.st])), h('td', { class: 'sub' }, r.sub)))));
-    el.innerHTML = '';
-    el.append(h('div', { class: 'diag' },
-      h('div', {}, h('h4', {}, `Lecturas (${o.refrigerant})`), h('div', { style: 'overflow-x:auto' }, table)),
-      h('div', {}, h('h4', {}, 'Diagnóstico'), h('ul', { class: 'findings' }, findings.map((f) => h('li', {}, f)))),
-    ));
   }
 
   // ---------------------------------------------------------------- registro
@@ -299,32 +273,7 @@ export class Panels {
   }
 }
 
-function rangeField(id, label, value, min, max, step, unit, onChange) {
-  const out = h('span', { class: 'rangeval' }, `${value} ${unit}`);
-  const i = h('input', { type: 'range', id, min, max, step, value });
-  i.addEventListener('input', () => {
-    out.textContent = `${i.value} ${unit}`;
-    onChange(parseFloat(i.value));
-  });
-  return h('label', { class: 'field', for: id }, h('span', { style: 'display:flex;justify-content:space-between;gap:8px' }, label, out), i);
-}
-
-function selectField(id, label, value, options, onChange, disabled) {
-  const s = h('select', { id, disabled }, Object.entries(options).map(([k, l]) => h('option', { value: k, selected: k === value }, l)));
-  s.addEventListener('change', () => onChange(s.value));
-  return h('label', { class: 'field', for: id }, label, s);
-}
-
-function numField(id, label, value, min, max, step, onChange, disabled) {
-  const i = h('input', { type: 'number', id, value, min, max, step, disabled, inputmode: 'decimal' });
-  i.addEventListener('change', () => {
-    const v = parseFloat(String(i.value).replace(',', '.'));
-    if (Number.isFinite(v)) onChange(Math.min(max, Math.max(min, v)));
-  });
-  return h('label', { class: 'field', for: id }, label, i);
-}
-
-function liveText(sim, c) {
+export function liveText(sim, c) {
   const e = sim.elec;
   const ctx = e.ctx(c);
   const st = ctx.st || {};
@@ -374,7 +323,7 @@ function liveText(sim, c) {
 }
 
 const HELP_HTML = `
-<h3>Cómo se usa</h3>
-<p><b>Editar:</b> elige un componente a la izquierda y colócalo. Con <kbd>W</kbd> dibujas cables (clic en cada esquina, termina sobre un borne o un cable). <kbd>R</kbd> gira, <kbd>Supr</kbd> borra, <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshace.</p>
-<p><b>Circuito frigorífico:</b> a los motores, resistencias, solenoides y luces se les asigna una <i>función frigorífica</i> (compresor, ventilador del evaporador…). Los termostatos y presostatos leen el circuito frigorífico y la puerta mueve sus contactos.</p>
-<p><b>Simular:</b> pulsa <b>Simular</b>. Haz clic en pulsadores, interruptores, magnetotérmicos, térmicos y presostatos para actuar sobre ellos. Abre la puerta de la cámara y mira qué pasa con las presiones. En <b>Cámara y averías</b> puedes provocar fallos.</p>`;
+<h3>Cómo se usa el editor</h3>
+<p>Elige un componente a la izquierda y colócalo. Con <kbd>W</kbd> dibujas cables (clic en cada esquina, termina sobre un borne o un cable). <kbd>R</kbd> gira, <kbd>Supr</kbd> borra, <kbd>Ctrl</kbd>+<kbd>Z</kbd> deshace.</p>
+<p>A los motores, resistencias, solenoides y luces se les asigna una <i>función frigorífica</i> (compresor, ventilador del evaporador…): así mueven el circuito frigorífico. Los termostatos y presostatos leen sus temperaturas y presiones, y los contactos de puerta siguen a la puerta de la cámara.</p>
+<p>Vuelve a <b>Simulador</b> para verlo funcionar: arranca solo.</p>`;

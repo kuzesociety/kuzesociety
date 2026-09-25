@@ -7,9 +7,14 @@
 // escarcha, etc. reaccionen de forma creíble a lo que hace el circuito
 // eléctrico (compresor en marcha o parado, ventiladores, solenoide,
 // resistencias, puerta abierta, averías...).
+//
+// Convenio de temperaturas: el estado interno (s.Te, s.Tc) es la temperatura
+// MEDIA de evaporación/condensación. En las salidas, como un analizador
+// digital, la evaporación se da en punto de ROCÍO (recalentamiento) y la
+// condensación en punto de BURBUJA (subenfriamiento).
 
 import {
-  getRefrigerant, psat, tsat, gauge, hfg, hLiq, hVap, vaporDensity, compression,
+  getRefrigerant, psat, tsat, tsatDew, tsatBubble, gauge, glideAt, hfg, hLiq, hVap, vaporDensity, compression, cpVap,
 } from './refrigerants.js';
 
 export const DEFAULT_REFRIG = {
@@ -31,6 +36,7 @@ export const DEFAULT_REFRIG = {
 
 export const DEFAULT_FAULTS = {
   chargePct: 100, // carga de refrigerante (%)
+  leakRate: 0, // fuga: % de la carga que se pierde por hora
   condDirt: 0, // suciedad del condensador 0..1
   condFanBroken: false,
   evapFanBroken: false,
@@ -47,12 +53,13 @@ export const DEFAULT_FAULTS = {
 const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
 const relax = (x, target, h, tau) => x + (target - x) * (1 - Math.exp(-h / tau));
 
-const ETA_W = 0.85; // rendimiento (calibración) del trabajo de compresión
-const ETA_T = 0.72; // rendimiento para la temperatura de descarga
+const ETA_W = 0.62; // rendimiento isentrópico del compresor
+const ETA_T = 0.75; // rendimiento para la temperatura de descarga
 const ETA_MOTOR = 0.9;
 const LINE_GAIN = 3; // K que gana el vapor en la línea de aspiración
 const LATENT_FUSION = 334; // kJ/kg
 const LATENT_SUBLIM = 2834; // kJ/kg
+const QE_REF = 110; // kJ/kg: efecto frigorífico de referencia (R404A) para escalar la carga
 
 export class FridgeModel {
   constructor(params = {}, faults = {}) {
@@ -61,10 +68,18 @@ export class FridgeModel {
     this.reset();
   }
 
+  /** Cambia los parámetros. Si ya hay estado, se conserva (cambio en marcha). */
   setParams(params) {
+    const oldScale = this.k ? this.k.mscale : null;
     this.p = { ...DEFAULT_REFRIG, ...params };
     this.ref = getRefrigerant(this.p.refrigerant);
+    if (!this.ref.sim) this.ref = getRefrigerant('R404A');
     this._size();
+    if (this.s && oldScale) {
+      this.s.Mlow *= this.k.mscale / oldScale;
+      this.s.Tc = Math.min(this.s.Tc, this.ref.Tc - 3);
+      this._compute(this._io || defaultIO(), 0);
+    }
   }
 
   setFaults(f) {
@@ -76,28 +91,34 @@ export class FridgeModel {
     const { p, ref } = this;
     const f = p.capacityKW / 2.5;
     const cap = p.expansion === 'capilar';
+    // Punto de diseño: evaporación media -10 °C, condensación media +40 °C.
+    const Te = -10, Tc = 40, SC = 4;
+    const Pe = psat(ref, Te), Pc = psat(ref, Tc);
+    const TeDew = Te + glideAt(ref, Te) / 2;
+    const Tliq = Tc - glideAt(ref, Tc) / 2 - SC;
+    const Tsuc = TeDew + p.shSet + LINE_GAIN;
+    const rho = vaporDensity(ref, Pe, Tsuc);
+    const qe = hVap(ref, TeDew) + cpVap(ref, TeDew) * p.shSet - hLiq(ref, Tliq);
+    const m = p.capacityKW / qe;
+    // Escala de masas: los refrigerantes con más calor latente circulan
+    // menos kg/s y necesitan menos carga para la misma potencia.
+    const ms = m / (p.capacityKW / QE_REF);
     const k = {
       f,
+      mscale: ms,
       UAairFan: 0.36 * f,
       UAairNat: 0.05 * f,
       UAref: 1.3 * f,
       UAcFan: 0.3 * f,
       UAcNat: 0.045 * f,
       Ccoil: 10 * f,
-      MevapFull: 1.0 * f,
-      chargeNom: (cap ? 1.8 : 3.0) * f,
-      MhighSeal: (cap ? 0.6 : 1.2) * f,
-      MhighFull: (cap ? 1.1 : 2.9) * f,
+      MevapFull: 1.0 * f * ms,
+      chargeNom: (cap ? 1.8 : 3.0) * f * ms,
+      MhighSeal: (cap ? 0.6 : 1.2) * f * ms,
+      MhighFull: (cap ? 1.1 : 2.9) * f * ms,
       iceRef: 2.0 * f,
       fanHeat: 0.06 * f,
     };
-    // Punto de diseño: -10 / +40 °C.
-    const Te = -10, Tc = 40, SC = 4;
-    const Pe = psat(ref, Te), Pc = psat(ref, Tc);
-    const Tsuc = Te + p.shSet + LINE_GAIN;
-    const rho = vaporDensity(ref, Pe, Tsuc);
-    const qe = hVap(ref, Te) + ref.cpV * p.shSet - hLiq(ref, Tc - SC);
-    const m = p.capacityKW / qe;
     k.mNom = m;
     k.Vd = m / (rho * etaV(Pc / Pe, false));
     k.dPnom = Pc - Pe;
@@ -105,7 +126,7 @@ export class FridgeModel {
     k.capK = m / Math.sqrt(k.dPnom);
     const w = (m * compression(ref, Tsuc, Pc / Pe).work) / ETA_W;
     k.Wnom = w / ETA_MOTOR + 0.04 * w;
-    k.Kp = 0.0036 * f; // ganancia de la VET (kg/s por K de recalentamiento)
+    k.Kp = 0.0036 * f * ms; // ganancia de la VET (kg/s por K de recalentamiento)
     this.k = k;
     this.nominalCurrent = {
       '3F': currentFrom(k.Wnom, '3F'),
@@ -151,6 +172,7 @@ export class FridgeModel {
    *   io.solenoid: boolean | null (null = no hay solenoide en el esquema)
    */
   step(dt, io) {
+    this._io = io;
     let left = dt;
     while (left > 1e-9) {
       const h = Math.min(left, 0.25);
@@ -200,7 +222,10 @@ export class FridgeModel {
     if (!running) return { Pe, Pc, pr, Tsuc, m: 0, qe: 0 };
     const rho = vaporDensity(ref, Pe, Tsuc);
     const m = rho * k.Vd * etaV(pr, F.compValves);
-    let qe = hVap(ref, Te) + ref.cpV * SHevap - (hLiq(ref, Tc - inv.SC) + inv.xFlash * hfg(ref, Tc));
+    const TeDew = Te + glideAt(ref, Te) / 2;
+    const Tliq = Tc - glideAt(ref, Tc) / 2 - inv.SC;
+    const hOut = hVap(ref, TeDew) + ref.cpV * Math.max(Te + SHevap - TeDew, 0);
+    let qe = hOut - (hLiq(ref, Tliq) + inv.xFlash * hfg(ref, Tc));
     if (floodback) qe -= Math.min(1, (this.s.Mlow / k.MevapFull - 1) * 2) * 0.5 * hfg(ref, Te);
     return { Pe, Pc, pr, Tsuc, m, qe: Math.max(qe, 5) };
   }
@@ -226,12 +251,17 @@ export class FridgeModel {
   _step(h, io) {
     const { s, k, p, ref, faults: F } = this;
     const a = this._actuators(io);
+
+    // ---- Fuga: la carga baja con el tiempo.
+    if (F.leakRate > 0 && F.chargePct > 3) F.chargePct = Math.max(3, F.chargePct - (F.leakRate * h) / 3600);
+
     const inv = this._inventory();
     const wet = s.Mlow / k.MevapFull;
     const wetEff = clamp(wet, 0, 1);
     const Tamb = p.Tamb;
+    const gE = glideAt(ref, s.Te);
 
-    // ---- Recalentamiento a la salida del evaporador
+    // ---- Recalentamiento a la salida del evaporador (sobre la T media)
     const dTevap = Math.max(s.Troom - s.Te, 0);
     s.SHevap = wet >= 1 ? 0 : 0.95 * dTevap * Math.pow(1 - wetEff, 0.7);
 
@@ -253,7 +283,8 @@ export class FridgeModel {
     const c = this._compState(s.Te, s.Tc, s.SHevap, inv, a.running);
     const mComp = c.m;
 
-    // ---- Válvula de expansión / capilar
+    // ---- Válvula de expansión / capilar (la VET regula el recalentamiento
+    // sobre el punto de rocío).
     const dP = Math.max(c.Pc - c.Pe, 0);
     const clog = 1 - 0.85 * F.filterClog;
     let mFeed;
@@ -262,7 +293,8 @@ export class FridgeModel {
     } else {
       const txvF = F.txv === 'cerrada' ? 0.18 : 1;
       const capTXV = k.txvK * Math.sqrt(dP) * txvF * clog * (0.1 + 0.9 * Math.pow(inv.liqAvail, 1.5));
-      const req = F.txv === 'abierta' ? capTXV : mComp + k.Kp * (s.SHevap - p.shSet);
+      const shDew = s.SHevap - gE / 2;
+      const req = F.txv === 'abierta' ? capTXV : mComp + k.Kp * (shDew - p.shSet);
       mFeed = clamp(req, 0, capTXV);
     }
     mFeed *= a.solPass;
@@ -297,23 +329,25 @@ export class FridgeModel {
     s.Tcoil = TcoilNew;
 
     // ---- Cámara: aire y género
-    const doorUA = (this.door ? p.doorUA : 0) + (F.doorSeal ? 0.2 * p.doorUA : 0);
-    const UAprod = 0.2 * k.f;
-    const Qin =
-      p.roomUA * (Tamb - s.Troom) +
-      doorUA * (Tamb - s.Troom) +
-      p.internalKW +
-      (a.fanE ? k.fanHeat : 0) +
-      (a.light ? 0.05 : 0) +
-      (heaterKW - QheatCoil) +
-      UAprod * (s.Tprod - s.Troom);
-    s.Troom += ((Qin - Qair) / p.airMass) * h;
-    let Qload = 0;
-    if (this.pendingLoad > 0) {
-      Qload = this.pendingLoad / 400;
-      this.pendingLoad = Math.max(0, this.pendingLoad - Qload * h);
+    if (!this.holdRoom) {
+      const doorUA = (this.door ? p.doorUA : 0) + (F.doorSeal ? 0.2 * p.doorUA : 0);
+      const UAprod = 0.2 * k.f;
+      const Qin =
+        p.roomUA * (Tamb - s.Troom) +
+        doorUA * (Tamb - s.Troom) +
+        p.internalKW +
+        (a.fanE ? k.fanHeat : 0) +
+        (a.light ? 0.05 : 0) +
+        (heaterKW - QheatCoil) +
+        UAprod * (s.Tprod - s.Troom);
+      s.Troom += ((Qin - Qair) / p.airMass) * h;
+      let Qload = 0;
+      if (this.pendingLoad > 0) {
+        Qload = this.pendingLoad / 400;
+        this.pendingLoad = Math.max(0, this.pendingLoad - Qload * h);
+      }
+      s.Tprod += ((UAprod * (s.Troom - s.Tprod) + Qload) / p.productMass) * h;
     }
-    s.Tprod += ((UAprod * (s.Troom - s.Tprod) + Qload) / p.productMass) * h;
 
     // ---- Condensador (lado de alta)
     const UAc = (a.fanC ? k.UAcFan : k.UAcNat) * (1 - 0.75 * F.condDirt) * (1 - inv.flooded);
@@ -321,7 +355,7 @@ export class FridgeModel {
     let TcTarget, tauC;
     let Wref = 0;
     if (a.running) {
-      Wref = (mComp * compression(ref, c.Tsuc, c.pr).work) / (F.compValves ? 0.6 : ETA_W);
+      Wref = (mComp * compression(ref, c.Tsuc, c.pr).work) / (F.compValves ? 0.45 : ETA_W);
       const Wel = Wref / ETA_MOTOR + 0.04 * k.Wnom;
       const Qc = Qref + Wref + 0.8 * (Wel - Wref);
       TcTarget = Tamb + Qc / UAc + nc;
@@ -344,7 +378,7 @@ export class FridgeModel {
       const TdisT = (c.Tsuc + 273.15) * (1 + comp.f / (F.compValves ? 0.5 : ETA_T)) - 273.15 + motorHeat;
       s.Tdis = relax(s.Tdis, TdisT, h, 40);
       s.Tsuc = relax(s.Tsuc, c.Tsuc, h, 15);
-      s.Tliq = relax(s.Tliq, s.Tc - inv.SC, h, 30);
+      s.Tliq = relax(s.Tliq, s.Tc - glideAt(ref, s.Tc) / 2 - inv.SC, h, 30);
       s.TevapOut = relax(s.TevapOut, s.Te + s.SHevap, h, 10);
     } else {
       s.Tdis = relax(s.Tdis, a.locked ? s.Tdis + 2 : Tamb + 2, h, a.locked ? 60 : 400);
@@ -365,6 +399,10 @@ export class FridgeModel {
     const L = this._last || {};
     const Pe = psat(ref, s.Te);
     const Pc = psat(ref, s.Tc);
+    const TeDew = tsatDew(ref, Pe);
+    const TeBub = tsatBubble(ref, Pe);
+    const TcDew = tsatDew(ref, Pc);
+    const TcBub = tsatBubble(ref, Pc);
     const mComp = a.running ? L.mComp || 0 : 0;
     const Wref = a.running ? L.Wref || 0 : 0;
     const Wel = a.running ? Wref / ETA_MOTOR + 0.04 * k.Wnom : 0;
@@ -379,21 +417,17 @@ export class FridgeModel {
     const floodback = a.running && wet > 1;
     const filterDT = a.running ? F.filterClog * 9 * Math.min(flow, 1.5) : 0;
     const flash = a.running || (L.mFeed || 0) > 1e-5 ? clamp(Math.max(1 - inv.liqAvail, F.filterClog * 0.8), 0, 1) : 0;
-    const level = clamp(
-      (inv.Mhigh - k.MhighSeal * 0.5) / (k.MhighFull - k.MhighSeal * 0.5),
-      0,
-      1,
-    );
-    const SHtotal = s.Tsuc - s.Te;
+    const level = clamp((inv.Mhigh - k.MhighSeal * 0.5) / (k.MhighFull - k.MhighSeal * 0.5), 0, 1);
 
     // Puntos del ciclo para el diagrama P-h.
-    const h1 = hVap(ref, s.Te) + ref.cpV * Math.max(s.Tsuc - s.Te, 0);
-    const h3 = hLiq(ref, s.Tc - inv.SC) + inv.xFlash * hfg(ref, s.Tc);
-    const h2 = hVap(ref, s.Tc) + ref.cpV * Math.max(s.Tdis - s.Tc, 0);
+    const h1 = hVap(ref, TeDew) + ref.cpV * Math.max(s.Tsuc - TeDew, 0);
+    const h3 = hLiq(ref, Math.min(s.Tliq, TcBub)) + inv.xFlash * hfg(ref, s.Tc);
+    const h2 = hVap(ref, TcDew) + ref.cpV * Math.max(s.Tdis - TcDew, 0);
 
     this.out = {
       t: s.t,
       refrigerant: ref.id,
+      zeotropic: ref.zeotropic,
       running: a.running,
       locked: a.locked,
       fanE: a.fanE,
@@ -407,8 +441,15 @@ export class FridgeModel {
       Pc,
       PeG: gauge(Pe),
       PcG: gauge(Pc),
-      Te: s.Te,
-      Tc: s.Tc,
+      Te: TeDew, // evaporación (rocío)
+      TeBub,
+      Tevap: s.Te, // media
+      TevapIn: s.Te - glideAt(ref, s.Te) / 4,
+      Tc: TcBub, // condensación (burbuja)
+      TcDew,
+      Tcond: s.Tc, // media
+      glideE: TeDew - TeBub,
+      glideC: TcDew - TcBub,
       Tamb: p.Tamb,
       Troom: s.Troom,
       Tprod: s.Tprod,
@@ -418,11 +459,12 @@ export class FridgeModel {
       Tliq: s.Tliq,
       TafterFilter: s.Tliq - filterDT,
       TevapOut: s.TevapOut,
-      SHevap: s.SHevap,
-      SH: SHtotal,
-      SC: a.running ? inv.SC : Math.max(s.Tc - s.Tliq, 0),
-      TD: s.Troom - s.Te,
+      SHevap: s.TevapOut - TeDew,
+      SH: s.Tsuc - TeDew,
+      SC: TcBub - s.Tliq,
+      TD: s.Troom - TeDew,
       condDT: s.Tc - p.Tamb,
+      pr: Pc / Pe,
       mComp,
       mFeed: L.mFeed || 0,
       flow,
@@ -441,9 +483,40 @@ export class FridgeModel {
       flash,
       filterDT,
       chargeKg: inv.Mtot,
+      chargeNomKg: k.chargeNom,
+      chargePct: F.chargePct,
       ph: { h1, h2, h3, h4: h3, Pe, Pc },
     };
     return this.out;
+  }
+
+  /**
+   * Predicción: funcionamiento estable con el compresor en marcha y la cámara
+   * a Troom (por defecto la actual). Se puede cambiar cualquier parámetro o
+   * avería. No modifica este modelo.
+   */
+  predict({ Troom, params = {}, faults = {}, io = {}, secs = 600 } = {}) {
+    const m = new FridgeModel({ ...this.p, ...params }, { ...this.faults, leakRate: 0, ...faults });
+    const oldScale = this.k.mscale;
+    Object.assign(m.s, { ...this.s });
+    m.s.Mlow *= m.k.mscale / oldScale;
+    m.s.Tc = Math.min(m.s.Tc, m.ref.Tc - 3);
+    const Tr = Troom ?? this.s.Troom;
+    m.s.Troom = Tr;
+    m.s.Tprod = Tr;
+    m.holdRoom = true;
+    const run = {
+      comp: 'run',
+      compPhase: (this._io && this._io.compPhase) || '3F',
+      evapFan: true,
+      condFan: true,
+      heater: false,
+      light: false,
+      solenoid: this._io && this._io.solenoid !== null && this._io.solenoid !== undefined ? true : null,
+      ...io,
+    };
+    for (let t = 0; t < secs; t += 1) m.step(1, run);
+    return m.out;
   }
 }
 

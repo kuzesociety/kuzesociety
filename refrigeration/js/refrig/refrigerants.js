@@ -1,138 +1,156 @@
-// Propiedades simplificadas de refrigerantes.
+// Propiedades de refrigerantes a partir de tablas reales (CoolProp, ver
+// tools/gen_refrigerants.py).
 //
-// - Presión de saturación: tabla T (°C) -> P (bar absolutos), interpolada
-//   linealmente sobre ln(P) (forma de Clausius-Clapeyron).
-// - Entalpías: líquido saturado lineal con cp, calor latente con la
-//   correlación de Watson hacia el punto crítico. Referencia IIR
-//   (h = 200 kJ/kg para líquido saturado a 0 °C).
+// Para las mezclas zeotrópicas (R449A, R448A, R407C...) la temperatura de
+// saturación depende de si se mira el punto de ROCÍO (vapor saturado, el que
+// se usa para el recalentamiento y la presión de baja) o el de BURBUJA
+// (líquido saturado, el que se usa para el subenfriamiento y la alta). La
+// diferencia entre ambos es el deslizamiento ("glide").
 //
-// Es un modelo didáctico: los valores son del orden correcto (±3 %) pero no
-// sustituye a unas tablas termodinámicas.
+// El modelo de simulación trabaja con la temperatura MEDIA entre burbuja y
+// rocío (psat/tsat); los manómetros y el diagnóstico usan rocío/burbuja como
+// un analizador digital.
+
+import { REFDATA } from './refdata.js';
 
 export const P_ATM = 1.013; // bar
 
-const R = {
-  R404A: {
-    label: 'R404A',
-    Tc: 72.1, Mw: 97.6, cpL: 1.5, cpV: 0.92, hfg0: 163.5, n: 1.10,
-    table: [[-50, 0.82], [-40, 1.31], [-30, 2.02], [-20, 3.0], [-10, 4.3], [0, 6.0], [10, 8.15],
-      [20, 10.85], [30, 14.15], [40, 18.2], [50, 23.05], [60, 28.85], [70, 35.8]],
-  },
-  R134a: {
-    label: 'R134a',
-    Tc: 101.1, Mw: 102.0, cpL: 1.4, cpV: 0.86, hfg0: 198.6, n: 1.10,
-    table: [[-50, 0.299], [-40, 0.512], [-30, 0.844], [-20, 1.327], [-10, 2.006], [0, 2.928],
-      [10, 4.146], [20, 5.717], [30, 7.702], [40, 10.166], [50, 13.179], [60, 16.818],
-      [70, 21.168], [80, 26.33], [90, 32.44], [100, 39.72]],
-  },
-  R22: {
-    label: 'R22',
-    Tc: 96.1, Mw: 86.5, cpL: 1.24, cpV: 0.70, hfg0: 205.0, n: 1.16,
-    table: [[-50, 0.645], [-40, 1.049], [-30, 1.635], [-20, 2.448], [-10, 3.548], [0, 4.976],
-      [10, 6.807], [20, 9.099], [30, 11.919], [40, 15.335], [50, 19.42], [60, 24.27],
-      [70, 29.96], [80, 36.6], [90, 44.3]],
-  },
-  R290: {
-    label: 'R290 (propano)',
-    Tc: 96.7, Mw: 44.1, cpL: 2.6, cpV: 1.75, hfg0: 374.6, n: 1.12,
-    table: [[-50, 0.70], [-40, 1.11], [-30, 1.68], [-20, 2.44], [-10, 3.45], [0, 4.74], [10, 6.36],
-      [20, 8.36], [30, 10.79], [40, 13.69], [50, 17.13], [60, 21.16], [70, 25.9], [80, 31.4], [90, 37.8]],
-  },
-  R410A: {
-    label: 'R410A',
-    Tc: 71.3, Mw: 72.6, cpL: 1.65, cpV: 0.95, hfg0: 221.0, n: 1.16,
-    table: [[-50, 1.10], [-40, 1.75], [-30, 2.70], [-20, 3.99], [-10, 5.73], [0, 7.99], [10, 10.87],
-      [20, 14.44], [30, 18.85], [40, 24.18], [50, 30.6], [60, 38.2], [70, 47.3]],
-  },
-  R32: {
-    label: 'R32',
-    Tc: 78.1, Mw: 52.0, cpL: 1.9, cpV: 1.1, hfg0: 315.0, n: 1.24,
-    table: [[-50, 1.10], [-40, 1.77], [-30, 2.74], [-20, 4.06], [-10, 5.83], [0, 8.13], [10, 11.07],
-      [20, 14.75], [30, 19.28], [40, 24.78], [50, 31.4], [60, 39.3], [70, 48.8]],
-  },
-  R600a: {
-    label: 'R600a (isobutano)',
-    Tc: 134.7, Mw: 58.1, cpL: 2.35, cpV: 1.65, hfg0: 355.0, n: 1.08,
-    table: [[-50, 0.17], [-40, 0.29], [-30, 0.47], [-20, 0.72], [-10, 1.08], [0, 1.57], [10, 2.2],
-      [20, 3.02], [30, 4.05], [40, 5.31], [50, 6.84], [60, 8.67], [70, 10.8], [80, 13.3], [90, 16.2]],
-  },
+const LABELS = {
+  R290: 'R290 (propano)',
+  R600a: 'R600a (isobutano)',
+  R717: 'R717 (amoniaco)',
+  R744: 'R744 (CO₂)',
+  R1234ze: 'R1234ze(E)',
 };
 
-for (const [id, r] of Object.entries(R)) {
-  r.id = id;
-  r.lnTable = r.table.map(([t, p]) => [t, Math.log(p)]);
+const R = {};
+for (const [id, d] of Object.entries(REFDATA)) {
+  const n = d.T.length;
+  const lnPb = d.Pb.map(Math.log);
+  const lnPd = d.Pd.map(Math.log);
+  const lnPm = lnPb.map((v, i) => (v + lnPd[i]) / 2);
+  const ref = {
+    ...d,
+    label: LABELS[id] || id,
+    t0: d.T[0],
+    step: d.T[1] - d.T[0],
+    count: n,
+    lnPb,
+    lnPd,
+    lnPm,
+    Tmax: d.T[n - 1],
+  };
+  // Deslizamiento en función de la temperatura media (para el modelo).
+  ref.glideT = lnPm.map((lp) => invLn(ref, lnPd, lp) - invLn(ref, lnPb, lp));
+  ref.zeotropic = Math.max(...ref.glideT.slice(0, Math.min(n, 40))) > 1.0;
+  ref.cpV = at(ref, d.cpv, -10);
+  R[id] = ref;
 }
 
 export const REFRIGERANTS = R;
 export const REFRIGERANT_IDS = Object.keys(R);
+export const SIM_REFRIGERANT_IDS = REFRIGERANT_IDS.filter((id) => R[id].sim);
 
 export function getRefrigerant(id) {
   return R[id] || R.R404A;
 }
 
-/** Presión de saturación absoluta (bar) a la temperatura T (°C). */
-export function psat(ref, T) {
-  const t = ref.lnTable;
-  const Tm = Math.min(T, ref.Tc - 0.5);
-  let i = 0;
-  if (Tm <= t[0][0]) i = 0;
-  else if (Tm >= t[t.length - 1][0]) i = t.length - 2;
-  else while (i < t.length - 2 && Tm > t[i + 1][0]) i++;
-  const [t0, l0] = t[i];
-  const [t1, l1] = t[i + 1];
-  return Math.exp(l0 + ((l1 - l0) * (Tm - t0)) / (t1 - t0));
+// ------------------------------------------------------------- interpolación
+function idx(ref, T) {
+  let x = (T - ref.t0) / ref.step;
+  let i = Math.floor(x);
+  if (i < 0) i = 0;
+  else if (i > ref.count - 2) i = ref.count - 2;
+  return [i, x - i];
 }
 
-/** Temperatura de saturación (°C) a la presión absoluta P (bar). */
-export function tsat(ref, P) {
-  const t = ref.lnTable;
-  const lp = Math.log(Math.max(P, 1e-4));
-  let i = 0;
-  if (lp <= t[0][1]) i = 0;
-  else if (lp >= t[t.length - 1][1]) i = t.length - 2;
-  else while (i < t.length - 2 && lp > t[i + 1][1]) i++;
-  const [t0, l0] = t[i];
-  const [t1, l1] = t[i + 1];
-  return Math.min(t0 + ((lp - l0) * (t1 - t0)) / (l1 - l0), ref.Tc);
+/** Valor tabulado en T (interpolación lineal; extrapola en los extremos). */
+function at(ref, arr, T) {
+  const [i, f] = idx(ref, T);
+  return arr[i] + (arr[i + 1] - arr[i]) * f;
 }
+
+/** Inversa de una tabla creciente de ln(P): devuelve T. */
+function invLn(ref, arr, lp) {
+  const n = ref.count;
+  let lo = 0;
+  let hi = n - 1;
+  if (lp <= arr[0]) hi = 1;
+  else if (lp >= arr[n - 1]) lo = n - 2;
+  else {
+    while (hi - lo > 1) {
+      const m = (lo + hi) >> 1;
+      if (arr[m] <= lp) lo = m;
+      else hi = m;
+    }
+  }
+  const i = Math.min(lo, n - 2);
+  const f = (lp - arr[i]) / (arr[i + 1] - arr[i]);
+  return ref.t0 + (i + f) * ref.step;
+}
+
+// ------------------------------------------------------------- presiones
+/** Presión de burbuja (líquido saturado), bar abs. */
+export const psatBubble = (ref, T) => Math.exp(at(ref, ref.lnPb, T));
+/** Presión de rocío (vapor saturado), bar abs. */
+export const psatDew = (ref, T) => Math.exp(at(ref, ref.lnPd, T));
+/** Presión de saturación "media" (la que usa el modelo), bar abs. */
+export const psat = (ref, T) => Math.exp(at(ref, ref.lnPm, Math.min(T, ref.Tc - 0.5)));
+
+/** Temperatura de burbuja (°C) a la presión absoluta P (bar). */
+export const tsatBubble = (ref, P) => invLn(ref, ref.lnPb, Math.log(Math.max(P, 1e-4)));
+/** Temperatura de rocío (°C) a la presión absoluta P (bar). */
+export const tsatDew = (ref, P) => invLn(ref, ref.lnPd, Math.log(Math.max(P, 1e-4)));
+/** Temperatura media de saturación (°C) a la presión absoluta P (bar). */
+export const tsat = (ref, P) => Math.min(invLn(ref, ref.lnPm, Math.log(Math.max(P, 1e-4))), ref.Tc);
+
+/** Deslizamiento (K) a la temperatura media T. */
+export const glideAt = (ref, T) => Math.max(0, at(ref, ref.glideT, T));
 
 export const gauge = (Pabs) => Pabs - P_ATM;
 export const absolute = (Pg) => Pg + P_ATM;
 
-/** Calor latente de vaporización (kJ/kg), correlación de Watson. */
-export function hfg(ref, T) {
-  const x = Math.max(ref.Tc - T, 0) / ref.Tc;
-  return ref.hfg0 * Math.pow(x, 0.38);
-}
+// ------------------------------------------------------------- entalpías
+/** Entalpía del líquido saturado a T (kJ/kg, ref. IIR). */
+export const hLiq = (ref, T) => at(ref, ref.hl, T);
+/** Entalpía del vapor saturado (rocío) a T (kJ/kg). */
+export const hVap = (ref, T) => at(ref, ref.hv, T);
+/** Calor latente aproximado a T (kJ/kg). */
+export const hfg = (ref, T) => Math.max(1, hVap(ref, T) - hLiq(ref, T));
+/** cp del vapor saturado a T (kJ/kg·K). */
+export const cpVap = (ref, T) => at(ref, ref.cpv, T);
 
-/** Entalpía de líquido saturado (kJ/kg). */
-export function hLiq(ref, T) {
-  // Término cuadrático suave para que la curva de líquido se incline hacia
-  // el punto crítico como en un diagrama real.
-  const bump = 0.175 * ref.hfg0;
-  const w = Math.max(0, (T - (ref.Tc - 30)) / 30);
-  return 200 + ref.cpL * T + bump * w * w;
-}
-
-/** Entalpía de vapor saturado (kJ/kg). */
-export function hVap(ref, T) {
-  return hLiq(ref, T) + hfg(ref, T);
-}
-
-/** Densidad del vapor (kg/m³) a presión absoluta P (bar) y temperatura T (°C). */
+/**
+ * Densidad del vapor (kg/m³) a presión absoluta P (bar) y temperatura T (°C):
+ * densidad del vapor saturado corregida por el recalentamiento.
+ */
 export function vaporDensity(ref, P, T) {
-  const Z = 0.92;
-  return (P * 1e5 * ref.Mw) / (Z * 8314 * (T + 273.15));
+  const Td = tsatDew(ref, P);
+  const rho = Math.exp(at(ref, logRv(ref), Td));
+  return rho * (Td + 273.15) / (Math.max(T, Td) + 273.15);
+}
+
+function logRv(ref) {
+  if (!ref._lnRv) ref._lnRv = ref.rv.map(Math.log);
+  return ref._lnRv;
 }
 
 /**
- * Compresión politrópica: devuelve la relación T_desc/T_asp (absolutas)
- * ideal y el trabajo específico ideal (kJ/kg) para una relación de
- * presiones pr.
+ * Compresión calibrada con una compresión isentrópica real: devuelve la
+ * relación de temperaturas ideal (f = T2s/T1 − 1) y el trabajo isentrópico
+ * (kJ/kg) para una relación de presiones pr.
  */
 export function compression(ref, TsucC, pr) {
   const e = (ref.n - 1) / ref.n;
   const f = Math.pow(Math.max(pr, 1), e) - 1;
   const TsK = TsucC + 273.15;
-  return { f, work: ref.cpV * TsK * f };
+  return { f, work: ref.cpw * TsK * f };
+}
+
+/** Temperaturas de saturación a una presión manométrica (bar), para el diagnóstico. */
+export function satFromGauge(ref, Pg) {
+  const P = absolute(Pg);
+  const dew = tsatDew(ref, P);
+  const bub = tsatBubble(ref, P);
+  return { dew, bub, glide: dew - bub, outOfRange: P > Math.exp(ref.lnPb[ref.count - 1]) * 1.02 || P < Math.exp(ref.lnPd[0]) * 0.98 };
 }

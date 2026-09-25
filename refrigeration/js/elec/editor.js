@@ -5,6 +5,8 @@ import { ElecSim } from './solver.js';
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 const MASTER_OF = { relay: 'coil', timer: 'tcoil', thermal: 'thermal3', clock: 'clock' };
+// En simulación estos aparatos se accionan directamente al tocarlos.
+export const DIRECT_TYPES = new Set(['pb_no', 'pb_nc', 'estop', 'sw', 'sel', 'mcb1', 'mcb2', 'mcb3', 'mcb4', 'fuse', 'door_nc', 'door_no']);
 
 export class SchematicEditor {
   /**
@@ -32,6 +34,7 @@ export class SchematicEditor {
     this.placing = null;
     this.compEls = new Map();
     this.cache = new Map();
+    this.hl = new Set();
     this._build();
     this._bind();
   }
@@ -126,7 +129,7 @@ export class SchematicEditor {
       }
       const T = TYPES[c.type];
       const interactive = this.sim && (T.click || T.momentary);
-      g.setAttribute('class', `comp t-${c.type}${interactive ? ' clickable' : ''}`);
+      g.setAttribute('class', `comp t-${c.type}${interactive ? ' clickable' : ''}${this.hl.has(c.id) ? ' hl' : ''}`);
       const html = this._compHTML(c);
       if (this.cache.get(c.id) !== html) {
         g.innerHTML = html;
@@ -201,6 +204,14 @@ export class SchematicEditor {
   /** Refresco ligero durante la simulación. */
   refresh() {
     this._renderWires();
+    this._renderComps();
+  }
+
+  /** Resalta un conjunto de componentes (camino eléctrico). */
+  highlight(ids) {
+    const next = new Set(ids || []);
+    if (next.size === this.hl.size && [...next].every((x) => this.hl.has(x))) return;
+    this.hl = next;
     this._renderComps();
   }
 
@@ -321,11 +332,11 @@ export class SchematicEditor {
         const id = compEl.dataset.id;
         const c = this.project.components.find((q) => q.id === id);
         const T = TYPES[c.type];
-        this._select({ kind: 'comp', id });
         if (T.momentary) {
           this.pressed = id;
           this.opts.onSimPress && this.opts.onSimPress(id, true);
-        } else if (T.click) this.opts.onSimClick && this.opts.onSimClick(id);
+        } else if (DIRECT_TYPES.has(c.type) && T.click) this.opts.onSimClick && this.opts.onSimClick(id);
+        else this.opts.onSimSelect && this.opts.onSimSelect(id, e);
         this.drag = { kind: 'none' };
         return;
       }

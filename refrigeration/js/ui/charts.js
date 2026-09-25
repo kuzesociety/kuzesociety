@@ -40,11 +40,21 @@ export class TrendChart {
   constructor(canvas) {
     this.canvas = canvas;
     this.samples = [];
+    this.marks = [];
     this.window = 1800;
   }
 
   reset() {
     this.samples = [];
+    this.marks = [];
+  }
+
+  /** Marca un cambio hecho por el usuario (línea vertical con etiqueta). */
+  mark(t, label) {
+    const last = this.marks[this.marks.length - 1];
+    if (last && t - last.t < 20) last.label = label;
+    else this.marks.push({ t, label });
+    if (this.marks.length > 40) this.marks.shift();
   }
 
   push(o) {
@@ -69,7 +79,7 @@ export class TrendChart {
       g.fillStyle = muted;
       g.textAlign = 'center';
       g.textBaseline = 'middle';
-      g.fillText('Pulsa Simular: aquí verás cómo evolucionan presiones y temperaturas.', w / 2, h / 2);
+      g.fillText('Aquí verás cómo evolucionan presiones y temperaturas.', w / 2, h / 2);
       return;
     }
     const tEnd = data[data.length - 1].t;
@@ -103,11 +113,11 @@ export class TrendChart {
         rect = { x: 0, y: off, w, h: rh };
         off += rh + gap;
       }
-      this._plot(g, rect, row, view, tStart, tEnd, !wide && row !== rows[rows.length - 1]);
+      this._plot(g, rect, row, view, tStart, tEnd, !wide && row !== rows[rows.length - 1], row === rows[0] || wide);
     }
   }
 
-  _plot(g, r, row, view, tStart, tEnd, compact) {
+  _plot(g, r, row, view, tStart, tEnd, compact, labels) {
     const ink = css('--ink-2');
     const muted = css('--muted');
     const line = css('--line');
@@ -173,6 +183,37 @@ export class TrendChart {
       g.beginPath();
       view.forEach((d, i) => (i ? g.lineTo(x(d.t), yy(d[sr.k])) : g.moveTo(x(d.t), yy(d[sr.k]))));
       g.stroke();
+      g.setLineDash([]);
+    }
+    // Cambios hechos por el usuario.
+    const marks = this.marks.filter((m) => m.t >= tStart && m.t <= tEnd);
+    if (marks.length) {
+      g.strokeStyle = css('--accent');
+      g.fillStyle = css('--accent');
+      g.lineWidth = 1;
+      g.setLineDash([3, 3]);
+      g.font = '600 10.5px "IBM Plex Sans", system-ui, sans-serif';
+      g.textAlign = 'left';
+      g.textBaseline = 'top';
+      // Las etiquetas se apilan en tres líneas; si no caben, solo queda la raya.
+      const lineEnd = [-Infinity, -Infinity, -Infinity];
+      marks.forEach((m) => {
+        const mx = Math.round(x(m.t)) + 0.5;
+        g.beginPath();
+        g.moveTo(mx, T - 4);
+        g.lineTo(mx, B);
+        g.stroke();
+        if (labels) {
+          const txt = m.label.length > 24 ? `${m.label.slice(0, 23)}…` : m.label;
+          const tw = g.measureText(txt).width;
+          const lx = Math.min(mx + 3, R - tw);
+          const line = lineEnd.findIndex((end) => lx > end + 6);
+          if (line >= 0) {
+            g.fillText(txt, lx, T - 3 + line * 12);
+            lineEnd[line] = lx + tw;
+          }
+        }
+      });
       g.setLineDash([]);
     }
     g.restore();

@@ -1,6 +1,6 @@
 // Vista animada del circuito frigorífico (SVG).
 
-import { getRefrigerant, psat, gauge } from './refrigerants.js';
+import { getRefrigerant, psat, psatDew, psatBubble, gauge } from './refrigerants.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 
@@ -23,9 +23,10 @@ function niceCeil(v) {
 }
 
 export class FridgeView {
-  constructor(svg, { onDoor } = {}) {
+  constructor(svg, { onDoor, onPart } = {}) {
     this.svg = svg;
     this.onDoor = onDoor;
+    this.onPart = onPart;
     this.offsets = {};
     this.doorAngle = 0;
     this.refId = null;
@@ -35,7 +36,21 @@ export class FridgeView {
     this.$ = (id) => this.svg.querySelector(`#fv-${id}`);
     this.flows = {};
     for (const k of Object.keys(PATH)) this.flows[k] = this.$(`flow-${k}`);
-    this.$('door').addEventListener('click', () => this.onDoor && this.onDoor());
+    this.$('door').addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.onDoor && this.onDoor();
+    });
+    this.svg.addEventListener('click', (e) => {
+      const el = e.target.closest('[data-part]');
+      if (el && this.onPart) this.onPart(el.dataset.part, e);
+    });
+    this.svg.addEventListener('keydown', (e) => {
+      const el = e.target.closest && e.target.closest('[data-part]');
+      if (el && (e.key === 'Enter' || e.key === ' ') && this.onPart) {
+        e.preventDefault();
+        this.onPart(el.dataset.part, e);
+      }
+    });
     this.$('door').addEventListener('keydown', (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault();
@@ -45,8 +60,8 @@ export class FridgeView {
   }
 
   template() {
-    const pipe = (k, cls, extra = '') =>
-      `<path class="pipe-shell" d="${PATH[k]}"/><path id="fv-pipe-${k}" class="pipe ${cls}" d="${PATH[k]}" ${extra}/><path id="fv-flow-${k}" class="flow" d="${PATH[k]}"/>`;
+    const pipe = (k, cls, part) =>
+      `<g data-part="${part}" class="part-g"><path class="pipe-hit" d="${PATH[k]}"/><path class="pipe-shell" d="${PATH[k]}"/><path id="fv-pipe-${k}" class="pipe ${cls}" d="${PATH[k]}"/><path id="fv-flow-${k}" class="flow" d="${PATH[k]}"/></g>`;
     const fins = [];
     for (let x = 164; x <= 356; x += 6) fins.push(`<line x1="${x}" y1="116" x2="${x}" y2="200"/>`);
     const cfins = [];
@@ -55,8 +70,8 @@ export class FridgeView {
       [0, 120, 240]
         .map((a) => `<ellipse cx="${cx}" cy="${cy - r * 0.5}" rx="${r * 0.22}" ry="${r * 0.48}" transform="rotate(${a} ${cx} ${cy})"/>`)
         .join('');
-    const tag = (id, x, y, w, anchor = 'start') =>
-      `<g id="fv-${id}" class="ftag" transform="translate(${x},${y})"><rect x="${anchor === 'end' ? -w : 0}" y="-11" width="${w}" height="22" rx="4"/><text x="${anchor === 'end' ? -w + 7 : 7}" y="1" dominant-baseline="middle"></text></g>`;
+    const tag = (id, x, y, w, part, anchor = 'start') =>
+      `<g id="fv-${id}" class="ftag" data-part="${part}" transform="translate(${x},${y})"><rect x="${anchor === 'end' ? -w : 0}" y="-11" width="${w}" height="22" rx="4"/><text x="${anchor === 'end' ? -w + 7 : 7}" y="1" dominant-baseline="middle"></text></g>`;
     return `
 <defs>
   <linearGradient id="fv-g-evap" gradientUnits="userSpaceOnUse" x1="0" y1="190" x2="0" y2="126">
@@ -69,13 +84,9 @@ export class FridgeView {
 </defs>
 
 <!-- zonas -->
+<g data-part="room" class="part-g" tabindex="0" role="button" aria-label="Cámara: temperatura y termostato">
 <rect class="zone-room" x="70" y="56" width="350" height="566" rx="8"/>
 <text class="zone-t" x="86" y="80">CÁMARA</text>
-<rect class="zone-unit" x="450" y="56" width="534" height="566" rx="8"/>
-<text class="zone-t" x="466" y="80">UNIDAD CONDENSADORA · EXTERIOR</text>
-<text id="fv-tamb" class="zone-v" x="968" y="80" text-anchor="end"></text>
-
-<!-- cámara: lectura grande y género -->
 <text id="fv-troom" class="big" x="245" y="330" text-anchor="middle">—</text>
 <text class="fl" x="245" y="352" text-anchor="middle">aire de la cámara</text>
 <text id="fv-roominfo" class="fl2" x="245" y="374" text-anchor="middle"></text>
@@ -86,6 +97,16 @@ export class FridgeView {
 </g>
 <text id="fv-tprod" class="fl2" x="185" y="462" text-anchor="middle"></text>
 <line class="floor" x1="84" y1="566" x2="300" y2="566"/>
+</g>
+<g data-part="unit" class="part-g" tabindex="0" role="button" aria-label="Unidad exterior: temperatura exterior">
+<rect class="zone-unit" x="450" y="56" width="534" height="566" rx="8"/>
+<text class="zone-t" x="466" y="80">UNIDAD CONDENSADORA · EXTERIOR</text>
+<text id="fv-tamb" class="zone-v" x="968" y="80" text-anchor="end"></text>
+</g>
+<g data-part="refrigerant" class="refchip" tabindex="0" role="button" aria-label="Cambiar el refrigerante">
+<rect id="fv-ref-bg" x="330" y="66" width="80" height="22" rx="11"/>
+<text id="fv-ref" x="370" y="78" text-anchor="middle" dominant-baseline="middle">R404A</text>
+</g>
 
 <!-- puerta -->
 <g id="fv-door-air" class="door-air">
@@ -99,6 +120,7 @@ export class FridgeView {
 <text id="fv-door-t" class="fl2" x="84" y="592">puerta cerrada</text>
 
 <!-- evaporador -->
+<g data-part="evap" class="part-g" tabindex="0" role="button" aria-label="Evaporador">
 <rect class="housing" x="92" y="104" width="282" height="110" rx="10"/>
 <circle class="fan-ring" cx="124" cy="159" r="27"/>
 <g id="fv-fanE" class="blades" style="transform-origin:124px 159px">${blades(124, 159, 24)}</g>
@@ -111,26 +133,31 @@ export class FridgeView {
 <rect id="fv-ice" class="ice" x="156" y="112" width="206" height="94" rx="6"/>
 <rect id="fv-ice-h" x="156" y="112" width="206" height="94" rx="6" fill="url(#fv-hatch)"/>
 <text class="part" x="233" y="98" text-anchor="middle">EVAPORADOR</text>
+</g>
 <g id="fv-air" class="air">
   <path d="M110,222 C112,262 140,282 176,296"/><path d="M190,222 C194,268 214,292 240,306"/><path d="M290,222 C292,262 300,286 318,302"/>
 </g>
 
 <!-- VET -->
-${pipe('mix', 'lpm')}
+${pipe('mix', 'lpm', 'txv')}
+<g data-part="txv" class="part-g" tabindex="0" role="button" aria-label="Válvula de expansión">
+<rect class="hitbox" x="376" y="116" width="62" height="118"/>
 <g class="valve">
   <path d="M382,212 L402,212 L392,203 Z M382,196 L402,196 L392,205 Z" transform="translate(0,4)"/>
   <path d="M402,205 h10" class="thinline"/><rect x="412" y="198" width="10" height="14" rx="2"/>
 </g>
-<path class="capillary" d="M417,198 V150 Q417,136 406,134"/>
-<rect class="bulb" x="398" y="122" width="16" height="12" rx="3"/>
-<text class="part" x="426" y="226" text-anchor="start">VET</text>
+<path id="fv-capline" class="capillary" d="M417,198 V150 Q417,136 406,134"/>
+<rect id="fv-bulb" class="bulb" x="398" y="122" width="16" height="12" rx="3"/>
+<text id="fv-txv-t" class="part" x="426" y="226" text-anchor="start">VET</text>
+</g>
 
 <!-- líneas -->
-${pipe('suction', 'lpg')}
-${pipe('liquid', 'hpl')}
-${pipe('discharge', 'hpg')}
+${pipe('suction', 'lpg', 'suction')}
+${pipe('liquid', 'hpl', 'liquid')}
+${pipe('discharge', 'hpg', 'discharge')}
 
 <!-- condensador -->
+<g data-part="cond" class="part-g" tabindex="0" role="button" aria-label="Condensador">
 <rect class="housing" x="604" y="84" width="356" height="124" rx="8"/>
 <g class="fins">${cfins.join('')}</g>
 <path class="pipe-shell thin" d="${PATH.condenser}"/>
@@ -140,26 +167,36 @@ ${pipe('discharge', 'hpg')}
 <circle class="fan-ring big" cx="782" cy="146" r="52"/>
 <g id="fv-fanC" class="blades" style="transform-origin:782px 146px">${blades(782, 146, 48)}</g>
 <circle class="hub" cx="782" cy="146" r="6"/>
+<text class="part" x="782" y="228" text-anchor="middle">CONDENSADOR</text>
+</g>
 <g id="fv-hotair" class="air hot">
   <path d="M690,80 C690,66 694,58 700,48"/><path d="M782,80 C782,66 782,58 782,46"/><path d="M874,80 C874,66 870,58 864,48"/>
 </g>
-<text class="part" x="782" y="228" text-anchor="middle">CONDENSADOR</text>
-${pipe('condOut', 'hpl')}
+${pipe('condOut', 'hpl', 'liquid')}
 
 <!-- recipiente -->
+<g data-part="receiver" class="part-g" tabindex="0" role="button" aria-label="Recipiente y carga de refrigerante">
 <rect class="receiver" x="928" y="250" width="40" height="170" rx="18"/>
 <clipPath id="fv-recv-clip"><rect x="930" y="252" width="36" height="166" rx="16"/></clipPath>
 <rect id="fv-recv-liq" class="recv-liq" x="930" y="330" width="36" height="88" clip-path="url(#fv-recv-clip)"/>
 <text class="part" x="922" y="440" text-anchor="end">RECIPIENTE</text>
+</g>
 
 <!-- filtro, visor, solenoide -->
+<g data-part="filter" class="part-g" tabindex="0" role="button" aria-label="Filtro deshidratador">
+<rect class="hitbox" x="840" y="550" width="64" height="46"/>
 <rect class="filter" x="846" y="570" width="52" height="20" rx="9"/>
 <text class="part" x="872" y="562" text-anchor="middle">FILTRO</text>
+</g>
+<g data-part="glass" class="part-g" tabindex="0" role="button" aria-label="Visor de líquido">
+<rect class="hitbox" x="768" y="550" width="44" height="46"/>
 <circle class="glass-ring" cx="790" cy="580" r="13"/>
 <circle id="fv-glass" class="glass" cx="790" cy="580" r="8.5"/>
 <g id="fv-bubbles" class="bubbles"><circle cx="786" cy="577" r="2"/><circle cx="792" cy="583" r="1.6"/><circle cx="794" cy="576" r="1.2"/><circle cx="787" cy="584" r="1.3"/></g>
 <text class="part" x="790" y="562" text-anchor="middle">VISOR</text>
-<g id="fv-sol" class="solenoid">
+</g>
+<g id="fv-sol" class="solenoid part-g" data-part="sol" tabindex="0" role="button" aria-label="Válvula solenoide">
+  <rect class="hitbox" x="676" y="530" width="48" height="66"/>
   <path class="sol-body" d="M686,570 L686,590 L700,580 Z M714,570 L714,590 L700,580 Z"/>
   <line x1="700" y1="580" x2="700" y2="566" class="thinline"/>
   <rect id="fv-sol-coil" class="sol-coil" x="689" y="546" width="22" height="20" rx="3"/>
@@ -167,33 +204,35 @@ ${pipe('condOut', 'hpl')}
 </g>
 
 <!-- compresor -->
+<g data-part="comp" class="part-g" tabindex="0" role="button" aria-label="Compresor">
 <path id="fv-comp" class="compressor" d="M538,520 V452 Q538,420 580,420 Q622,420 622,452 V520 Z"/>
 <rect class="comp-base" x="530" y="520" width="100" height="8" rx="2"/>
 <circle class="comp-motor" cx="580" cy="474" r="17"/>
 <g id="fv-comp-spin" class="comp-spin" style="transform-origin:580px 474px"><path d="M580,457 a17,17 0 0,1 16,11"/><path d="M596,468 l-1,-6 m1,6 l-6,-1"/></g>
 <text class="part" x="580" y="546" text-anchor="middle">COMPRESOR</text>
 <text id="fv-compinfo" class="fl2" x="580" y="564" text-anchor="middle"></text>
+</g>
 
 <!-- presostatos -->
-<g id="fv-pb" class="pstat"><rect x="516" y="330" width="46" height="22" rx="3"/><text x="539" y="342" text-anchor="middle" dominant-baseline="middle">PB</text></g>
+<g id="fv-pb" class="pstat part-g" data-part="pb" tabindex="0" role="button" aria-label="Presostato de baja"><rect x="516" y="330" width="46" height="22" rx="3"/><text x="539" y="342" text-anchor="middle" dominant-baseline="middle">PB</text></g>
 <path class="capillary" d="M516,341 H505"/>
-<g id="fv-pa" class="pstat"><rect x="516" y="376" width="46" height="22" rx="3"/><text x="539" y="388" text-anchor="middle" dominant-baseline="middle">PA</text></g>
+<g id="fv-pa" class="pstat part-g" data-part="pa" tabindex="0" role="button" aria-label="Presostato de alta"><rect x="516" y="376" width="46" height="22" rx="3"/><text x="539" y="388" text-anchor="middle" dominant-baseline="middle">PA</text></g>
 <path class="capillary" d="M562,387 H580"/>
 
 <!-- manómetros -->
 <path class="hose lp" d="M505,300 H598"/>
 <path class="hose hp" d="M580,244 H840 V256"/>
-<g id="fv-gLP" class="gauge lp" transform="translate(660,318)"></g>
-<g id="fv-gHP" class="gauge hp" transform="translate(840,318)"></g>
+<g id="fv-gLP" class="gauge lp part-g" data-part="gLP" tabindex="0" role="button" aria-label="Manómetro de baja" transform="translate(660,318)"></g>
+<g id="fv-gHP" class="gauge hp part-g" data-part="gHP" tabindex="0" role="button" aria-label="Manómetro de alta" transform="translate(840,318)"></g>
 
 <!-- etiquetas de medida -->
-${tag('t-dis', 590, 226, 120)}
-${tag('t-liq', 940, 470, 150, 'end')}
-${tag('t-filt', 872, 612, 110)}
-${tag('t-evin', 250, 256, 130)}
-${tag('t-evout', 382, 110, 150)}
-${tag('t-suc', 498, 506, 108, 'end')}
-${tag('t-coil', 96, 230, 176)}
+${tag('t-dis', 590, 226, 120, 'discharge')}
+${tag('t-liq', 940, 470, 150, 'liquid', 'end')}
+${tag('t-filt', 872, 612, 110, 'filter')}
+${tag('t-evin', 250, 256, 130, 'txv')}
+${tag('t-evout', 382, 110, 150, 'suction')}
+${tag('t-suc', 498, 506, 108, 'suction', 'end')}
+${tag('t-coil', 96, 230, 176, 'evap')}
 
 <!-- leyenda -->
 <g class="legend" transform="translate(462,606)">
@@ -332,9 +371,21 @@ ${tag('t-coil', 96, 230, 176)}
       this.$('pb').style.display = info.hasPB ? '' : 'none';
     }
 
-    // Manómetros.
-    this.setGauge(this.gLP, o.PeG, o.Te);
-    this.setGauge(this.gHP, o.PcG, o.Tc);
+    // Manómetros (en mezclas: rocío en baja, burbuja en alta).
+    this.setGauge(this.gLP, o.PeG, o.Te, o.zeotropic ? ' rocío' : '');
+    this.setGauge(this.gHP, o.PcG, o.Tc, o.zeotropic ? ' burb.' : '');
+    const refT = this.$('ref');
+    if (refT.textContent !== o.refrigerant) {
+      refT.textContent = o.refrigerant;
+      const w = Math.max(64, (refT.getComputedTextLength ? refT.getComputedTextLength() : o.refrigerant.length * 8) + 26);
+      const bg = this.$('ref-bg');
+      bg.setAttribute('width', w);
+      bg.setAttribute('x', 410 - w);
+      refT.setAttribute('x', 410 - w / 2);
+    }
+    this.$('txv-t').textContent = info && info.capillary ? 'CAPILAR' : 'VET';
+    this.$('bulb').style.display = info && info.capillary ? 'none' : '';
+    this.$('capline').style.display = info && info.capillary ? 'none' : '';
 
     // Textos.
     this.$('tamb').textContent = `${fmt(o.Tamb)} °C`;
@@ -345,18 +396,24 @@ ${tag('t-coil', 96, 230, 176)}
     this.setTag('t-dis', `T descarga ${fmt(o.Tdis, 0)} °C`);
     this.setTag('t-liq', running ? `T líquido ${fmt(o.Tliq)} °C · SC ${fmt(o.SC)} K` : `T líquido ${fmt(o.Tliq)} °C`);
     this.setTag('t-filt', o.filterDT > 0.8 ? `tras filtro ${fmt(o.TafterFilter)} °C (Δ ${fmt(o.filterDT)} K)` : '');
-    this.setTag('t-evin', `entrada ${fmt(o.Te)} °C`);
+    this.setTag('t-evin', `entrada ${fmt(o.TevapIn ?? o.Te)} °C`);
     this.setTag('t-evout', running ? `salida ${fmt(o.TevapOut)} °C · RC ${fmt(o.SHevap)} K` : `salida ${fmt(o.TevapOut)} °C`);
     this.setTag('t-suc', running ? `aspiración ${fmt(o.Tsuc)} °C` : `aspiración ${fmt(o.Tsuc)} °C`);
     this.setTag('t-coil', `batería ${fmt(o.Tcoil)} °C · hielo ${fmt(o.ice, 2)} kg`);
   }
 
-  setGauge(g, p, T) {
+  setGauge(g, p, T, suffix = '') {
     if (!g) return;
     const a = gaugeAngle(g, p);
     g.needle.setAttribute('transform', `rotate(${a.toFixed(1)})`);
     g.val.textContent = `${fmt(p)} bar`;
-    g.sat.textContent = `${fmt(T)} °C`;
+    g.sat.textContent = `${fmt(T)} °C${suffix}`;
+  }
+
+  /** Marca la pieza cuya tarjeta está abierta. */
+  select(part) {
+    for (const el of this.svg.querySelectorAll('[data-part].sel')) el.classList.remove('sel');
+    if (part) for (const el of this.svg.querySelectorAll(`[data-part="${part}"]`)) el.classList.add('sel');
   }
 }
 
@@ -384,11 +441,11 @@ function gaugeSVG(g, name, ref) {
   }
   // Escala interior de temperatura de saturación (como en los manómetros reales).
   const temps = (name === 'BAJA' ? [-40, -30, -20, -10, 0, 10, 20] : [-20, 0, 20, 40, 60]).filter((t) => {
-    const p = gauge(psat(ref, t));
+    const p = gauge(name === 'BAJA' ? psatDew(ref, t) : psatBubble(ref, t));
     return p >= g.min && p <= g.max && t < ref.Tc - 2;
   });
   for (const t of temps) {
-    const p = gauge(psat(ref, t));
+    const p = gauge(name === 'BAJA' ? psatDew(ref, t) : psatBubble(ref, t));
     const a = (gaugeAngle(g, p) * Math.PI) / 180;
     const rt = R - 30;
     s += `<text class="tks" x="${(Math.cos(a) * rt).toFixed(1)}" y="${(Math.sin(a) * rt).toFixed(1)}" text-anchor="middle" dominant-baseline="middle">${t}°</text>`;
