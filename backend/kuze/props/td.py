@@ -25,10 +25,13 @@ from kuze.props.features import _ewm_prev, _ftime
 TRUST_HALF_LIFE_WEEKS = 10.0
 TRUST_PRIOR_TARGETS = 6.0
 
+# Walk-forward 2019-2025 (40k player-games), log loss: usage only 0.4553 -> + QB trust 0.4549
+# -> + contract/draft capital 0.4537 (Brier 0.1445). "Scored last week" (TD-rate average) 0.621.
 TD_FEATURES = ["pos_code", "team_implied", "team_spread", "game_total", "v_team_pass_td", "v_team_rush_td",
                "f_tgt_share_n", "f_carry_share_n", "f_rz_tgt_share_n", "f_i10_share", "f_ez_share_n", "f_i5_share_n",
                "f_rz_car_share", "f_snap", "games_prev", "f_td_rate_rec", "trust_rz_share", "trust_ez_share",
-               "trust_td_share", "trust_games", "dv_td", "dv_rtd", "f_adot", "team_qb_value"]
+               "trust_td_share", "trust_games", "dv_td", "dv_rtd", "f_adot", "team_qb_value",
+               "apy_cap_pct", "draft_overall"]
 
 
 def qb_trust_features(pg: pd.DataFrame, qr: pd.DataFrame, starters: pd.DataFrame) -> pd.DataFrame:

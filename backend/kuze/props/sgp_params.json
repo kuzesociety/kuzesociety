@@ -1,0 +1,148 @@
+{
+ "stats": {
+  "receptions": {
+   "RB": {
+    "n": 10377,
+    "margin": -0.0825,
+    "total": 0.0307,
+    "pass_factor": 0.1438,
+    "rush_factor": -0.0505
+   },
+   "TE": {
+    "n": 8669,
+    "margin": -0.0337,
+    "total": 0.0704,
+    "pass_factor": 0.1816,
+    "rush_factor": -0.0435
+   },
+   "WR": {
+    "n": 16970,
+    "margin": -0.015,
+    "total": 0.1034,
+    "pass_factor": 0.2296,
+    "rush_factor": -0.0819
+   }
+  },
+  "receiving_yards": {
+   "RB": {
+    "n": 10377,
+    "margin": -0.0225,
+    "total": 0.0521,
+    "pass_factor": 0.1633,
+    "rush_factor": -0.0387
+   },
+   "TE": {
+    "n": 8669,
+    "margin": 0.003,
+    "total": 0.1009,
+    "pass_factor": 0.2036,
+    "rush_factor": -0.0444
+   },
+   "WR": {
+    "n": 16970,
+    "margin": 0.0288,
+    "total": 0.1363,
+    "pass_factor": 0.2635,
+    "rush_factor": -0.077
+   }
+  },
+  "targets": {
+   "RB": {
+    "n": 10377,
+    "margin": -0.1173,
+    "total": 0.0263,
+    "pass_factor": 0.1485,
+    "rush_factor": -0.0613
+   },
+   "TE": {
+    "n": 8669,
+    "margin": -0.0893,
+    "total": 0.0438,
+    "pass_factor": 0.1634,
+    "rush_factor": -0.0453
+   },
+   "WR": {
+    "n": 16970,
+    "margin": -0.1051,
+    "total": 0.0721,
+    "pass_factor": 0.2056,
+    "rush_factor": -0.0809
+   }
+  },
+  "carries": {
+   "QB": {
+    "n": 3866,
+    "margin": 0.1352,
+    "total": 0.0104,
+    "pass_factor": 0.041,
+    "rush_factor": -0.0017
+   },
+   "RB": {
+    "n": 10377,
+    "margin": 0.2359,
+    "total": 0.0156,
+    "pass_factor": -0.1076,
+    "rush_factor": 0.1927
+   }
+  },
+  "rushing_yards": {
+   "QB": {
+    "n": 3866,
+    "margin": -0.0307,
+    "total": 0.0524,
+    "pass_factor": -0.011
+   },
+   "RB": {
+    "n": 10377,
+    "margin": 0.2052,
+    "total": 0.0597,
+    "pass_factor": -0.1409
+   }
+  },
+  "rush_rec_yards": {
+   "RB": {
+    "n": 10377,
+    "margin": 0.161,
+    "total": 0.0752,
+    "pass_factor": -0.0499,
+    "rush_factor": 0.2383
+   }
+  },
+  "attempts": {
+   "QB": {
+    "n": 3866,
+    "margin": -0.2052,
+    "total": 0.1348,
+    "pass_factor": 0.7237,
+    "rush_factor": -0.177
+   }
+  },
+  "completions": {
+   "QB": {
+    "n": 3866,
+    "margin": -0.0453,
+    "total": 0.2006,
+    "pass_factor": 0.7675,
+    "rush_factor": -0.1957
+   }
+  },
+  "passing_yards": {
+   "QB": {
+    "n": 3866,
+    "margin": 0.0966,
+    "total": 0.366,
+    "rush_factor": -0.1978
+   }
+  },
+  "passing_tds": {
+   "QB": {
+    "n": 3866,
+    "margin": 0.3054,
+    "total": 0.4757,
+    "pass_factor": 0.3318,
+    "rush_factor": -0.1286
+   }
+  }
+ },
+ "note": "loadings are correlations of normal scores (2019-2025, out-of-sample)"
+}

@@ -28,7 +28,8 @@ def main():
     for c in [c for c in trust.columns if c.startswith(("trust", "c_"))]:
         d[c] = d[c].fillna(0.0)
     d = d[~((d["position"] == "QB") & ~d["is_starting_qb"])]
-    cf = TD.contract_features(nv.load("contracts"), range(2016, 2027))
+    cf = TD.contract_features(nv.load("contracts", columns=["gsis_id", "year_signed", "years", "apy_cap_pct", "draft_overall"]),
+                              range(2016, 2027))
     d = d.merge(cf, on=["player_id", "season"], how="left")
     d["apy_cap_pct"] = d["apy_cap_pct"].fillna(0.004)
     d["draft_overall"] = d["draft_overall"].fillna(300)

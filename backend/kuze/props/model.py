@@ -63,8 +63,10 @@ def assemble(pf: pd.DataFrame, tf: pd.DataFrame, dv: pd.DataFrame, dq: pd.DataFr
     d["team_implied"] = d["game_total"] / 2 + d["team_spread"] / 2
     d["is_starting_qb"] = np.where(home, d["home_qb_id"], d["away_qb_id"]) == d["player_id"]
     dv2 = dv.rename(columns={"pos": "position"})
+    n0 = len(d)
     d = d.merge(dv2, on=["game_id", "opp", "position"], how="left", suffixes=("", "_dv"))
     d = d.merge(dq, on=["game_id", "opp"], how="left")
+    assert len(d) == n0, f"assemble: merge changed row count {n0} -> {len(d)}"
     # league means for the opponent adjustment (per season to track drift)
     d["dv_ypt"] = d["dv_yds"] / d["dv_tgt"].replace(0, np.nan)
     d["dv_cr"] = d["dv_rec"] / d["dv_tgt"].replace(0, np.nan)
