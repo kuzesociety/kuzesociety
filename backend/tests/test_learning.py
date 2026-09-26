@@ -44,3 +44,18 @@ def test_real_drift_is_corrected_and_bounded(db):
     corr = feedback.update_prop_corrections(db)
     assert corr["attempts"]["factor"] == pytest.approx(0.92, abs=0.02)
     assert corr["passing_yards"]["factor"] == 0.85          # clipped: never trust a huge swing blindly
+
+
+def test_player_stats_keep_their_game_ids(monkeypatch):
+    # nflverse weekly stats already carry game_id; merging schedule ids on top used to leave only
+    # game_id_x / game_id_y and crash prop grading
+    import pandas as pd
+    from kuze.learning import grading
+    week = pd.DataFrame({"player_id": ["p1"], "season": [2026], "week": [3], "game_id": ["2026_03_ATL_GB"],
+                         "team": ["GB"], "rushing_tds": [1], "receiving_tds": [0], "rushing_yards": [80.0],
+                         "receiving_yards": [12.0]})
+    monkeypatch.setattr(grading.nv, "load", lambda name, season: week.copy())
+    cache: dict = {}
+    assert grading._game_stats_available(cache, "2026_03_ATL_GB")
+    assert grading._player_stat(cache, "2026_03_ATL_GB", "p1", "rush_rec_yards") == 92.0
+    assert grading._player_stat(cache, "2026_03_ATL_GB", "p1", "tds") == 1.0

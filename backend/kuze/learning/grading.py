@@ -138,11 +138,13 @@ def _load_stats(cache: dict, season: int) -> pd.DataFrame:
         df["tds"] = df["rushing_tds"].fillna(0) + df["receiving_tds"].fillna(0)
         df["rush_rec_yards"] = df["rushing_yards"].fillna(0) + df["receiving_yards"].fillna(0)
         df["team"] = normalize_team(df["team"])
-        sched = _schedule().reset_index()
-        sched = sched[sched["season"] == season]
-        gid = pd.concat([sched.rename(columns={"home_team": "team"})[["game_id", "week", "team"]],
-                         sched.rename(columns={"away_team": "team"})[["game_id", "week", "team"]]])
-        cache[season] = df.merge(gid, on=["week", "team"])
+        if "game_id" not in df.columns:   # older stat files: attach game ids from the schedule
+            sched = _schedule().reset_index()
+            sched = sched[sched["season"] == season]
+            gid = pd.concat([sched.rename(columns={"home_team": "team"})[["game_id", "week", "team"]],
+                             sched.rename(columns={"away_team": "team"})[["game_id", "week", "team"]]])
+            df = df.merge(gid, on=["week", "team"])
+        cache[season] = df
     return cache[season]
 
 
