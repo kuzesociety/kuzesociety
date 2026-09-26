@@ -71,7 +71,7 @@ export default function Settings() {
               <dt>Model</dt><dd>{status.model_version} · through {status.trained_through}</dd>
               <dt>Data built</dt><dd>{ago(status.data_built_at)}</dd>
               <dt>Props engine</dt><dd>{status.props_ready ? 'ready' : 'building…'}</dd>
-              <dt>Odds sync</dt><dd>{status.odds_api ? 'The Odds API connected (Hard Rock + consensus every 30 min)' : 'off — set ODDS_API_KEY to auto-pull Hard Rock & sharp lines'}</dd>
+              <dt>Odds sync</dt><dd>{status.odds_api ? 'The Odds API connected: Hard Rock + sharp lines hourly, Hard Rock props every 4 h for games within 48 h' : 'off — set ODDS_API_KEY to auto-pull Hard Rock & sharp lines'}</dd>
               <dt>AI analyst</dt><dd>{status.analyst ? 'enabled' : 'off — set ANTHROPIC_API_KEY'}</dd>
             </dl>
           )}

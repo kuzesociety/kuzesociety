@@ -121,14 +121,21 @@ class OddsClient:
             log.warning("odds api error %s: %s", path, exc)
             return None
 
+    # Quota cost on The Odds API = markets x regions (a `bookmakers` list of up to 10 counts as one region).
     def game_odds(self) -> list[EventOdds]:
+        """Spreads, totals and moneylines from every book in three regions: 3 x 3 = 9 credits."""
         data = self._get(f"/sports/{SPORT}/odds", {"regions": "us,us2,eu", "markets": "h2h,spreads,totals",
                                                     "oddsFormat": "american"})
         return parse_events(data or [])
 
+    def events(self) -> list[EventOdds]:
+        """Upcoming events without odds (ids for the per-event endpoint): free."""
+        return parse_events(self._get(f"/sports/{SPORT}/events", {}) or [])
+
     def event_props(self, event_id: str, markets: tuple[str, ...] = PROP_MARKETS) -> list[dict]:
+        """One game's player props at Hard Rock only: len(markets) credits (10)."""
         data = self._get(f"/sports/{SPORT}/events/{event_id}/odds",
-                         {"regions": "us,us2", "markets": ",".join(markets), "oddsFormat": "american"})
+                         {"bookmakers": settings.book_key, "markets": ",".join(markets), "oddsFormat": "american"})
         return parse_props(data or {})
 
 

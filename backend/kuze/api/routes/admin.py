@@ -55,7 +55,7 @@ def learn(user: User = Depends(current_user)):
 
 @router.post("/admin/odds-sync")
 def odds_sync(user: User = Depends(current_user)):
-    return _spawn("odds", loop.odds_job)
+    return _spawn("odds", loop.odds_now_job)
 
 
 @router.get("/model")

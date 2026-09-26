@@ -108,9 +108,22 @@ def refresh_job() -> dict:
 
 
 def odds_job() -> dict:
+    """Game lines from every book (hourly, ~9 quota credits per run)."""
     from kuze import services
     with session_scope() as db:
-        return services.sync_odds(db, include_props=True)
+        return services.sync_odds(db)
+
+
+def prop_odds_job() -> dict:
+    """Hard Rock props for games in the next 48 hours (every 4 hours, ~10 credits per game)."""
+    from kuze import services
+    with session_scope() as db:
+        return services.sync_prop_odds(db)
+
+
+def odds_now_job() -> dict:
+    """Manual sync from the Settings page: lines and near-term props."""
+    return {"lines": odds_job(), "props": prop_odds_job()}
 
 
 def paper_trade_job(window_minutes: int = 75) -> dict:
@@ -241,6 +254,8 @@ def start_scheduler():
     sched.add_job(lambda: _run("weekly_learning", weekly_learning_job), "cron", day_of_week="tue", hour=9, minute=13,
                   id="learning")
     if settings.odds_api_key:
-        sched.add_job(lambda: _run("odds", odds_job), "cron", minute="*/30", id="odds")
+        # ~15K credits/month in season: fits The Odds API's 20K plan
+        sched.add_job(lambda: _run("odds", odds_job), "cron", minute=5, id="odds")
+        sched.add_job(lambda: _run("prop_odds", prop_odds_job), "cron", hour="*/4", minute=35, id="prop_odds")
     sched.start()
     return sched

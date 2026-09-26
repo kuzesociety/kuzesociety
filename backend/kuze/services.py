@@ -199,7 +199,7 @@ def record_schedule_market(db: Session) -> int:
     return n
 
 
-def sync_odds(db: Session, include_props: bool = False) -> dict:
+def sync_odds(db: Session) -> dict:
     """Pull every book from The Odds API: store Hard Rock lines, per-book snapshots and the consensus."""
     from kuze.data.odds import SHARP_BOOKS
     from kuze.models.market import consensus
@@ -232,10 +232,31 @@ def sync_odds(db: Session, include_props: bool = False) -> dict:
             if cur is None or any(getattr(cur, k) != v for k, v in new.items() if v is not None):
                 save_hr_lines(db, r["game_id"], new, None, source="api")
                 n_hr += 1
-        if include_props:
-            _sync_props(db, client, ev.event_id, r["game_id"])
     db.commit()
     return {"enabled": True, "games": n_games, "hard_rock_updates": n_hr, "requests_remaining": client.remaining}
+
+
+def sync_prop_odds(db: Session, window_hours: float = 48.0) -> dict:
+    """Hard Rock player props for games kicking off within ``window_hours`` (books post most props
+    2-3 days out, and each game costs quota, so the rest of the slate waits)."""
+    client = OddsClient()
+    if not client.enabled:
+        return {"enabled": False}
+    st = pipeline.state
+    now = utcnow()
+    events = client.events()
+    up = st.features[st.features["result"].isna()]
+    n = 0
+    for _, r in up.iterrows():
+        ko = kickoff_utc(r)
+        if not (dt.timedelta(0) <= ko - now <= dt.timedelta(hours=window_hours)):
+            continue
+        ev = match_event(events, r["home_team"], r["away_team"], ko)
+        if ev is not None:
+            _sync_props(db, client, ev.event_id, r["game_id"])
+            n += 1
+    db.commit()
+    return {"enabled": True, "games": n, "requests_remaining": client.remaining}
 
 
 def _sync_props(db: Session, client: OddsClient, event_id: str, game_id: str) -> None:
