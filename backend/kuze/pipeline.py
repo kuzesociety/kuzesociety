@@ -135,7 +135,8 @@ class Pipeline:
         blend, report = GM.estimate_blend(oos, midweek_lines())
         model = GM.GameModel.train(feats)
         model.blend = blend
-        model.backtest = {"blend_report": report, **GM.backtest_summary(oos, blend)}
+        model.backtest = {"blend_report": report, **GM.backtest_summary(oos, blend),
+                          "midweek": GM.midweek_summary(oos, midweek_lines())}
         km = KeyNumberModel.load()
         model.margin_resid_sd = km.margin_sd
         path = settings.models_dir / "game_model.pkl"

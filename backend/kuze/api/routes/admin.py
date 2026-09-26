@@ -64,8 +64,16 @@ def model_info(user: User = Depends(current_user), db: Session = Depends(get_db)
     if st is None:
         raise HTTPException(503, "warming up")
     m = st.model
+    backtest = dict(m.backtest)
+    if "midweek" not in backtest:   # models trained before the summary existed
+        oos_path = settings.data_dir / "derived" / "walk_forward_oos.parquet"
+        if oos_path.exists():
+            import pandas as pd
+            from kuze.models.game_model import midweek_summary
+            from kuze.pipeline import midweek_lines
+            backtest["midweek"] = midweek_summary(pd.read_parquet(oos_path), midweek_lines())
     out = {"version": m.version, "trained_through": m.trained_through, "blend": m.blend.__dict__,
-           "backtest": m.backtest, "key_numbers": {"fitted_on": st.keynum.fitted_on, "core_sd": st.keynum.core_sd,
+           "backtest": backtest, "key_numbers": {"fitted_on": st.keynum.fitted_on, "core_sd": st.keynum.core_sd,
                                                     "tail_sd": st.keynum.tail_sd, "tail_w": st.keynum.tail_w,
                                                     "margin_sd": st.keynum.margin_sd},
            "thresholds": feedback._kv(db, feedback.THRESHOLD_KEY) or {"values": feedback.current_thresholds(db)},

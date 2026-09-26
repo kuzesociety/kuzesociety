@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Line, LineChart, ReferenceLine, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { api } from '../api'
 import { ErrorBox, Loading } from '../components'
-import { num, pct } from '../format'
+import { num, pct, signed } from '../format'
 
 function SeasonTooltip({ active, payload, label, fmt }: any) {
   if (!active || !payload?.length) return null
@@ -29,8 +29,12 @@ export default function ModelPage() {
     ou: r.ou_n_3 ? r.ou_w_3 / r.ou_n_3 : null,
     mae_model: r.mae_model, mae_line: r.mae_line, mae_fair: r.mae_fair,
   }))
-  const tot = bs.reduce((a, r) => ({ aw: a.aw + r.ats_w_3, an: a.an + r.ats_n_3, ow: a.ow + r.ou_w_3, on: a.on + r.ou_n_3 }), { aw: 0, an: 0, ow: 0, on: 0 })
-  const recent = bs.filter((r) => r.season >= 2020).reduce((a, r) => ({ aw: a.aw + r.ats_w_3, an: a.an + r.ats_n_3, ow: a.ow + r.ou_w_3, on: a.on + r.ou_n_3 }), { aw: 0, an: 0, ow: 0, on: 0 })
+  const sum = (xs: any[]) => xs.reduce((a, r) => ({ aw: a.aw + r.ats_w_3, an: a.an + r.ats_n_3, ow: a.ow + r.ou_w_3, on: a.on + r.ou_n_3 }), { aw: 0, an: 0, ow: 0, on: 0 })
+  const tot = sum(bs)
+  const older = sum(bs.filter((r) => r.season >= 2013 && r.season <= 2020))
+  const recent = sum(bs.filter((r) => r.season >= 2021))
+  const rate = (w: number, n: number) => pct(n ? w / n : null)
+  const mw = m.backtest?.midweek
   const br = m.backtest?.blend_report ?? {}
   const th = m.thresholds?.values ?? {}
   return (
@@ -58,18 +62,27 @@ export default function ModelPage() {
         </div>
         <div className="card col">
           <h3>Edge bars (learned from CLV)</h3>
-          <table><tbody>
+          <div className="table-wrap"><table><tbody>
             {Object.entries(th).map(([k, v]: any) => <tr key={k}><td>{k}</td><td className="num">PLAY ≥ {pct(v.play, 1)}</td><td className="num">LEAN ≥ {pct(v.lean, 1)}</td></tr>)}
-          </tbody></table>
+          </tbody></table></div>
           <small>{Object.values(m.thresholds?.notes ?? {}).slice(0, 2).join(' · ') || 'Defaults until 25+ graded bets per market carry closing-line value.'}</small>
         </div>
       </div>
 
-      <div className="notice">
-        Walk-forward backtest (each season predicted by a model trained only on earlier seasons). Betting every game where the model disagreed with the <strong>closing</strong> line by 3+ points:
-        ATS {tot.aw}/{tot.an} = <strong>{pct(tot.an ? tot.aw / tot.an : null)}</strong> overall, {pct(recent.an ? recent.aw / recent.an : null)} since 2020;
-        O/U {tot.ow}/{tot.on} = <strong>{pct(tot.on ? tot.ow / tot.on : null)}</strong> overall, {pct(recent.on ? recent.ow / recent.on : null)} since 2020. Break-even at −110 is 52.4%.
-        Closing lines are the hardest benchmark — edges live earlier in the week (Wednesday-line test: ~55–60% at 3+ pts) and in Hard Rock prices that differ from the sharp consensus.
+      <div className="notice col" style={{ gap: '0.4rem' }}>
+        <div>
+          Walk-forward backtest: each season predicted by a model trained only on earlier seasons. Rule tested: bet every game where the model
+          disagreed with the <strong>closing</strong> line by 3+ points. ATS {tot.aw}/{tot.an} = <strong>{rate(tot.aw, tot.an)}</strong> overall,
+          but {rate(older.aw, older.an)} in 2013–2020 and <strong>{rate(recent.aw, recent.an)} since 2021</strong>. Over/under {tot.ow}/{tot.on} = {rate(tot.ow, tot.on)} overall,
+          {' '}{rate(recent.ow, recent.on)} since 2021. Break-even at −110 is 52.4%.
+        </div>
+        <div>
+          <strong>What that means:</strong> the modern closing line is at least as good as this model; out-predicting the final number is not where the money is.
+          {mw && <> Against Wednesday lines ({mw.seasons}, the only years with archived midweek lines) the same rule went {mw.w_mid}/{mw.n_mid} = {rate(mw.w_mid, mw.n_mid)},
+            vs {rate(mw.w_close, mw.n_close)} at the close for the same games, and by kickoff the line had moved toward the model {pct(mw.moved_toward, 0)} of the time, away from it {pct(mw.moved_away, 0)}{' '}
+            (average {signed(mw.avg_move_pts, 1)} pts in the model's direction).</>}
+          {' '}The edge to chase is timing (bet early, beat the close) and Hard Rock prices that lag the sharp consensus. Your CLV on the Bets page is the scoreboard.
+        </div>
       </div>
 
       <div className="grid grid-2">
@@ -140,9 +153,9 @@ export default function ModelPage() {
       {m.td_backtest && (
         <div className="card">
           <h3>Anytime TD model (walk-forward)</h3>
-          <table><tbody>{Object.entries(m.td_backtest.scores ?? {}).map(([k, v]: any) => (
+          <div className="table-wrap"><table><tbody>{Object.entries(m.td_backtest.scores ?? {}).map(([k, v]: any) => (
             <tr key={k}><td>{({ p_full: 'Usage + QB trust', p_contract: 'Usage + QB trust + contract', p_notrust: 'Usage only', p_struct: 'Poisson baseline', p_naive: '“Scored recently”' } as Record<string, string>)[k] ?? k}</td><td className="num">log loss {num(v.logloss, 4)}</td><td className="num">Brier {num(v.brier, 4)}</td></tr>
-          ))}</tbody></table>
+          ))}</tbody></table></div>
           <small>Lower is better. Recent TD scoring alone is a terrible predictor; red-zone/end-zone usage is what matters.</small>
         </div>
       )}

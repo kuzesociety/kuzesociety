@@ -267,3 +267,28 @@ def backtest_summary(oos: pd.DataFrame, blend: Blend) -> dict:
             rec[f"ou_n_{thr}"] = int((o != 0).sum())
         rows.append(rec)
     return {"by_season": rows}
+
+
+def midweek_summary(oos: pd.DataFrame, midweek: dict, thr: float = 3.0) -> dict | None:
+    """Disagreements of thr+ points with the Wednesday line (Westgate SuperContest, 2013-2020): the hit
+    rate against that line and against the close for the same games, and whether the market moved toward
+    the model by kickoff (the closing-line value a bettor would have captured by betting early)."""
+    d = oos.assign(mid=oos["game_id"].map(midweek)).dropna(subset=["mid", "result"])
+    if d.empty:
+        return None
+    e = d["model_margin"] - d["mid"]
+    pick = d[e.abs() >= thr]
+    side = np.sign(e[e.abs() >= thr])
+
+    def record(line: str) -> tuple[int, int]:
+        o = np.sign(pick["result"] - pick[line]) * side
+        return int((o > 0).sum()), int((o != 0).sum())
+
+    w_mid, n_mid = record("mid")
+    w_close, n_close = record("spread_line")
+    move = (pick["spread_line"] - pick["mid"]) * side
+    return {"seasons": f"{int(d['season'].min())}-{int(d['season'].max())}", "threshold": thr,
+            "w_mid": w_mid, "n_mid": n_mid, "w_close": w_close, "n_close": n_close,
+            "moved_toward": float((move > 0).mean()), "moved_away": float((move < 0).mean()),
+            "avg_move_pts": float(move.mean())}
+
