@@ -8,7 +8,6 @@ benchmark to beat (``spread_line`` / ``total_line``), never as a model input.
 from __future__ import annotations
 
 import datetime as dt
-import math
 from zoneinfo import ZoneInfo
 
 import numpy as np

@@ -128,20 +128,33 @@ def update_blend(db: Session, model, results: pd.DataFrame) -> dict:
     return report
 
 
-def update_prop_corrections(db: Session, half_life_days: float = 42.0, k: float = 150.0) -> dict:
-    """Online multiplicative bias correction per stat from logged projections vs actual stats."""
+def update_prop_corrections(db: Session, half_life_days: float = 42.0, k: float = 150.0,
+                            clip: tuple[float, float] = (0.85, 1.15)) -> dict:
+    """Online multiplicative drift correction per stat from logged (raw) projections vs actual stats.
+
+    Ratio of recency-weighted means, shrunk toward 1 with ``k`` pseudo-observations. A mean of log
+    ratios would be badly biased here: yardage is zero-inflated and right-skewed, so even perfectly
+    unbiased projections give E[log(actual/proj)] << 0 (it would have cut receiving yards ~50%).
+    Logged projections are the model's raw output (before any correction), so factors don't compound.
+    """
     rows = db.scalars(select(PropPrediction).where(PropPrediction.actual.isnot(None))).all()
     now = utcnow()
     acc: dict = {}
     for r in rows:
+        if r.projection is None or r.projection <= 0:
+            continue
         age = (now - (r.taken_at if r.taken_at.tzinfo else r.taken_at.replace(tzinfo=dt.timezone.utc))).days
         w = 0.5 ** (age / half_life_days)
-        lr = math.log((max(r.actual, 0) + 1) / (max(r.projection, 0) + 1))
-        s = acc.setdefault(r.stat, [0.0, 0.0, 0])
-        s[0] += w * lr
-        s[1] += w
-        s[2] += 1
-    corr = {stat: {"factor": round(math.exp(v[0] / (v[1] + k)), 4), "n": v[2]} for stat, v in acc.items()}
+        s = acc.setdefault(r.stat, [0.0, 0.0, 0.0, 0])
+        s[0] += w * max(r.actual, 0.0)
+        s[1] += w * r.projection
+        s[2] += w
+        s[3] += 1
+    corr = {}
+    for stat, (num, den, wsum, n) in acc.items():
+        mbar = den / wsum if wsum else 0.0
+        factor = (num + k * mbar) / (den + k * mbar) if den + k * mbar > 0 else 1.0
+        corr[stat] = {"factor": round(float(np.clip(factor, *clip)), 4), "n": n}
     _set(db, PROP_CORR_KEY, {"corrections": corr, "updated": now.isoformat()})
     return corr
 

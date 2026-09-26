@@ -24,6 +24,10 @@ class Settings:
     odds_api_key: str | None = field(default_factory=lambda: _env("ODDS_API_KEY"))
     anthropic_api_key: str | None = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
     analyst_model: str = field(default_factory=lambda: _env("KUZE_ANALYST_MODEL", "claude-opus-5"))
+    # Props: weight on the model vs the book's no-vig price when both sides are posted (1.0 = model only).
+    # Out of sample our QB volume P(over) ran ~3 points high in 2023-25; half-trusting the market halves
+    # errors like that while a real edge still shows. The game model's weights are estimated from data.
+    prop_model_weight: float = field(default_factory=lambda: float(_env("KUZE_PROP_MODEL_WEIGHT", "0.5")))
     # Hard Rock Bet key on The Odds API.
     book_key: str = field(default_factory=lambda: _env("KUZE_BOOK_KEY", "hardrockbet"))
 

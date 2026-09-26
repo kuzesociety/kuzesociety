@@ -8,7 +8,11 @@ Pipeline (walk-forward validated, see scripts/backtest_props.py):
    x opponent yards/target allowed to the position (vs league).
 3. Calibration: gradient boosting on the structural projection + components corrects biases
    (volume regression to the mean, role changes, game script).
-4. Distribution: actual/projection ratios from out-of-sample history in bins of projection size.
+4. Recalibration (QB passing stats): walk-forward projections of QB volume were too extreme - a
+   26-attempt projection averaged 28.5 actual, a 39-attempt one 36 (OOS slope ~0.66). A linear
+   shrink fitted on out-of-sample history fixes the tails, which is exactly where bets come from.
+   Other stats already had OOS slopes ~1 and recalibrating them only added noise.
+5. Distribution: actual/projection ratios from out-of-sample history in bins of projection size.
    Books hang prop lines near the median, and yardage is right-skewed (mean > median), so the
    full distribution matters: an 82-yard mean projection can still be an UNDER at 74.5.
 """
@@ -37,8 +41,28 @@ STATS = {
     "passing_yards": (("QB",), "s_pyds"),
     "passing_tds": (("QB",), "s_ptd"),
 }
+FITTED = Path(__file__).resolve().parent / "fitted"
+OOS_SNAPSHOT = FITTED / "props_oos.parquet"     # compact walk-forward results shipped with the code
 TEAM_TARGETS = ["team_targets", "team_designed", "team_pass_att", "team_pass_td", "team_rush_td"]
 N_BINS = 10
+# stats whose out-of-sample projections needed shrinking toward the mean (validated, nested by season)
+RECAL_STATS = ("attempts", "completions", "passing_yards", "passing_tds")
+
+
+def fit_recal(proj: np.ndarray, actual: np.ndarray, season: np.ndarray, decay: float = 0.8) -> tuple[float, float]:
+    """Recency-weighted least squares of actual on projection: actual ~ a + b * proj."""
+    w = np.power(decay, season.max() - season)
+    X = np.c_[np.ones(len(proj)), proj]
+    a, b = np.linalg.solve(X.T @ (X * w[:, None]), X.T @ (w * actual))
+    b = float(np.clip(b, 0.4, 1.0))
+    a = float(np.average(actual - b * proj, weights=w))   # re-center after clipping the slope
+    return a, b
+
+
+def apply_recal(proj, ab: tuple[float, float] | None, floor: float = 0.05):
+    if ab is None:
+        return proj
+    return np.maximum(ab[0] + ab[1] * np.asarray(proj, dtype=float), floor)
 
 
 def assemble(pf: pd.DataFrame, tf: pd.DataFrame, dv: pd.DataFrame, dq: pd.DataFrame, games: pd.DataFrame,
@@ -158,6 +182,22 @@ CAL_FEATURES = ["s_proj", "f_tgt_share", "f_tgt_share_n", "f_air_share_n", "f_ca
                 "dv_ypc_adj", "dq_ypa_adj", "pos_code", "lg_targets", "lg_pass_att", "team_qb_value", "opp_qb_value"]
 RECENCY_DECAY = 0.8   # per season, for training-sample weights
 POS_CODE = {"QB": 0, "RB": 1, "WR": 2, "TE": 3, "FB": 1}
+# features that mean nothing for the position are replaced by a constant outside every feature's range,
+# so the trees can't key on noise such as a QB's receiving efficiency from one trick-play target (which
+# acted as a player identifier). A constant, not NaN: an all-missing column breaks the binner, and NaN
+# routing at predict time would depend on whether training happened to see missing values.
+RECEIVING_ONLY = ("f_tgt_share", "f_tgt_share_n", "f_air_share_n", "f_catch_rate", "f_ypt", "f_adot", "f_deep_share")
+PASSING_ONLY = ("f_ypa", "f_comp", "f_att_pg")
+MASKED = -9.0
+
+
+def cal_matrix(d: pd.DataFrame, s_proj: pd.Series) -> pd.DataFrame:
+    X = d.assign(s_proj=np.asarray(s_proj, dtype=float), pos_code=d["position"].map(POS_CODE).fillna(2))
+    X = X[CAL_FEATURES].astype(float).reset_index(drop=True)
+    qb = (d["position"] == "QB").to_numpy()
+    X.loc[qb, [c for c in RECEIVING_ONLY if c in X]] = MASKED
+    X.loc[~qb, [c for c in PASSING_ONLY if c in X]] = MASKED
+    return X
 
 
 def eligible(d: pd.DataFrame, stat: str) -> pd.Series:
@@ -211,6 +251,7 @@ class RatioDistribution:
 class PropModel:
     team: TeamVolumeModel = field(default_factory=TeamVolumeModel)
     calibrators: dict = field(default_factory=dict)
+    recal: dict = field(default_factory=dict)   # stat -> (a, b) linear shrink of the projection
     dists: dict = field(default_factory=dict)
     metrics: dict = field(default_factory=dict)
     trained_through: str = ""
@@ -219,7 +260,6 @@ class PropModel:
     def _xy(d: pd.DataFrame, stat: str):
         s = d[eligible(d, stat)].copy()
         s["s_proj"] = s[STATS[stat][1]]
-        s["pos_code"] = s["position"].map(POS_CODE).fillna(2)
         return s
 
     @classmethod
@@ -238,14 +278,20 @@ class PropModel:
             gb = HistGradientBoostingRegressor(max_iter=200, learning_rate=0.05, max_leaf_nodes=15, min_samples_leaf=80,
                                                l2_regularization=1.0)
             w = np.power(RECENCY_DECAY, s["season"].max() - s["season"]) * base
-            gb.fit(s[CAL_FEATURES].astype(float), ratio, sample_weight=w)
+            gb.fit(cal_matrix(s, s["s_proj"]), ratio, sample_weight=w)
             m.calibrators[stat] = gb
             if oos is not None and stat in oos:
-                o = oos[stat]
-                m.dists[stat] = {"_all": RatioDistribution.fit(o["proj"].to_numpy(), o["actual"].to_numpy())}
-                for pos, og in o.groupby("position"):
-                    if len(og) >= 1500:
-                        m.dists[stat][pos] = RatioDistribution.fit(og["proj"].to_numpy(), og["actual"].to_numpy())
+                o = oos[stat].dropna(subset=["proj", "actual"])
+                proj = o["proj"].to_numpy(dtype=float)
+                if stat in RECAL_STATS:
+                    m.recal[stat] = fit_recal(proj, o["actual"].to_numpy(dtype=float), o["season"].to_numpy())
+                    proj = apply_recal(proj, m.recal[stat])
+                act = o["actual"].to_numpy(dtype=float)
+                m.dists[stat] = {"_all": RatioDistribution.fit(proj, act)}
+                for pos in o["position"].unique():
+                    sel = (o["position"] == pos).to_numpy()
+                    if sel.sum() >= 1500:
+                        m.dists[stat][pos] = RatioDistribution.fit(proj[sel], act[sel])
         m.trained_through = f"{int(d['season'].max())} wk{int(d.loc[d['season'] == d['season'].max(), 'week'].max())}"
         return m
 
@@ -254,8 +300,8 @@ class PropModel:
         out = d[["player_id", "name", "position", "team", "opp", "game_id"]].copy()
         for stat, (pos, scol) in STATS.items():
             s_proj = d[scol]
-            X = d.assign(s_proj=s_proj, pos_code=d["position"].map(POS_CODE).fillna(2))[CAL_FEATURES].astype(float)
-            pred = np.clip(self.calibrators[stat].predict(X), 0.2, 3.0) * s_proj.clip(lower=0.25)
+            pred = np.clip(self.calibrators[stat].predict(cal_matrix(d, s_proj)), 0.2, 3.0) * s_proj.clip(lower=0.25)
+            pred = apply_recal(pred, getattr(self, "recal", {}).get(stat))
             out[stat] = np.where(d["position"].isin(pos), pred, np.nan)
             out[f"{stat}_struct"] = np.where(d["position"].isin(pos), s_proj, np.nan)
         return out

@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, log_loss
 
@@ -22,14 +21,15 @@ def main():
     games = nv.load_schedules()
     for c in ("home_team", "away_team"):
         games[c] = normalize_team(games[c])
-    qr = pd.read_parquet(settings.data_dir / "derived" / "props_qb_receiver.parquet")
+    from kuze.props.engine import engine
+    qr = engine._datasets(nv.current_season())["qb_receiver"]
     trust = TD.qb_trust_features(d, qr, TD.expected_starters(games))
     d = d.merge(trust, on=["game_id", "player_id"], how="left")
     for c in [c for c in trust.columns if c.startswith(("trust", "c_"))]:
         d[c] = d[c].fillna(0.0)
     d = d[~((d["position"] == "QB") & ~d["is_starting_qb"])]
     cf = TD.contract_features(nv.load("contracts", columns=["gsis_id", "year_signed", "years", "apy_cap_pct", "draft_overall"]),
-                              range(2016, 2027))
+                              range(2016, nv.current_season() + 1))
     d = d.merge(cf, on=["player_id", "season"], how="left")
     d["apy_cap_pct"] = d["apy_cap_pct"].fillna(0.004)
     d["draft_overall"] = d["draft_overall"].fillna(300)
@@ -43,10 +43,13 @@ def main():
         te = pd.concat([te.reset_index(drop=True), tv.predict(te.reset_index(drop=True))], axis=1)
         for dd in (tr, te):
             dd["pos_code"] = dd["position"].map(PM.POS_CODE).fillna(2)
-        full = TD.TDModel().fit(tr)
-        no_trust = TD.TDModel(); no_trust.features = [f for f in TD.TD_FEATURES if not f.startswith("trust")]; no_trust.fit(tr)
+        # production model = usage + QB trust + contract; ablations drop contract, then trust
+        contract = ["apy_cap_pct", "draft_overall"]
+        base = [f for f in TD.TD_FEATURES if f not in contract]
+        withc = TD.TDModel().fit(tr)
+        full = TD.TDModel(); full.features = base; full.fit(tr)
+        no_trust = TD.TDModel(); no_trust.features = [f for f in base if not f.startswith("trust")]; no_trust.fit(tr)
         te["p_full"] = full.predict(te)
-        withc = TD.TDModel(); withc.features = TD.TD_FEATURES + ["apy_cap_pct", "draft_overall"]; withc.fit(tr)
         te["p_contract"] = withc.predict(te)
         te["p_notrust"] = no_trust.predict(te)
         te["p_struct"] = TD.structural_td_prob(te)
@@ -61,7 +64,11 @@ def main():
     cal = p.groupby(bins, observed=True).agg(n=("any_td", "size"), pred=("p_full", "mean"), actual=("any_td", "mean"))
     print(cal.round(3))
     p.to_parquet(settings.data_dir / "derived" / "td_oos.parquet")
-    (settings.data_dir / "td_backtest.json").write_text(json.dumps({"scores": res, "calibration": cal.reset_index().astype(str).to_dict("records")}, indent=2))
+    report = json.dumps({"scores": res, "calibration": cal.reset_index().astype(str).to_dict("records")}, indent=2)
+    (settings.data_dir / "td_backtest.json").write_text(report)
+    from kuze.props.model import FITTED
+    FITTED.mkdir(exist_ok=True)
+    (FITTED / "td_backtest.json").write_text(report)   # snapshot shipped with the code
 
 
 if __name__ == "__main__":

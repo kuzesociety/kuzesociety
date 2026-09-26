@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from kuze.props.features import _ewm_prev, _ftime
+from kuze.props.features import _ftime
 
 TRUST_HALF_LIFE_WEEKS = 10.0
 TRUST_PRIOR_TARGETS = 6.0
@@ -49,7 +49,6 @@ def qb_trust_features(pg: pd.DataFrame, qr: pd.DataFrame, starters: pd.DataFrame
     q = q.sort_values(["qb_id", "player_id", "season", "week"])
     q["_key"] = q["qb_id"] + "|" + q["player_id"]
     cols = ["tgt", "rz_tgt", "ez_tgt", "td", "q_rz", "q_ez", "q_td", "q_tgt", "third_tgt", "late_tgt"]
-    hl = pd.Timedelta(days=7 * TRUST_HALF_LIFE_WEEKS)
     # cumulative decayed sums *including* each game -> joined to the NEXT game via as-of merge
     agg = []
     for key, g in q.groupby("_key"):

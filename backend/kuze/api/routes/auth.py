@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+import os
+import time
+
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -31,13 +34,29 @@ def _me(u: User) -> dict:
             "kelly_mult": u.kelly_mult, "max_bet_pct": u.max_bet_pct, "unit_size": u.unit_size}
 
 
+# failed logins per client IP (in memory): 10 misses in 15 minutes locks that IP out for the window
+_FAILS: dict[str, list[float]] = {}
+MAX_FAILS, FAIL_WINDOW = 10, 900.0
+
+
+def _recent_fails(ip: str) -> list[float]:
+    now = time.time()
+    _FAILS[ip] = [t for t in _FAILS.get(ip, []) if now - t < FAIL_WINDOW]
+    return _FAILS[ip]
+
+
 @router.post("/login")
-def login(body: LoginIn, response: Response, db: Session = Depends(get_db)):
+def login(body: LoginIn, request: Request, response: Response, db: Session = Depends(get_db)):
+    ip = request.client.host if request.client else "?"
+    if len(_recent_fails(ip)) >= MAX_FAILS:
+        raise HTTPException(429, "too many failed logins - try again in 15 minutes")
     u = db.scalar(select(User).where(User.username == body.username))
     if u is None or u.username == "system" or not verify_password(body.password, u.password_hash):
+        _FAILS[ip].append(time.time())
         raise HTTPException(401, "wrong username or password")
     token = make_token(u)
-    response.set_cookie(COOKIE, token, httponly=True, samesite="lax", max_age=TOKEN_DAYS * 86400)
+    secure = request.url.scheme == "https" or os.environ.get("KUZE_SECURE_COOKIES") == "1"
+    response.set_cookie(COOKIE, token, httponly=True, samesite="lax", secure=secure, max_age=TOKEN_DAYS * 86400)
     return {"token": token, "user": _me(u)}
 
 

@@ -133,7 +133,8 @@ def price_prop(game_id: str, body: PropLineIn, user: User = Depends(current_user
 @router.get("/td")
 def td_board(game_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     _need_engine()
-    players = [p for p in engine.players(game_id) if p["position"] in ("RB", "WR", "TE", "QB")]
+    everyone = [p for p in engine.players(game_id) if p["position"] in ("RB", "WR", "TE", "QB")]
+    players = [p for p in everyone if not p.get("out")]
     players.sort(key=lambda p: -(p["td"]["p_anytime"] or 0))
     td_lines = {pl.player_id: pl for pl in latest_prop_lines(db, game_id) if pl.stat == "anytime_td"}
     th = current_thresholds(db)
@@ -151,7 +152,9 @@ def td_board(game_id: str, user: User = Depends(current_user), db: Session = Dep
                                  "label": label_bet(ev, "td", "MEDIUM+" if (p["p_play"] or 0) >= 0.95 else "LOW", None, th),
                                  "line_id": pl.id}
         rows.append(item)
-    return {"players": rows, "note": "Anytime TD is volatile and high-hold: not a primary play unless the edge is large. "
+    out = [{"name": p["name"], "team": p["team"], "position": p["position"], "status": p["status"]} for p in everyone if p.get("out")]
+    return {"players": rows, "out": out,
+            "note": "Anytime TD is volatile and high-hold: not a primary play unless the edge is large. "
                                      "QB-trust and contract features were each validated out of sample (small but real "
                                      "gains in log loss); 'scored recently' is not predictive."}
 

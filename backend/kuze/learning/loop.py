@@ -15,7 +15,8 @@ from kuze.config import settings
 from kuze.db.models import Bet, JobRun, PropLine, PropPrediction, User, utcnow
 from kuze.db.session import session_scope
 from kuze.learning import feedback, grading
-from kuze.pipeline import next_week, pipeline
+from kuze.pipeline import pipeline
+from kuze.props import model as PM
 
 log = logging.getLogger(__name__)
 SYSTEM_USER = "system"
@@ -139,22 +140,33 @@ def paper_trade_job(window_minutes: int = 75) -> dict:
                                model_prob=b.get("win_pct_no_push"), model_ev=b["ev"], label=b["label"],
                                confidence=b.get("confidence"), notes="auto paper bet at kickoff"))
                     placed += 1
-            # props: log the projection for every entered Hard Rock prop line (feeds calibration)
+            # props: log the raw projection of every expected player's stats at kickoff (feeds the online
+            # drift correction), with the Hard Rock line where one was entered; paper-bet PLAY/SMALLER props
             if engine.state is not None:
-                for pl in db.scalars(select(PropLine).where(PropLine.game_id == gid)):
-                    if pl.stat == "anytime_td":
+                lines = {(pl.player_id, pl.stat): pl for pl in db.scalars(select(PropLine).where(PropLine.game_id == gid))
+                         if pl.stat != "anytime_td"}
+                seen = {(x.player_id, x.stat) for x in db.scalars(select(PropPrediction).where(PropPrediction.game_id == gid))}
+                rows = engine.state.rows[engine.state.rows["game_id"] == gid]
+                for _, r in rows.iterrows():
+                    if float(r.get("p_play", 1.0) or 0) < 0.5:
                         continue
+                    for stat in PM.STATS:
+                        raw = r.get(f"raw_{stat}")
+                        if raw is None or pd.isna(raw) or (r["player_id"], stat) in seen:
+                            continue
+                        pl = lines.get((r["player_id"], stat))
+                        p_over = None
+                        if pl is not None:
+                            p_over = engine.price(gid, pl.player_id, stat, pl.line, None, None)["p_over"]
+                        db.add(PropPrediction(game_id=gid, player_id=r["player_id"], stat=stat, projection=float(raw),
+                                              line=pl.line if pl is not None else None, p_over=p_over))
+                        seen.add((r["player_id"], stat))
+                        logged += 1
+                for (pid, stat), pl in lines.items():
                     try:
-                        pr = engine.price(gid, pl.player_id, pl.stat, pl.line, pl.over_odds, pl.under_odds)
+                        pr = engine.price(gid, pid, stat, pl.line, pl.over_odds, pl.under_odds)
                     except KeyError:
                         continue
-                    exists = db.scalar(select(PropPrediction).where(PropPrediction.game_id == gid,
-                                                                    PropPrediction.player_id == pl.player_id,
-                                                                    PropPrediction.stat == pl.stat))
-                    if exists is None:
-                        db.add(PropPrediction(game_id=gid, player_id=pl.player_id, stat=pl.stat,
-                                              projection=pr["projection"], line=pl.line, p_over=pr["p_over"]))
-                        logged += 1
                     for s in pr["sides"]:
                         if s["label"] in ("PLAY", "SMALLER"):
                             db.add(Bet(user_id=sysu.id, game_id=gid, market="prop", side=s["side"],
@@ -195,12 +207,10 @@ def weekly_learning_job() -> dict:
 
 def challenger_gate(champion) -> dict:
     """Retrain on all completed games; promote only if predictions are sane and backtest is not worse."""
-    import copy
     st = pipeline.state
     prev_bt = champion.backtest.get("by_season", [])
     challenger = pipeline.train(st.features)   # saves as game_model.pkl, champion moved to _prev
     up = pipeline.upcoming()
-    from kuze.models.game_model import GameModel, prepare
     pc = challenger.predict(up)
     pm = champion.predict(up)
     diff = float(np.abs(pc["model_margin"].to_numpy() - pm["model_margin"].to_numpy()).mean()) if len(up) else 0.0

@@ -45,7 +45,8 @@ async def lifespan(app: FastAPI):
             log.info("created users: %s", created)
     if settings.jwt_secret == "change-me-in-production":
         log.warning("KUZE_JWT_SECRET is not set - set it before exposing the app")
-    threading.Thread(target=_warm_up, daemon=True).start()
+    if os.environ.get("KUZE_WARMUP", "1") == "1":
+        threading.Thread(target=_warm_up, daemon=True).start()
     scheduler = None
     if os.environ.get("KUZE_SCHEDULER", "1") == "1":
         scheduler = loop.start_scheduler()

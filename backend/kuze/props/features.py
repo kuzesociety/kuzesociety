@@ -94,23 +94,30 @@ def player_features(pg: pd.DataFrame) -> pd.DataFrame:
     d["f_i5_share"] = share("i5_car", "team_i5_car", "i5_share")
     d["f_snap"] = d["offense_pct_ew"].fillna(d["position"].map(lambda p: POS_PRIOR.get(p, POS_PRIOR["WR"])["snap"]))
 
-    def eff(num_ew, den_ew, prior_key, n_prior, prev_total, pos_default=None):
+    def ratio(num_ew, den_ew, min_den=0.5):
+        # an EWMA denominator decays toward 0 for someone who hasn't had the opportunity in a long time;
+        # below min_den per game the ratio is noise (a QB with one old target had 10 million yds/target)
+        return d[num_ew] / d[den_ew].where(d[den_ew] >= min_den)
+
+    def eff(num_ew, den_ew, prior_key, n_prior, prev_total, bounds, pos_default=None):
         prior = d["position"].map(lambda p: POS_PRIOR.get(p, POS_PRIOR["WR"])[prior_key]) if pos_default is None else pos_default
-        raw = (d[num_ew] / d[den_ew].replace(0, np.nan)).fillna(prior)
+        raw = ratio(num_ew, den_ew).clip(*bounds).fillna(prior)
         n = d[prev_total].clip(upper=300)
         return (raw * n + prior * n_prior) / (n + n_prior)
 
-    d["f_catch_rate"] = eff("receptions_ew", "tgt_ew", "catch_rate", EFF_PRIOR_N["catch_rate"], "tgt_prev_total")
-    d["f_ypt"] = eff("receiving_yards_ew", "tgt_ew", "ypt", EFF_PRIOR_N["ypt"], "tgt_prev_total")
-    d["f_ypc"] = eff("rushing_yards_ew", "carries_ew", "ypc", EFF_PRIOR_N["ypc"], "car_prev_total")
-    d["f_adot"] = (d["air_yards_ew"] / d["tgt_ew"].replace(0, np.nan)).fillna(8.0)
-    d["f_ypa"] = eff("passing_yards_ew", "attempts_ew", "ypt", EFF_PRIOR_N["ypa"], "att_prev_total", pos_default=6.6)
-    d["f_comp"] = eff("completions_ew", "attempts_ew", "ypt", EFF_PRIOR_N["comp"], "att_prev_total", pos_default=0.63)
+    d["f_catch_rate"] = eff("receptions_ew", "tgt_ew", "catch_rate", EFF_PRIOR_N["catch_rate"], "tgt_prev_total", (0.0, 1.0))
+    d["f_ypt"] = eff("receiving_yards_ew", "tgt_ew", "ypt", EFF_PRIOR_N["ypt"], "tgt_prev_total", (-2.0, 25.0))
+    d["f_ypc"] = eff("rushing_yards_ew", "carries_ew", "ypc", EFF_PRIOR_N["ypc"], "car_prev_total", (-2.0, 12.0))
+    d["f_adot"] = ratio("air_yards_ew", "tgt_ew").clip(-5.0, 30.0).fillna(8.0)
+    d["f_ypa"] = eff("passing_yards_ew", "attempts_ew", "ypt", EFF_PRIOR_N["ypa"], "att_prev_total", (2.0, 12.0),
+                     pos_default=6.6)
+    d["f_comp"] = eff("completions_ew", "attempts_ew", "ypt", EFF_PRIOR_N["comp"], "att_prev_total", (0.3, 0.85),
+                      pos_default=0.63)
     d["f_att_pg"] = d["attempts_ew"].fillna(0)
     d["f_qb_car_pg"] = d["carries_ew"].fillna(0)
-    d["f_td_rate_rec"] = (d["receiving_tds_ew"] / d["tgt_ew"].replace(0, np.nan)).fillna(0.04)
-    d["f_deep_share"] = (d["deep_tgt_ew"] / d["tgt_ew"].replace(0, np.nan)).fillna(0.1)
-    d["f_fumble_rate"] = (d["fumbles_lost_ew"] / (d["tgt_ew"] + d["carries_ew"]).replace(0, np.nan)).fillna(0.005)
+    d["f_td_rate_rec"] = ratio("receiving_tds_ew", "tgt_ew").clip(0.0, 0.5).fillna(0.04)
+    d["f_deep_share"] = ratio("deep_tgt_ew", "tgt_ew").clip(0.0, 1.0).fillna(0.1)
+    d["f_fumble_rate"] = (d["fumbles_lost_ew"] / (d["tgt_ew"] + d["carries_ew"]).where(lambda x: x >= 0.5)).clip(0, 0.2).fillna(0.005)
     drop = [c for c in d.columns if c.endswith("_p")]
     return d.drop(columns=drop)
 

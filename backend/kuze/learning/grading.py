@@ -71,7 +71,7 @@ def grade_bets(db: Session, km: KeyNumberModel | None = None) -> dict:
         if pd.isna(g.get("result")):
             continue
         margin, total = float(g["result"]), float(g["total"])
-        home, away = g["home_team"], g["away_team"]
+        home = g["home_team"]
         from kuze.analysis.game_report import kickoff_utc
         ko = kickoff_utc(g)
         close = closing_market(db, bet.game_id, g, km, ko)

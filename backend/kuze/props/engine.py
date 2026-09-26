@@ -13,6 +13,7 @@ from kuze.data import nflverse as nv
 from kuze.features.availability import pregame_play_prob
 from kuze.features.pbp_prep import normalize_team
 from kuze.models import betting as B
+from kuze.models.distributions import Outcome
 from kuze.props import features as F
 from kuze.props import model as PM
 from kuze.props import td as TD
@@ -75,8 +76,15 @@ class PropsEngine:
         inj = nv.load("injuries", season)
         inj = inj[inj["week"] == week] if len(inj) else inj
         rw = nv.load("rosters_weekly", season, columns=["season", "week", "team", "gsis_id", "status", "full_name", "position"])
+        if len(rw):
+            rw = rw[rw["week"] <= week]
+            rw = rw.assign(team=normalize_team(rw["team"]))
         rw_wk = rw[rw["week"] == week] if len(rw) else rw
         rstat = {g: s for g, s in zip(rw_wk.get("gsis_id", []), rw_wk.get("status", []))}
+        # each player's latest roster team this season: departed / released players drop out entirely
+        # (their old shares are redistributed over whoever is still there)
+        latest_team = ({} if rw.empty else
+                       rw.sort_values("week").drop_duplicates("gsis_id", keep="last").set_index("gsis_id")["team"].to_dict())
         istat = {g: s for g, s in zip(inj.get("gsis_id", []), inj.get("report_status", [])) if isinstance(s, str)}
         prac = {g: s for g, s in zip(inj.get("gsis_id", []), inj.get("practice_status", [])) if isinstance(s, str)}
         last = pg.sort_values(["season", "week"]).groupby("player_id").tail(1)
@@ -94,6 +102,8 @@ class PropsEngine:
                     q = last[last["player_id"] == qb_id]
                     pl = pd.concat([pl, q.assign(team=team)]) if len(q) else pl
                 for p in pl.itertuples(index=False):
+                    if latest_team and p.player_id != qb_id and latest_team.get(p.player_id) != team:
+                        continue   # on another team now, or on no roster this season
                     rs = rstat.get(p.player_id)
                     if rs is None and len(rw_wk) and p.player_id not in rstat:
                         rs = "MISSING"
@@ -155,6 +165,7 @@ class PropsEngine:
         proj = model.project(up)
         up = up.reset_index(drop=True)
         for stat in PM.STATS:
+            up[f"raw_{stat}"] = proj[stat].to_numpy()   # logged for the online drift correction
             up[f"proj_{stat}"] = proj[stat].to_numpy() * self.corrections.get(stat, 1.0)
         tdrows = self._td_rows(up, model)
         up["p_td"] = tdm.predict(tdrows)
@@ -193,11 +204,16 @@ class PropsEngine:
         return g
 
     def _oos(self) -> dict:
+        """Walk-forward (out-of-sample) projections vs actuals: they shape the prop distributions and the
+        QB recalibration. Uses a local backtest run if there is one, else the snapshot shipped with the code."""
         out = {}
         for stat in PM.STATS:
             p = _derived(f"props_oos_{stat}.parquet")
             if p.exists():
                 out[stat] = pd.read_parquet(p)
+        if not out and PM.OOS_SNAPSHOT.exists():
+            snap = pd.read_parquet(PM.OOS_SNAPSHOT)
+            out = {stat: g.drop(columns="stat").reset_index(drop=True) for stat, g in snap.groupby("stat")}
         return out
 
     def _add_td_features(self, d: pd.DataFrame, qr: pd.DataFrame, games: pd.DataFrame, cur: int) -> pd.DataFrame:
@@ -238,7 +254,8 @@ class PropsEngine:
             out.append({
                 "player_id": r["player_id"], "name": r["name"], "position": r["position"], "team": r["team"],
                 "opp": r["opp"], "p_play": round(float(r.get("p_play", 1.0) or 0), 2),
-                "status": r.get("report_status") or r.get("roster_status"), "practice": r.get("practice_status"),
+                "status": _status_text(r.get("report_status"), r.get("roster_status")), "practice": r.get("practice_status"),
+                "out": bool(float(r.get("p_play", 1.0) or 0) < 0.05),
                 "usage": {"target_share": _r(r["f_tgt_share_n"]), "air_share": _r(r["f_air_share_n"]),
                           "carry_share": _r(r["f_carry_share_n"]), "snap_pct": _r(r["f_snap"]),
                           "rz_target_share": _r(r["f_rz_tgt_share_n"]), "ez_target_share": _r(r["f_ez_share_n"]),
@@ -282,18 +299,32 @@ class PropsEngine:
             return res
         proj = float(r[f"proj_{stat}"])
         dist = self.state.model.dist(stat, r["position"])
-        p_over, p_push, p_under = dist.prob_over(proj, line)
+        m_over, p_push, m_under = dist.prob_over(proj, line)
+        p_over, p_under, mkt_over = m_over, m_under, None
+        w = settings.prop_model_weight
+        if over_odds is not None and under_odds is not None:
+            # fair = book's no-vig P(over) + w * (model - book), on the no-push scale
+            mkt_over, _ = B.devig(over_odds, under_odds, "multiplicative")
+            live = 1.0 - p_push
+            model_nopush = m_over / live if live > 0 else 0.5
+            fair = mkt_over + w * (model_nopush - mkt_over)
+            p_over, p_under = fair * live, (1.0 - fair) * live
         out = {"stat": stat, "label_text": STAT_LABELS[stat], "line": line, "projection": proj,
+               "projection_raw": float(r.get(f"raw_{stat}", proj)),
                "median": float(np.median(dist.samples(proj))), "p_over": p_over, "p_under": p_under, "p_push": p_push,
+               "p_over_model": m_over, "p_over_market": mkt_over, "model_weight": w if mkt_over is not None else 1.0,
                "sides": []}
-        conf = "HIGH" if (r.get("p_play", 1) or 0) >= 0.95 else "MEDIUM"
+        p_play = float(r.get("p_play", 1) or 0)
+        conf = "HIGH" if p_play >= 0.95 else "MEDIUM"
+        if mkt_over is None:
+            conf = "MEDIUM"    # one-sided price: the book's fair number is unknown, so the edge is less certain
         if r.get("report_status") == "Questionable":
             conf = "LOW"
+        if p_play < 0.5:
+            conf = "UNKNOWN"   # not expected to play: label_bet turns this into UNKNOWN
         for side, odds, pw, pl in (("over", over_odds, p_over, p_under), ("under", under_odds, p_under, p_over)):
             if odds is None:
                 continue
-            o = B.Outcome(pw, p_push, pl) if hasattr(B, "Outcome") else None
-            from kuze.models.distributions import Outcome
             o = Outcome(pw, p_push, pl)
             ev = B.expected_value(o, odds)
             out["sides"].append({"side": side, "odds": odds, "win": pw, "ev": ev, "kelly": B.kelly_fraction(o, odds),
@@ -307,6 +338,18 @@ class PropsEngine:
         if sel.empty:
             raise KeyError(f"{player_id} not projected for {game_id}")
         return sel.iloc[0]
+
+
+ROSTER_TEXT = {"RES": "Injured reserve", "INA": "Inactive", "PUP": "PUP", "SUS": "Suspended", "DEV": "Practice squad",
+               "MISSING": "Not on roster", "NWT": "Not with team", "EXE": "Exempt"}
+
+
+def _status_text(report: str | None, roster: str | None) -> str | None:
+    if isinstance(report, str) and report:
+        return report
+    if isinstance(roster, str) and roster not in ("ACT", ""):
+        return ROSTER_TEXT.get(roster, roster)
+    return None
 
 
 def _r(x, nd: int = 3):

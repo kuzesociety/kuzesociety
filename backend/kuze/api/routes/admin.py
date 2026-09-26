@@ -72,8 +72,10 @@ def model_info(user: User = Depends(current_user), db: Session = Depends(get_db)
            "live_blend": feedback._kv(db, feedback.BLEND_KEY), "prop_corrections": feedback._kv(db, feedback.PROP_CORR_KEY),
            "features": {"margin": __import__("kuze.models.game_model", fromlist=["x"]).MARGIN_FEATURES,
                         "total": __import__("kuze.models.game_model", fromlist=["x"]).TOTAL_FEATURES}}
+    from kuze.props.model import FITTED
     for name in ("props_backtest.json", "td_backtest.json"):
-        p = settings.data_dir / name
-        if p.exists():
-            out[name.replace(".json", "")] = json.loads(p.read_text())
+        for p in (settings.data_dir / name, FITTED / name):   # local run first, else the shipped snapshot
+            if p.exists():
+                out[name.replace(".json", "")] = json.loads(p.read_text())
+                break
     return out
