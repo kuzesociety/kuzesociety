@@ -79,6 +79,26 @@ def round_half(x: float) -> float:
     return round(x * 2) / 2
 
 
+def fair_spread_line(k, pk, from_spread_outcome) -> float:
+    """Half-point home line whose cover probability (pushes excluded) is closest to 50%."""
+    best, best_d = 0.0, 9.0
+    for line in np.arange(-40, 40.5, 0.5):
+        o = from_spread_outcome(k, pk, +1, float(line))
+        d = abs(o.win_no_push - 0.5)
+        if d < best_d:
+            best, best_d = float(line), d
+    return best
+
+
+def fair_total_line(t, pt, from_total_outcome) -> float:
+    best, best_d = 44.0, 9.0
+    for line in np.arange(20, 80.5, 0.5):
+        d = abs(from_total_outcome(t, pt, "over", float(line)).win_no_push - 0.5)
+        if d < best_d:
+            best, best_d = float(line), d
+    return best
+
+
 # ---------------------------------------------------------------------------------------------
 def apply_qb_override(st, row: pd.Series, side: str, qb_id: str) -> pd.Series:
     """Recompute QB features for ``side`` if the user sets/confirms a different starter."""
@@ -259,7 +279,10 @@ def analyze(game_id: str, hr: HardRockLines | None = None, qb_overrides: dict | 
     k, pk = km.margin_pmf(fm)
     ml_home = moneyline_outcome(k, pk, +1)
     p_home = ml_home.win_no_push
-    fair_home_line = -round_half(fm)
+    from kuze.models.distributions import spread_outcome, total_outcome
+    fair_home_line = fair_spread_line(k, pk, spread_outcome)
+    t_sup, t_pmf = km.total_pmf(ft)
+    fair_tot_line = fair_total_line(t_sup, t_pmf, total_outcome)
     report = {
         "game": {"game_id": game_id, "season": season, "week": week, "home": home, "away": away,
                  "kickoff_utc": ko.isoformat(), "hours_to_kickoff": round(hours, 1),
@@ -274,8 +297,8 @@ def analyze(game_id: str, hr: HardRockLines | None = None, qb_overrides: dict | 
             "fair_margin": round(fm, 2), "fair_total": round(ft, 2),
             "beta_spread": round(fair["beta_spread"], 3), "beta_total": round(fair["beta_total"], 3),
             "fair_spread": {"home": fair_home_line, "away": -fair_home_line,
-                            "text": fmt_spread(home if fm >= 0 else away, -abs(round_half(fm)))},
-            "fair_total_line": round_half(ft),
+                            "text": fmt_spread(home if fair_home_line <= 0 else away, -abs(fair_home_line))},
+            "fair_total_line": fair_tot_line,
             "win_prob": {"home": round(p_home, 4), "away": round(1 - p_home, 4)},
             "fair_ml": {"home": round(B.prob_to_american(p_home)), "away": round(B.prob_to_american(1 - p_home))},
             "projection": {home: round((ft + fm) / 2, 1), away: round((ft - fm) / 2, 1)},
@@ -492,4 +515,6 @@ def _jsonable(o):
         return bool(o)
     if isinstance(o, (pd.Timestamp, dt.datetime, dt.date)):
         return o.isoformat()
+    if o is pd.NaT or (hasattr(pd, "NA") and o is pd.NA):
+        return None
     return o

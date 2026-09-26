@@ -16,16 +16,20 @@ def _env(name: str, default: str | None = None) -> str | None:
 @dataclass(frozen=True)
 class Settings:
     data_dir: Path = field(default_factory=lambda: Path(_env("KUZE_DATA_DIR", str(ROOT / "data"))))
-    db_url: str = field(default_factory=lambda: _env("KUZE_DB_URL", f"sqlite:///{ROOT / 'data' / 'kuze.db'}"))
+    db_url_env: str | None = field(default_factory=lambda: _env("KUZE_DB_URL"))
     # How long an in-season (still changing) nflverse file is trusted before re-download.
     live_ttl_hours: float = field(default_factory=lambda: float(_env("KUZE_LIVE_TTL_HOURS", "6")))
     first_season: int = field(default_factory=lambda: int(_env("KUZE_FIRST_SEASON", "2006")))
     jwt_secret: str = field(default_factory=lambda: _env("KUZE_JWT_SECRET", "change-me-in-production"))
     odds_api_key: str | None = field(default_factory=lambda: _env("ODDS_API_KEY"))
     anthropic_api_key: str | None = field(default_factory=lambda: _env("ANTHROPIC_API_KEY"))
-    analyst_model: str = field(default_factory=lambda: _env("KUZE_ANALYST_MODEL", "claude-opus-5-5"))
+    analyst_model: str = field(default_factory=lambda: _env("KUZE_ANALYST_MODEL", "claude-opus-5"))
     # Hard Rock Bet key on The Odds API.
     book_key: str = field(default_factory=lambda: _env("KUZE_BOOK_KEY", "hardrockbet"))
+
+    @property
+    def db_url(self) -> str:
+        return self.db_url_env or f"sqlite:///{self.data_dir / 'kuze.db'}"
 
     @property
     def cache_dir(self) -> Path:
