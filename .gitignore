@@ -1,0 +1,11 @@
+# data & caches (re-downloadable / regenerated)
+/data/
+backend/.venv/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+frontend/dist/
+.env
+*.log
+.DS_Store
