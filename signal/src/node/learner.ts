@@ -8,7 +8,7 @@
  *   4. check the score on coins it has never seen, and retrain early if it clearly stopped working.
  * Everything pauses every few milliseconds, so trading never waits for it.
  */
-import { type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot } from "../core/autopilot.js";
+import { AUTOPILOT, type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot } from "../core/autopilot.js";
 import { type EdgeReport, findEdgesAsync } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import { type FreshCheck, type LearnRun, adoptionNote, freshCheckAsync, learnRunOf } from "../core/insight.js";
@@ -145,7 +145,12 @@ export class Learner {
       this.lastEdges = rep;
       if (fresh.length) {
         const lines = fresh.slice(0, 3).map((x) => `• ${x.text}: ${(x.holdout.mean * 100).toFixed(1)}% per trade on unseen data (${x.holdout.n} trades)`);
-        const next = this.o.engine().settings.autopilot ? "The autopilot trades the best proven rule by itself." : "Paper-trade it from the Learn tab, or turn the autopilot on (Bot tab).";
+        const trusted = rep.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo;
+        const next = !this.o.engine().settings.autopilot
+          ? "Paper-trade it from the Learn tab, or turn the autopilot on (Bot tab)."
+          : trusted
+            ? "The autopilot picks the best one by itself (with real money, only one at the go-live bar)."
+            : `The autopilot is not using them: on shuffled data the same search "found" ${rep.placebo.avgSurvivors.toFixed(1)} rules per run, so these may be luck.`;
         this.o.onEdges?.(`🔎 Edge finder: ${fresh.length} new rule${fresh.length > 1 ? "s" : ""} held up on data the search never saw.\n${lines.join("\n")}\n${next}`);
       }
       this.o.store.saveEdges(rep);

@@ -10815,7 +10815,8 @@ var Learner = class {
       this.lastEdges = rep;
       if (fresh.length) {
         const lines = fresh.slice(0, 3).map((x) => `\u2022 ${x.text}: ${(x.holdout.mean * 100).toFixed(1)}% per trade on unseen data (${x.holdout.n} trades)`);
-        const next = this.o.engine().settings.autopilot ? "The autopilot trades the best proven rule by itself." : "Paper-trade it from the Learn tab, or turn the autopilot on (Bot tab).";
+        const trusted = rep.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo;
+        const next = !this.o.engine().settings.autopilot ? "Paper-trade it from the Learn tab, or turn the autopilot on (Bot tab)." : trusted ? "The autopilot picks the best one by itself (with real money, only one at the go-live bar)." : `The autopilot is not using them: on shuffled data the same search "found" ${rep.placebo.avgSurvivors.toFixed(1)} rules per run, so these may be luck.`;
         this.o.onEdges?.(`\u{1F50E} Edge finder: ${fresh.length} new rule${fresh.length > 1 ? "s" : ""} held up on data the search never saw.
 ${lines.join("\n")}
 ${next}`);
