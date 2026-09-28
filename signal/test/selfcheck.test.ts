@@ -130,7 +130,7 @@ describe("self-check", () => {
   it("tells once when a check turns bad, and once when it is fine again", () => {
     const input = { now: NOW, closed: [], samples: [], mode: "paper", autopilotOn: true, autopilot: emptyAutopilot(), learning: { everyHours: 2, lastRun: NOW - HOUR, lastError: "", edgesAt: NOW - HOUR, startedAt: NOW - 20 * HOUR }, engine: { errors: 0, saveFailures: 0, saveError: "", feedDown: false } } as unknown as SelfCheckInput;
     const good = runChecks(input);
-    expect(good.map((c) => c.key)).toEqual(["recorded", "rule", "decisions", "coverage", "extraordinary", "learning", "engine"]);
+    expect(good.map((c) => c.key)).toEqual(["recorded", "rule", "decisions", "coverage", "extraordinary", "learning", "engine", "storage"]);
     const state = (cs: typeof good) => new Map(cs.map((c) => [c.key, c.status]));
     expect(checkChanges(new Map(), good)).toEqual([]);
     const broken = runChecks({ ...input, engine: { ...input.engine, feedDown: true, saveFailures: 1, saveError: "disk full" } });
@@ -141,5 +141,17 @@ describe("self-check", () => {
     const back = checkChanges(state(broken), good);
     expect(back).toHaveLength(2);
     expect(back[0]).toMatch(/✅ .*fine again/);
+  });
+});
+
+describe("self-check: storage", () => {
+  it("says when the disk is getting full, before saving fails", async () => {
+    const { storageCheck } = await import("../src/core/selfcheck.js");
+    const base = { usedMb: 2_000, maxMb: 10_000, minFreeMb: 2_000, recordingPaused: false };
+    expect(storageCheck({ ...base, freeMb: 50_000 }).status).toBe("ok");
+    expect(storageCheck({ ...base, freeMb: 3_000 }).status).toBe("warn");
+    expect(storageCheck({ ...base, freeMb: 1_500 }).status).toBe("fail");
+    expect(storageCheck({ ...base, freeMb: 50_000, recordingPaused: true }).status).toBe("fail");
+    expect(storageCheck(undefined).status).toBe("info");
   });
 });

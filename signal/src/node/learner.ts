@@ -86,6 +86,8 @@ export class Learner {
       onCheck?: (msg: string) => void;
       /** the Lab proved an idea, or a proven one stopped working */
       onLab?: (msg: string) => void;
+      /** the data folder against its budget, and the disk's free space (for the self-check) */
+      storage?: () => { usedMb: number; maxMb: number; freeMb: number | null; minFreeMb: number; recordingPaused: boolean };
       /** delay of the first self-check after start (default a minute) */
       firstCheckMs?: number;
     },
@@ -341,6 +343,7 @@ export class Learner {
         autopilot: this.autopilot,
         learning: { everyHours: this.o.everyHours, lastRun: this.lastRun, lastError: this.lastError, edgesAt: this.lastEdges?.generatedAt ?? 0, startedAt: this.startedAt },
         engine: { errors: engine.stats.errors, saveFailures: engine.saved.failures, saveError: engine.saved.error, feedDown: engine.feedDown() },
+        storage: this.o.storage?.(),
       });
       if (samples) this.recordedCheck = checks.find((c) => c.key === "recorded") ?? null;
       else if (this.recordedCheck) checks = checks.map((c) => (c.key === "recorded" ? this.recordedCheck! : c));

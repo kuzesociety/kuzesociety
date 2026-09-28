@@ -101,6 +101,8 @@ export interface SelfCheckInput {
   autopilot: AutopilotState;
   learning: { everyHours: number; lastRun: number; lastError: string; edgesAt: number; startedAt: number };
   engine: { errors: number; saveFailures: number; saveError: string; feedDown: boolean };
+  /** the data folder against its budget (MB), and the disk's free space (null: unknown) */
+  storage?: { usedMb: number; maxMb: number; freeMb: number | null; minFreeMb: number; recordingPaused: boolean };
 }
 
 /** 1. Recorded vs real. */
@@ -218,6 +220,28 @@ export function engineHealth(e: SelfCheckInput["engine"]): Check {
   return { key: "engine", status: "ok", title, detail: "No errors since start." };
 }
 
+/** 8. Storage has room: the data stays within its budget and never fills the disk (store.enforceBudget). */
+export function storageCheck(st: SelfCheckInput["storage"]): Check {
+  const title = "Storage has room";
+  if (!st) return { key: "storage", status: "info", title, detail: "Storage is not measured here." };
+  const gb = (mb: number) => `${(mb / 1000).toFixed(1)} GB`;
+  if (st.recordingPaused || (st.freeMb !== null && st.freeMb < st.minFreeMb))
+    return {
+      key: "storage",
+      status: "fail",
+      title,
+      detail: `The disk is nearly full (${gb(st.freeMb ?? 0)} free): raw market recording is paused, and saving settings and positions is at risk. Free some space on the disk, or lower DATA_MAX_GB.`,
+    };
+  if (st.freeMb !== null && st.freeMb < 2 * st.minFreeMb)
+    return { key: "storage", status: "warn", title, detail: `Only ${gb(st.freeMb)} free on the disk; below ${gb(st.minFreeMb)} raw recording pauses. Free some space on the disk.` };
+  return {
+    key: "storage",
+    status: "ok",
+    title,
+    detail: `Data ${gb(st.usedMb)} of at most ${gb(st.maxMb)}${st.freeMb !== null ? `, ${gb(st.freeMb)} free on the disk` : ""}. When it fills, the oldest raw recordings go first, then old outcomes (the newest 3 days are kept).`,
+  };
+}
+
 /** Every check, in the order above. */
 export function runChecks(i: SelfCheckInput): Check[] {
   return [
@@ -228,6 +252,7 @@ export function runChecks(i: SelfCheckInput): Check[] {
     extraordinary(i),
     learningLoop(i.learning, i.now),
     engineHealth(i.engine),
+    storageCheck(i.storage),
   ];
 }
 

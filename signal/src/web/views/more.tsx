@@ -289,10 +289,19 @@ function HealthView() {
             </dd>
             <dt>Event-loop lag</dt>
             <dd>{h.loopLagMs ?? 0} ms</dd>
-            <dt>Memory · disk</dt>
+            <dt>Memory · data</dt>
             <dd>
-              {h.memMb ?? "?"} MB · {h.diskMb ?? "?"} MB
+              {h.memMb ?? "?"} MB · {h.storage ? `${(h.storage.usedMb / 1000).toFixed(1)} of ${(h.storage.maxMb / 1000).toFixed(0)} GB` : `${h.diskMb ?? "?"} MB`}
             </dd>
+            {h.storage && (
+              <>
+                <dt>Disk free</dt>
+                <dd class={h.storage.recordingPaused || (h.storage.freeMb !== null && h.storage.freeMb < 2 * h.storage.minFreeMb) ? "bad" : ""}>
+                  {h.storage.freeMb === null ? "unknown" : `${(h.storage.freeMb / 1000).toFixed(1)} GB`}
+                  {h.storage.recordingPaused ? " · raw recording paused (disk nearly full)" : ` · kept above ${(h.storage.minFreeMb / 1000).toFixed(0)} GB`}
+                </dd>
+              </>
+            )}
           </dl>
         </div>
         <div class="card">

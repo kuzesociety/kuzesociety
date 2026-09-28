@@ -265,13 +265,37 @@ export async function main() {
     engine.advance(now);
   }, 100);
   let diskMb = store.diskUsageMb();
+  // Storage never fills the disk (DATA_MAX_GB, MIN_FREE_GB; store.enforceBudget)
+  const budget = { maxMb: config.dataMaxGb * 1000, minFreeMb: config.minFreeGb * 1000, keepSampleDays: 3 };
+  let storage = { ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb };
+  let prunedNoted = 0;
+  const keepRoom = () => {
+    try {
+      const r = store.enforceBudget(budget);
+      storage = { ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb };
+      diskMb = storage.usedMb;
+      const gb = (mb: number | null) => `${((mb ?? 0) / 1000).toFixed(1)} GB`;
+      if (r.deleted) log.info("storage: deleted old data to stay within budget", { files: r.deleted, freedMb: r.freedMb, samples: r.samplesPruned });
+      if (r.paused) {
+        log.warn("storage: disk nearly full — raw recording paused", { freeMb: storage.freeMb });
+        telegram?.send(`⚠️ The disk is nearly full (${gb(storage.freeMb)} free). Raw market recording is paused — trading and learning go on. Free some space on the disk, or lower DATA_MAX_GB.`);
+      }
+      if (r.resumed) telegram?.send(`✅ The disk has room again (${gb(storage.freeMb)} free): raw market recording resumed.`);
+      if (r.samplesPruned && Date.now() - prunedNoted > 24 * 3_600_000) {
+        prunedNoted = Date.now();
+        telegram?.send(`🧹 Storage: old recorded outcomes were deleted to stay within ${gb(budget.maxMb)} with ${gb(budget.minFreeMb)} of the disk free (the newest 3 days are always kept; learning uses the newest). Raise DATA_MAX_GB to keep more.`);
+      }
+    } catch (e) {
+      log.warn("storage check failed", { err: String(e) });
+    }
+  };
   const hk = setInterval(() => {
     try {
       store.saveWallets(engine.wallets.snapshot());
-      diskMb = store.diskUsageMb();
     } catch (e) {
       log.warn("wallet snapshot failed", { err: String(e) });
     }
+    keepRoom();
   }, 10 * 60_000);
   // Memory guard: small cloud instances have 512 MB–1 GB. The wallet book is the one structure
   // that keeps growing with market activity, so when memory runs short forget the least
@@ -289,9 +313,11 @@ export async function main() {
   }, 30_000);
   const daily = setInterval(() => {
     store.cleanup(config.recordDays, config.sampleDays);
+    keepRoom();
     store.backupState();
   }, 3_600_000);
   store.cleanup(config.recordDays, config.sampleDays);
+  keepRoom();
   store.backupState();
 
   learner = new Learner({
@@ -307,6 +333,7 @@ export async function main() {
     onAutopilot: (m) => telegram?.send(m),
     onCheck: (m) => telegram?.send(m),
     onLab: (m) => telegram?.send(m),
+    storage: () => storage,
   });
   learner.start();
 
@@ -404,6 +431,7 @@ export async function main() {
       simulated: config.feeds.has("sim"),
       dataDir: config.dataDir,
       update: updater ? { current: updater.current, available: updater.available, can: updater.can } : null,
+      storage,
     }),
   });
   await server.listen(config.port, config.host);

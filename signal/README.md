@@ -82,6 +82,7 @@ Every decision, with its numbers, is listed on the Autopilot card and sent to Te
 - **Does the bot see what it records?** How many recordings stopped being watched before they ended (graduated coins beyond the 40 followed pools, feed outages); a down feed is flagged at once.
 - **Are the promises plausible?** A rule claiming more than +30% per trade is flagged: on a real market that is more often a measuring problem than an edge.
 - **Does learning run on time, and does the engine run cleanly** (errors, failed saves)?
+- **Does storage have room?** The data folder against its limit, and the disk's free space — a warning well before saving could fail.
 
 A check that turns bad, or recovers, is sent to Telegram at once, and once a day a check-up summarises trades, the rule in use and every check.
 
@@ -154,7 +155,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 142 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 146 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
@@ -168,3 +169,5 @@ Layout:
 - `src/research`: replays, sweeps, self-test
 
 Data lives in `DATA_DIR`: `state.json` (atomic writes and a backup), a journal, labelled samples, hourly gzip recordings of market events, models and wallet snapshots.
+
+**Storage never fills the disk.** The data folder stays under `DATA_MAX_GB` (10 by default) and at least `MIN_FREE_GB` (2) of the disk stays free, checked every 10 minutes. Over either, the oldest raw recordings go first (only replays use them), then recorded outcomes older than the newest 3 days (training and the searches use the newest ones), then journals older than a week; trading state, models, the Lab and the autopilot are never touched. If the disk is still too full, raw recording pauses until there is twice the minimum free, and Telegram says so. Each start writes its own recording file, so a crash cannot leave the rest of an hour unreadable. Measured: a recorded market event takes about 136 bytes compressed, a recorded outcome about 1.3 KB.

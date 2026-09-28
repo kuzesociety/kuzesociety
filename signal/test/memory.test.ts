@@ -69,3 +69,87 @@ describe("bounded sample loading", () => {
     store.close();
   });
 });
+
+describe("storage never fills the disk", () => {
+  const silent = { debug() {}, info() {}, warn() {}, error() {} };
+
+  it("deletes the oldest raw recordings first, then old outcomes, never the state, models or the Lab", async () => {
+    const { mkdtempSync, writeFileSync, existsSync, readdirSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { DataStore } = await import("../src/node/store.js");
+    const dir = mkdtempSync(join(tmpdir(), "signal-budget-"));
+    const store = new DataStore(dir, silent);
+    const now = Date.UTC(2026, 8, 28, 12);
+    const day = (d: number) => new Date(now - d * 86_400_000).toISOString().slice(0, 10);
+    const mb = (n: number) => Buffer.alloc(n * 1_000_000, 97);
+    for (let d = 4; d >= 0; d--) writeFileSync(join(dir, "record", `${day(d)}T10.jsonl.gz`), mb(1));
+    for (let d = 9; d >= 0; d--) writeFileSync(join(dir, "samples", `${day(d)}.jsonl`), mb(1));
+    for (let d = 20; d >= 0; d -= 5) writeFileSync(join(dir, "journal", `${day(d)}.jsonl`), mb(1));
+    for (const f of ["state.json", "lab.json", "autopilot.json"]) writeFileSync(join(dir, f), mb(1));
+    writeFileSync(join(dir, "models", "current.json"), mb(1));
+    // 5 + 10 + 5 + 4 MB of data; a 14 MB budget must free 10 MB: all 5 recordings, then the 5 oldest outcome days
+    const r = store.enforceBudget({ maxMb: 14, minFreeMb: 0, keepSampleDays: 3 }, now);
+    expect(readdirSync(join(dir, "record"))).toHaveLength(0);
+    expect(readdirSync(join(dir, "samples")).sort()).toEqual([day(4), day(3), day(2), day(1), day(0)].map((d) => `${d}.jsonl`));
+    expect(r.samplesPruned).toBe(true);
+    expect(r.freedMb).toBeGreaterThanOrEqual(10);
+    for (const f of ["state.json", "lab.json", "autopilot.json", join("models", "current.json")]) expect(existsSync(join(dir, f))).toBe(true);
+    // however tight the budget, the newest 3 days of outcomes and a week of journal stay
+    store.enforceBudget({ maxMb: 1, minFreeMb: 0, keepSampleDays: 3 }, now);
+    expect(readdirSync(join(dir, "samples")).sort()).toEqual([day(2), day(1), day(0)].map((d) => `${d}.jsonl`));
+    expect(readdirSync(join(dir, "journal")).sort()).toEqual([day(5), day(0)].map((d) => `${d}.jsonl`));
+    const rep = store.storageReport();
+    expect(rep.byDir.samples).toBe(3);
+    expect(rep.freeMb === null || rep.freeMb > 0).toBe(true);
+  });
+
+  it("pauses raw recording while the disk is too full, and resumes when there is room", async () => {
+    const { mkdtempSync, readdirSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { DataStore } = await import("../src/node/store.js");
+    const dir = mkdtempSync(join(tmpdir(), "signal-full-"));
+    const store = new DataStore(dir, silent);
+    const r = store.enforceBudget({ maxMb: 1e9, minFreeMb: 1e12, keepSampleDays: 3 });
+    expect(r.paused).toBe(true);
+    store.record({ k: "trade" }, Date.now());
+    expect(readdirSync(join(dir, "record"))).toHaveLength(0);
+    const back = store.enforceBudget({ maxMb: 1e9, minFreeMb: 0, keepSampleDays: 3 });
+    expect(back.resumed).toBe(true);
+    store.record({ k: "trade" }, Date.now());
+    store.closeRecorder();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(readdirSync(join(dir, "record"))).toHaveLength(1);
+  });
+
+  it("a crash cannot make later recordings unreadable: every start writes a file of its own", async () => {
+    const { mkdtempSync, readdirSync, readFileSync, writeFileSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { gzipSync } = await import("node:zlib");
+    const { DataStore, readRecording } = await import("../src/node/store.js");
+    const dir = mkdtempSync(join(tmpdir(), "signal-crash-"));
+    const ts = Date.UTC(2026, 8, 28, 17, 5);
+    const store = new DataStore(dir, silent);
+    // this hour's file from before a crash, cut short (its gzip stream never finished)
+    const whole = gzipSync(Buffer.from(Array.from({ length: 200 }, (_, i) => JSON.stringify({ k: "trade", i })).join("\n") + "\n"));
+    writeFileSync(join(dir, "record", "2026-09-28T17.jsonl.gz"), whole.subarray(0, Math.floor(whole.length * 0.7)), { flag: "w" });
+    for (let i = 0; i < 50; i++) store.record({ k: "trade", after: i }, ts);
+    store.closeRecorder();
+    await new Promise((r) => setTimeout(r, 50));
+    const files = readdirSync(join(dir, "record")).sort();
+    expect(files).toEqual(["2026-09-28T17.jsonl.gz", "2026-09-28T17_02.jsonl.gz"]);
+    // the broken file yields what it holds; the new one is whole
+    const read = async (f: string) => {
+      const out: unknown[] = [];
+      for await (const ev of readRecording(join(dir, "record", f))) out.push(ev);
+      return out;
+    };
+    const first = await read(files[0]!);
+    expect(first.length).toBeGreaterThan(50);
+    expect(first.length).toBeLessThan(200);
+    expect(await read(files[1]!)).toHaveLength(50);
+    expect(readFileSync(join(dir, "record", files[1]!)).length).toBeGreaterThan(0);
+  });
+});

@@ -6,6 +6,10 @@
  *   record/YYYY-MM-DDTHH.jsonl.gz  raw market events (for exact replays / research)
  *   models/current.json    the scoring model in use (+ history)
  *   wallets.json.gz        wallet intelligence snapshot
+ *
+ * Everything stays within a size budget and leaves the disk room (enforceBudget): the oldest
+ * raw recordings go first, then old samples; trading state, models, the Lab and the autopilot
+ * are never touched.
  */
 import {
   closeSync,
@@ -20,6 +24,7 @@ import {
   renameSync,
   rmSync,
   statSync,
+  statfsSync,
   writeSync,
   type WriteStream,
 } from "node:fs";
@@ -27,7 +32,7 @@ import { join } from "node:path";
 import { createGzip, gunzipSync, gzipSync, type Gzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
-import { createGunzip } from "node:zlib";
+import { createGunzip, constants as zlibConstants } from "node:zlib";
 import { StringDecoder } from "node:string_decoder";
 import type { PersistedState } from "../core/engine.js";
 import type { ModelSpec } from "../core/model.js";
@@ -36,6 +41,22 @@ import type { Sample } from "../core/outcomes.js";
 import { type Logger, runSteps, runStepsAsync } from "../core/util.js";
 
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+
+/** How much the data may take, and how much of the disk must stay free (MB). */
+export interface StorageBudget {
+  maxMb: number;
+  minFreeMb: number;
+  /** samples of the newest this many days are always kept (the learner uses the newest ones) */
+  keepSampleDays: number;
+}
+
+export interface StorageReport {
+  usedMb: number;
+  byDir: Record<string, number>;
+  /** free space on the disk (MB; null when the system does not say) */
+  freeMb: number | null;
+  recordingPaused: boolean;
+}
 
 /**
  * Most samples held in memory at once. A day of live pump.fun can record tens of thousands,
@@ -104,8 +125,10 @@ export function writeFileAtomic(path: string, data: string | Uint8Array) {
 
 export class DataStore {
   readonly dir: string;
-  private recStream: { key: string; gz: Gzip; file: WriteStream } | null = null;
+  private recStream: { key: string; gz: Gzip; file: WriteStream; path: string } | null = null;
   recorded = 0;
+  /** raw recording is paused while the disk has too little room (enforceBudget) */
+  recordingPaused = false;
   private journalLines: string[] = [];
   private sampleLines: string[] = [];
   private flushTimer: NodeJS.Timeout | null = null;
@@ -242,14 +265,19 @@ export class DataStore {
   // ---- market recorder (gzip, hourly files) ----------------------------------------
 
   record(ev: unknown, ts: number) {
+    if (this.recordingPaused) return;
     const key = hour(ts);
     if (!this.recStream || this.recStream.key !== key) {
       this.closeRecorder();
       const gz = createGzip({ level: 6 });
-      const file = createWriteStream(join(this.dir, "record", `${key}.jsonl.gz`), { flags: "a" });
+      // a file of its own each time: appending after a crash would put the rest behind a broken
+      // piece that stops every reader (…T17.jsonl.gz, then …T17_02.jsonl.gz, in time order)
+      let path = join(this.dir, "record", `${key}.jsonl.gz`);
+      for (let n = 2; existsSync(path); n++) path = join(this.dir, "record", `${key}_${String(n).padStart(2, "0")}.jsonl.gz`);
+      const file = createWriteStream(path, { flags: "a" });
       file.on("error", (e) => this.log.error("recorder write failed", { err: String(e) }));
       gz.pipe(file);
-      this.recStream = { key, gz, file };
+      this.recStream = { key, gz, file, path };
     }
     this.recStream.gz.write(JSON.stringify(ev) + "\n");
     this.recorded++;
@@ -417,6 +445,97 @@ export class DataStore {
     writeFileAtomic(join(this.dir, "secret.json"), JSON.stringify({ token }));
   }
 
+  /** Free space on the disk holding the data, MB (null when the system does not say). */
+  freeMb(): number | null {
+    try {
+      const st = statfsSync(this.dir);
+      return Math.round((Number(st.bavail) * Number(st.bsize)) / 1e6);
+    } catch {
+      return null;
+    }
+  }
+
+  /** What the data takes, folder by folder, and what the disk has left. */
+  storageReport(): StorageReport {
+    const byDir: Record<string, number> = {};
+    let total = 0;
+    try {
+      for (const f of readdirSync(this.dir)) {
+        const p = join(this.dir, f);
+        const st = statSync(p);
+        const size = st.isDirectory() ? dirBytes(p) : st.size;
+        const k = st.isDirectory() ? f : "other";
+        byDir[k] = (byDir[k] ?? 0) + size / 1e6;
+        total += size;
+      }
+    } catch {
+      /* ignore */
+    }
+    for (const k of Object.keys(byDir)) byDir[k] = Math.round(byDir[k]!);
+    return { usedMb: Math.round(total / 1e6), byDir, freeMb: this.freeMb(), recordingPaused: this.recordingPaused };
+  }
+
+  /**
+   * Keeps the data within `b.maxMb` and at least `b.minFreeMb` of the disk free, deleting, oldest
+   * first: raw recordings (only replays use them), then samples older than the newest
+   * `b.keepSampleDays` days (training and the searches use the newest ones), then journals older
+   * than a week. Trading state, models, the Lab and the autopilot are never touched. When the disk
+   * still has too little room, raw recording pauses, and resumes once there is twice the minimum.
+   */
+  enforceBudget(b: StorageBudget, now = Date.now()): { freedMb: number; deleted: number; samplesPruned: boolean; paused: boolean; resumed: boolean } {
+    const list = (sub: string) => {
+      try {
+        return readdirSync(join(this.dir, sub))
+          .filter((f) => f.endsWith(".jsonl") || f.endsWith(".jsonl.gz"))
+          .sort()
+          .map((f) => {
+            const p = join(this.dir, sub, f);
+            return { f, p, mb: statSync(p).size / 1e6 };
+          });
+      } catch {
+        return [];
+      }
+    };
+    let used = dirBytes(this.dir) / 1e6;
+    let free = this.freeMb() ?? Infinity;
+    let freedMb = 0;
+    let deleted = 0;
+    let samplesPruned = false;
+    const need = () => Math.max(used - b.maxMb, b.minFreeMb - free);
+    const del = (x: { p: string; mb: number }) => {
+      try {
+        rmSync(x.p, { force: true });
+      } catch {
+        return;
+      }
+      used -= x.mb;
+      free += x.mb;
+      freedMb += x.mb;
+      deleted++;
+    };
+    for (const x of list("record")) {
+      if (need() <= 0) break;
+      if (x.p !== this.recStream?.path) del(x);
+    }
+    const keepSamplesFrom = day(now - (Math.max(1, b.keepSampleDays) - 1) * 86_400_000);
+    for (const x of list("samples")) {
+      if (need() <= 0 || x.f.slice(0, 10) >= keepSamplesFrom) break;
+      del(x);
+      samplesPruned = true;
+    }
+    const keepJournalFrom = day(now - 6 * 86_400_000);
+    for (const x of list("journal")) {
+      if (need() <= 0 || x.f.slice(0, 10) >= keepJournalFrom) break;
+      del(x);
+    }
+    const wasPaused = this.recordingPaused;
+    if (free < b.minFreeMb) {
+      this.recordingPaused = true;
+      this.closeRecorder();
+    } else if (wasPaused && free >= 2 * b.minFreeMb) this.recordingPaused = false;
+    return { freedMb: Math.round(freedMb), deleted, samplesPruned, paused: !wasPaused && this.recordingPaused, resumed: wasPaused && !this.recordingPaused };
+  }
+
   /** Delete recordings/samples/journals past their retention. */
   cleanup(recordDays: number, sampleDays: number, now = Date.now()) {
     const prune = (sub: string, days: number) => {
@@ -466,9 +585,24 @@ function appendLines(path: string, lines: string[]) {
   }
 }
 
-/** Stream a recorded .jsonl.gz file line by line (for replays). */
+/** Bytes in a folder and everything below it. */
+function dirBytes(d: string): number {
+  let total = 0;
+  try {
+    for (const f of readdirSync(d)) {
+      const p = join(d, f);
+      const st = statSync(p);
+      total += st.isDirectory() ? dirBytes(p) : st.size;
+    }
+  } catch {
+    /* ignore */
+  }
+  return total;
+}
+
+/** Stream a recorded .jsonl.gz file line by line (for replays); a file cut short by a crash yields what it holds. */
 export async function* readRecording(path: string): AsyncGenerator<unknown> {
-  const rl = createInterface({ input: createReadStream(path).pipe(createGunzip()), crlfDelay: Infinity });
+  const rl = createInterface({ input: createReadStream(path).pipe(createGunzip({ finishFlush: zlibConstants.Z_SYNC_FLUSH })), crlfDelay: Infinity });
   try {
     for await (const line of rl) {
       if (!line) continue;
