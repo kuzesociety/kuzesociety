@@ -211,6 +211,19 @@ What this means, and what it does not:
 - **What they do show:** the loop runs end to end on its own. It learns, searches, switches the moment a rule is proven and ranks rules by what they earn at the user's limits. It does not chase a slightly better rule, and the rules it picks keep delivering on coins that did not exist when it picked them.
 - **What they cannot show:** behaviour where there is no edge. This simulator always has one. That case is covered on synthetic data: pure noise, and markets with hot and cold hours, where the finder "proves" nothing (section 6), so the autopilot switches nothing and, with real money, waits.
 
+**When the market turns against the rule** (*sim*; the same loop at predictability 0.35. At hour 30 the market changes: every entry lands 15 seconds late instead of 1.5, as if faster bots now got there first. The autopilot also checks the rule in use every 10 minutes, as on the server). Profit from hour 30 to 48:
+
+| Seed | Plan, market unchanged | Plan, market changed | Autopilot, market unchanged | Autopilot, market changed |
+|---|---|---|---|---|
+| 77 | +12.7 SOL | +6.1 SOL | +31.1 SOL | +12.5 SOL |
+| 78 | +13.2 SOL | +4.8 SOL | +30.2 SOL | +12.8 SOL |
+
+- **Both got worse.** Late entries cost the plan and the autopilot alike 52–63% of their profit. No rule protects against a market that changes.
+- **The autopilot noticed.** With seed 77, a search at hour 32 still proved rules mostly on the old market and switched in one promising at least +98.8% per trade. Its first 30 trades in the new market averaged +48.5%, so at hour 36.5 it was benched and the next rule took over.
+- **The searches moved on too.** In both runs they replaced rules at hours 40 and 44 as their unseen window slid into the new market. With seed 78 nothing was benched: its rules' own trades were never clearly worse before the next search replaced them.
+- **The edge weakened but did not die.** Late entries still catch much of the simulator's 10-minute momentum, so the autopilot still made 2.0–2.6 times the plan. The case where every edge dies (no proven rule left: back to the owner's rule in paper, new entries held with real money) is covered by `test/autopilot.test.ts`, not by this simulator, which cannot remove its own momentum without rewriting it.
+- **The cost of trusting the past** is visible here: for 4.5 hours the autopilot traded a rule proven on a market that no longer existed. It was still profitable, but below its promise. The watchdog bounds that to about 30 trades, and the real-money bar exists because of it.
+
 What it cannot know: whether the past keeps paying. Every guard above is about not trusting luck; none makes a rule's future certain. A rule that buys at a score level was proven with the scores the bot gave at the time; after a retrain the same level selects the same share of coins (the anchored scale) but not the same coins, and only the next searches and the rule's own trades show whether it still pays. The watchdog limits how long a rule that stopped working keeps trading (30 trades), and the real-money bar is deliberately strict.
 
 ## 9. Method
