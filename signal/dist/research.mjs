@@ -2528,6 +2528,7 @@ var REASON_TEXT = {
   insufficient_balance: "Not enough SOL \u2014 paper: Trades tab \u2192 Add paper SOL; live: fund the wallet",
   slippage: "Price moved more than your slippage before the buy landed",
   migrating: "Coin is migrating to PumpSwap (not tradable for a moment)",
+  not_followed: "Its price is not followed right now (more graduated coins than the bot can follow at once) \u2014 not buying at an old price",
   no_price: "No tradable price yet",
   no_liquidity: "Not enough liquidity",
   size_too_small: "Position size too small after fees",
@@ -3387,6 +3388,7 @@ var DEFAULT_CONFIG = {
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
 var POOL_WAIT_MS = 6e4;
+var ENTRY_LEAD_SEC = 600;
 function entryFacts(t, f2) {
   const r = (v, d = 4) => Number.isFinite(v) ? Math.round(v * 10 ** d) / 10 ** d : 0;
   return {
@@ -3620,6 +3622,7 @@ var Engine = class {
     }
     this.stats.trades++;
     this.stats.lastTradeAt = Math.max(this.stats.lastTradeAt, ev.ts);
+    if (ev.venue === "amm" && ev.pool) this.stalePools.delete(ev.pool);
     const t = this.ensureToken(ev.mint, ev.ts, true);
     if (t.stage === "amm" && ev.venue === "curve") return;
     const w = this.wallets.touch(ev.user, ev.ts, ev.buy);
@@ -3879,6 +3882,7 @@ var Engine = class {
     if (t.nonSol) return "non_sol_quote";
     if (t.stage === "curve" && !s.tradeCurve || t.stage === "amm" && !s.tradeAmm) return "stage_off";
     if (t.stage === "migrating") return "migrating";
+    if (t.stage === "amm" && this.followedPools && !(t.pool && this.followedPools.has(t.pool) && !this.stalePools.has(t.pool))) return "not_followed";
     for (const p of this.positions.values()) if (p.mint === t.mint) return "pending";
     if (!s.reentry && this.tradedMints.has(t.mint)) return "already_traded";
     let open = 0;
@@ -4432,11 +4436,18 @@ var Engine = class {
   }
   /** When settings and positions last reached the disk, and failed saves in a row since. */
   saved = { at: 0, failures: 0, error: "" };
+  /** PumpSwap pools the stream follows one by one (poolsToFollow); null while every swap reaches us (whole stream, simulator). */
+  followedPools = null;
+  /** pools followed again after a gap: their price is old until a swap arrives */
+  stalePools = /* @__PURE__ */ new Set();
   /**
-   * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
-   * would-be trades are still being followed, newest first, `max` in all. The graduated coins
-   * left out stop being observed from now on: their would-be trades are marked (outcomes
-   * blindMint), so a stop that nobody saw is not counted as a trade that held its value.
+   * PumpSwap pools whose swaps must reach us: coins we hold first, then coins the rule is about
+   * to buy (when it buys at a time after graduating), then graduated coins whose would-be trades
+   * are still being followed, newest first, `max` in all. The graduated coins left out stop being
+   * observed from now on: their would-be trades are marked (outcomes blindMint), so a stop that
+   * nobody saw is not counted as a trade that held its value, and they are not bought (entryBlock
+   * "not_followed"): their last price may be long gone. A coin followed again after such a gap
+   * is not bought before a swap has brought its price up to date.
    * Called only when pools are followed one by one (not with the whole PumpSwap stream).
    */
   poolsToFollow(max = 40) {
@@ -4445,19 +4456,35 @@ var Engine = class {
       const pool = this.tokens.get(p.mint)?.pool;
       if (pool) out.add(pool);
     }
+    const buyAt = this.ruleBuysAfterGraduating();
     const followed = [];
     for (const mint of this.outcomes.openMints()) {
       const t = this.tokens.get(mint);
-      if (t?.stage === "amm" && !(t.pool && out.has(t.pool))) followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0 });
+      if (t?.stage !== "amm" || t.pool && out.has(t.pool)) continue;
+      const since = t.migrateAt ? (this.now - t.migrateAt) / 1e3 : -1;
+      const soon = !!buyAt && since >= buyAt.sec - ENTRY_LEAD_SEC && since < buyAt.sec * 1.6 && !this.scores.get(mint)?.cps.includes(buyAt.tag);
+      followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0, soon });
     }
-    followed.sort((a, b) => b.at - a.at);
+    followed.sort((a, b) => Number(b.soon) - Number(a.soon) || b.at - a.at);
     for (const f2 of followed) {
       if (f2.pool && out.size < max) out.add(f2.pool);
       else if (f2.pool && out.has(f2.pool)) continue;
       else if (!f2.pool && this.now - f2.at < POOL_WAIT_MS) continue;
       else this.outcomes.blindMint(f2.mint, f2.pool || !f2.at ? this.now : f2.at);
     }
+    for (const pool of out) {
+      if (this.followedPools?.has(pool)) continue;
+      const t = this.tokens.get(this.pools.get(pool) ?? "");
+      if (t?.migrateAt && this.now - t.migrateAt > POOL_WAIT_MS) this.stalePools.add(pool);
+    }
+    for (const pool of this.stalePools) if (!out.has(pool)) this.stalePools.delete(pool);
+    this.followedPools = out;
     return [...out];
+  }
+  /** The moment after graduating at which the settings buy (entryAt mig…), if they trade graduated coins that way. */
+  ruleBuysAfterGraduating() {
+    const m = /^mig(\d+)$/.exec(this.settings.entryAt);
+    return m && this.settings.tradeAmm ? { tag: this.settings.entryAt, sec: Number(m[1]) } : null;
   }
   exportState() {
     const heldMints = new Set([...this.positions.values()].map((p) => p.mint));

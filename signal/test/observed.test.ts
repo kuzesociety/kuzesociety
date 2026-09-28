@@ -184,6 +184,93 @@ describe("outcomes nobody observed", () => {
     }
   });
 
+  it("a graduated coin whose price the bot does not follow is not bought at its last price", () => {
+    for (const followed of [true, false]) {
+      const s = new Scenario({ entryAt: "mig60", scoreOnly: true, tradeCurve: false }, { outcomeHorizonMs: 20 * MIN });
+      const mint = key(95);
+      const pool = key(9501);
+      s.create(mint, key(96));
+      s.crowd(mint, 12, 0.3, 9600, 5000);
+      const c = s.curves.get(mint)!;
+      s.emit({ k: "migrate", ts: s.now, src: "rpc", sig: key(9502), mint, pool });
+      s.emit({ k: "pool", ts: s.now, src: "rpc", sig: key(9502), pool, mint, quoteIsSol: true, base: c.vTok, quote: c.vSol });
+      // a minute of swaps; the stream asks every 5 s which pools to follow (here: room for none, or plenty)
+      for (let i = 0; i < 16; i++) {
+        s.advance(5_000);
+        s.engine.poolsToFollow(followed ? 40 : 0);
+        s.emit({ k: "trade", ts: s.now, src: "rpc", sig: key(9600 + i), mint, buy: true, sol: 1e7, tok: 1e11, user: key(9700 + i), venue: "amm", vSol: c.vSol, vTok: c.vTok, pool });
+      }
+      s.advance(3_000);
+      const sig = s.engine.funnel.recent.toArray().find((r) => r.mint === mint);
+      expect(sig).toBeDefined();
+      if (followed) expect(s.positions().some((p) => p.mint === mint)).toBe(true);
+      else {
+        expect(sig!.decision).toBe("blocked");
+        expect(sig!.reason).toBe("not_followed");
+        expect(s.positions()).toHaveLength(0);
+      }
+    }
+  });
+
+  it("a coin followed again after a gap is bought only once a swap has brought its price up to date", () => {
+    for (const swapAfter of [true, false]) {
+      const s = new Scenario({ entryAt: "mig300", scoreOnly: true, tradeCurve: false }, { outcomeHorizonMs: 60 * MIN });
+      const mint = key(97);
+      const pool = key(9701);
+      s.create(mint, key(98));
+      s.crowd(mint, 12, 0.3, 9800, 5000);
+      const c = s.curves.get(mint)!;
+      s.emit({ k: "migrate", ts: s.now, src: "rpc", sig: key(9702), mint, pool });
+      s.emit({ k: "pool", ts: s.now, src: "rpc", sig: key(9702), pool, mint, quoteIsSol: true, base: c.vTok, quote: c.vSol });
+      const swap = (i: number) =>
+        s.emit({ k: "trade", ts: s.now, src: "rpc", sig: key(9800 + i), mint, buy: true, sol: 1e7, tok: 1e11, user: key(9900 + i), venue: "amm", vSol: c.vSol, vTok: c.vTok, pool });
+      const follow = (max: number, ms: number) => {
+        for (let t = 0; t < ms; t += 5_000) {
+          s.engine.poolsToFollow(max);
+          s.advance(5_000);
+        }
+      };
+      follow(40, 60_000); // followed after graduating
+      follow(0, 120_000); // dropped for newer graduates: swaps no longer reach the bot
+      follow(40, 60_000); // followed again at 3 min, quiet so far
+      if (swapAfter) swap(1);
+      follow(40, 40_000);
+      // the 5-minute moment: an aggregator's quote makes the bot look at the coin again
+      s.emit({ k: "quote", ts: s.now, src: "dexscreener", mint, priceSol: 1e-7 });
+      follow(40, 90_000);
+      const sig = s.engine.funnel.recent.toArray().find((r) => r.mint === mint);
+      expect(sig).toBeDefined();
+      if (swapAfter) expect(s.positions().some((p) => p.mint === mint)).toBe(true);
+      else {
+        expect(sig!.reason).toBe("not_followed");
+        expect(s.positions()).toHaveLength(0);
+      }
+    }
+  });
+
+  it("coins the rule is about to buy are followed first when there are more graduates than pools", () => {
+    const s = new Scenario({ entryAt: "mig3600", scoreOnly: true, tradeCurve: false }, { outcomeHorizonMs: 3 * 3_600_000 });
+    const graduate = (n: number) => {
+      const mint = key(1000 + n);
+      s.create(mint, key(1100 + n));
+      s.crowd(mint, 12, 0.3, 1200 + n * 20, 2000);
+      s.emit({ k: "migrate", ts: s.now, src: "rpc", sig: key(1300 + n), mint, pool: key(1400 + n) });
+      return key(1400 + n);
+    };
+    const early = graduate(1); // will be bought 1 h after graduating
+    const c = s.curves.get(key(1001))!;
+    for (let i = 0; i < 13; i++) {
+      s.advance(4 * MIN); // it keeps trading
+      s.emit({ k: "trade", ts: s.now, src: "rpc", sig: key(1500 + i), mint: key(1001), buy: true, sol: 1e7, tok: 1e11, user: key(1600 + i), venue: "amm", vSol: c.vSol, vTok: c.vTok, pool: early });
+    }
+    const newer = [graduate(2), graduate(3), graduate(4)];
+    // room for two pools: the coin about to be bought, then the newest graduate
+    expect(s.engine.poolsToFollow(2).sort()).toEqual([early, newer[2]!].sort());
+    // without such a rule, simply the newest
+    s.engine.updateSettings({ entryAt: "score" });
+    expect(s.engine.poolsToFollow(2).sort()).toEqual([newer[1]!, newer[2]!].sort());
+  });
+
   it("the edge finder does not take stops nobody saw for trades that held", () => {
     // graduated coins bought an hour after graduating: while observed they drift, then the price
     // stops reaching us. Frozen at their last value, a wide stop never triggers and holding looks

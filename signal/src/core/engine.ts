@@ -224,6 +224,8 @@ interface ScoreEntry {
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 /** How long a graduated coin may wait for its pool's address before it counts as unobserved. */
 const POOL_WAIT_MS = 60_000;
+/** A rule that buys at a time after graduating has its coins followed from this long before. */
+const ENTRY_LEAD_SEC = 600;
 
 /** What the bot's filters would see at this moment (same fields, same units). */
 function entryFacts(t: TokenState, f: RawFeatures): EntryFacts {
@@ -470,6 +472,7 @@ export class Engine {
     }
     this.stats.trades++;
     this.stats.lastTradeAt = Math.max(this.stats.lastTradeAt, ev.ts);
+    if (ev.venue === "amm" && ev.pool) this.stalePools.delete(ev.pool);
     const t = this.ensureToken(ev.mint, ev.ts, true);
     if (t.stage === "amm" && ev.venue === "curve") return; // stale curve event after migration
     const w = this.wallets.touch(ev.user, ev.ts, ev.buy);
@@ -752,6 +755,9 @@ export class Engine {
     if (t.nonSol) return "non_sol_quote";
     if ((t.stage === "curve" && !s.tradeCurve) || (t.stage === "amm" && !s.tradeAmm)) return "stage_off";
     if (t.stage === "migrating") return "migrating";
+    // a graduated coin whose pool is not followed, or followed again but not traded since, has no
+    // current price: its last one may be an hour old
+    if (t.stage === "amm" && this.followedPools && !(t.pool && this.followedPools.has(t.pool) && !this.stalePools.has(t.pool))) return "not_followed";
     for (const p of this.positions.values()) if (p.mint === t.mint) return "pending";
     if (!s.reentry && this.tradedMints.has(t.mint)) return "already_traded";
     let open = 0;
@@ -1358,11 +1364,19 @@ export class Engine {
   /** When settings and positions last reached the disk, and failed saves in a row since. */
   saved = { at: 0, failures: 0, error: "" };
 
+  /** PumpSwap pools the stream follows one by one (poolsToFollow); null while every swap reaches us (whole stream, simulator). */
+  private followedPools: Set<string> | null = null;
+  /** pools followed again after a gap: their price is old until a swap arrives */
+  private stalePools = new Set<string>();
+
   /**
-   * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
-   * would-be trades are still being followed, newest first, `max` in all. The graduated coins
-   * left out stop being observed from now on: their would-be trades are marked (outcomes
-   * blindMint), so a stop that nobody saw is not counted as a trade that held its value.
+   * PumpSwap pools whose swaps must reach us: coins we hold first, then coins the rule is about
+   * to buy (when it buys at a time after graduating), then graduated coins whose would-be trades
+   * are still being followed, newest first, `max` in all. The graduated coins left out stop being
+   * observed from now on: their would-be trades are marked (outcomes blindMint), so a stop that
+   * nobody saw is not counted as a trade that held its value, and they are not bought (entryBlock
+   * "not_followed"): their last price may be long gone. A coin followed again after such a gap
+   * is not bought before a swap has brought its price up to date.
    * Called only when pools are followed one by one (not with the whole PumpSwap stream).
    */
   poolsToFollow(max = 40): string[] {
@@ -1371,12 +1385,17 @@ export class Engine {
       const pool = this.tokens.get(p.mint)?.pool;
       if (pool) out.add(pool);
     }
-    const followed: { mint: string; pool?: string; at: number }[] = [];
+    const buyAt = this.ruleBuysAfterGraduating();
+    const followed: { mint: string; pool?: string; at: number; soon: boolean }[] = [];
     for (const mint of this.outcomes.openMints()) {
       const t = this.tokens.get(mint);
-      if (t?.stage === "amm" && !(t.pool && out.has(t.pool))) followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0 });
+      if (t?.stage !== "amm" || (t.pool && out.has(t.pool))) continue;
+      const since = t.migrateAt ? (this.now - t.migrateAt) / 1000 : -1;
+      const soon = !!buyAt && since >= buyAt.sec - ENTRY_LEAD_SEC && since < buyAt.sec * 1.6 && !this.scores.get(mint)?.cps.includes(buyAt.tag);
+      followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0, soon });
     }
-    followed.sort((a, b) => b.at - a.at);
+    // coins the rule is about to buy first (their price must be current then), then the newest graduates
+    followed.sort((a, b) => Number(b.soon) - Number(a.soon) || b.at - a.at);
     for (const f of followed) {
       if (f.pool && out.size < max) out.add(f.pool);
       else if (f.pool && out.has(f.pool)) continue;
@@ -1385,7 +1404,21 @@ export class Engine {
       // never learned its pool: nothing after the graduation was seen
       else this.outcomes.blindMint(f.mint, f.pool || !f.at ? this.now : f.at);
     }
+    // followed again after a gap (not right after graduating): its last price is old until a swap arrives
+    for (const pool of out) {
+      if (this.followedPools?.has(pool)) continue;
+      const t = this.tokens.get(this.pools.get(pool) ?? "");
+      if (t?.migrateAt && this.now - t.migrateAt > POOL_WAIT_MS) this.stalePools.add(pool);
+    }
+    for (const pool of this.stalePools) if (!out.has(pool)) this.stalePools.delete(pool);
+    this.followedPools = out;
     return [...out];
+  }
+
+  /** The moment after graduating at which the settings buy (entryAt mig…), if they trade graduated coins that way. */
+  private ruleBuysAfterGraduating(): { tag: string; sec: number } | null {
+    const m = /^mig(\d+)$/.exec(this.settings.entryAt);
+    return m && this.settings.tradeAmm ? { tag: this.settings.entryAt, sec: Number(m[1]) } : null;
   }
 
   exportState(): PersistedState {
