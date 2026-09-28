@@ -29,6 +29,7 @@ import {
   type WriteStream,
 } from "node:fs";
 import { join } from "node:path";
+import { getHeapStatistics } from "node:v8";
 import { createGzip, gunzipSync, gzipSync, type Gzip } from "node:zlib";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
@@ -68,6 +69,32 @@ export interface StorageReport {
  * so they have their own room and are not crowded out.
  */
 export const SAMPLE_LIMITS = { checkpoints: 40_000, structural: 20_000, entries: 25_000 };
+
+/**
+ * How many times SAMPLE_LIMITS this machine's memory allows: more history makes training and
+ * the searches more precise, and a desktop can afford it where a 512 MB server cannot. Measured
+ * (23 entries, the edge finder with 5 luck checks, then the Lab): 1× — 186 MB at the peak, 24 s
+ * and 8 s; 2× — 338 MB, 82 s and 16 s; 4× — 640 MB, 250 s and 39 s. So 2× from a 1.5 GB heap
+ * limit, 3× from 3 GB, and no more, to keep a search to about two minutes every two hours.
+ */
+export function sampleScale(heapLimit = getHeapStatistics().heap_size_limit): number {
+  const gb = heapLimit / 1e9;
+  return gb >= 3 ? 3 : gb >= 1.5 ? 2 : 1;
+}
+
+/** SAMPLE_LIMITS scaled to this machine (sampleScale). */
+export function sampleLimits(scale = sampleScale()): typeof SAMPLE_LIMITS {
+  return { checkpoints: SAMPLE_LIMITS.checkpoints * scale, structural: SAMPLE_LIMITS.structural * scale, entries: SAMPLE_LIMITS.entries * scale };
+}
+
+/**
+ * The data folder's limit when DATA_MAX_GB is not set: a fifth of the disk the bot can use (its
+ * own data plus what is free), between 10 and 100 GB.
+ */
+export function autoDataMaxMb(usedMb: number, freeMb: number | null): number {
+  if (freeMb === null) return 10_000;
+  return Math.round(Math.min(100_000, Math.max(10_000, 0.2 * (usedMb + freeMb))));
+}
 
 /**
  * Calls `fn` for every non-empty line, reading 1 MB at a time (multi-byte safe), and pauses
@@ -203,12 +230,12 @@ export class DataStore {
    * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
    * so memory stays bounded however much has been recorded.
    */
-  loadSamples(days: number, now = Date.now(), limits = SAMPLE_LIMITS): Sample[] {
+  loadSamples(days: number, now = Date.now(), limits = sampleLimits()): Sample[] {
     return runSteps(this.loadSamplesSteps(days, now, limits));
   }
 
   /** The same, pausing every few milliseconds so trading goes on while days of samples are read. */
-  loadSamplesAsync(days: number, now = Date.now(), limits = SAMPLE_LIMITS): Promise<Sample[]> {
+  loadSamplesAsync(days: number, now = Date.now(), limits = sampleLimits()): Promise<Sample[]> {
     return runStepsAsync(this.loadSamplesSteps(days, now, limits));
   }
 

@@ -153,3 +153,21 @@ describe("storage never fills the disk", () => {
     expect(readFileSync(join(dir, "record", files[1]!)).length).toBeGreaterThan(0);
   });
 });
+
+describe("how much history learning uses, and how much the data may take", () => {
+  it("scales with the machine: more outcomes where memory allows, a fifth of the disk for the data", async () => {
+    const { SAMPLE_LIMITS, autoDataMaxMb, sampleLimits, sampleScale } = await import("../src/node/store.js");
+    // a 512 MB server keeps the base caps; a desktop's Node (2–4 GB heap) loads two or three times as many
+    expect(sampleScale(0.5e9)).toBe(1);
+    expect(sampleScale(1.5e9)).toBe(2);
+    expect(sampleScale(2.2e9)).toBe(2);
+    expect(sampleScale(4.3e9)).toBe(3);
+    expect(sampleScale(16e9)).toBe(3);
+    expect(sampleLimits(3)).toEqual({ checkpoints: SAMPLE_LIMITS.checkpoints * 3, structural: SAMPLE_LIMITS.structural * 3, entries: SAMPLE_LIMITS.entries * 3 });
+    // a fifth of what the bot can use (its data + the free space), between 10 and 100 GB
+    expect(autoDataMaxMb(7_700, 338_600)).toBe(69_260);
+    expect(autoDataMaxMb(500, 20_000)).toBe(10_000);
+    expect(autoDataMaxMb(1_000, 2_000_000)).toBe(100_000);
+    expect(autoDataMaxMb(1_000, null)).toBe(10_000);
+  });
+});

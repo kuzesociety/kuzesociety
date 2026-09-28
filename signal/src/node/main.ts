@@ -26,7 +26,7 @@ import { ServerLog } from "./log.js";
 import { EventRouter } from "./router.js";
 import { DashboardServer } from "./server.js";
 import { type SetupKey, SetupStore, lanAddress, openBrowser, tailscaleAddress } from "./setup.js";
-import { DataStore } from "./store.js";
+import { DataStore, autoDataMaxMb, sampleLimits, sampleScale } from "./store.js";
 import { Telegram } from "./telegram.js";
 import { Updater, findInstallDir, readVersion } from "./update.js";
 import { strategyList } from "../core/presets.js";
@@ -266,13 +266,19 @@ export async function main() {
   }, 100);
   let diskMb = store.diskUsageMb();
   // Storage never fills the disk (DATA_MAX_GB, MIN_FREE_GB; store.enforceBudget)
-  const budget = { maxMb: config.dataMaxGb * 1000, minFreeMb: config.minFreeGb * 1000, keepSampleDays: 3 };
-  let storage = { ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb };
+  // the limit is a fifth of the disk unless DATA_MAX_GB sets it; learning loads more history where memory allows
+  const limitOf = (r: { usedMb: number; freeMb: number | null }) => (config.dataMaxGb !== null ? config.dataMaxGb * 1000 : autoDataMaxMb(r.usedMb, r.freeMb));
+  const first = store.storageReport();
+  const budget = { maxMb: limitOf(first), minFreeMb: config.minFreeGb * 1000, keepSampleDays: 3 };
+  const learnScale = sampleScale();
+  const describeStorage = () => ({ ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb, auto: config.dataMaxGb === null, learnScale, learnSamples: Object.values(sampleLimits(learnScale)).reduce((a, b) => a + b, 0) });
+  let storage = describeStorage();
   let prunedNoted = 0;
   const keepRoom = () => {
     try {
+      budget.maxMb = limitOf(store.storageReport());
       const r = store.enforceBudget(budget);
-      storage = { ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb };
+      storage = describeStorage();
       diskMb = storage.usedMb;
       const gb = (mb: number | null) => `${((mb ?? 0) / 1000).toFixed(1)} GB`;
       if (r.deleted) log.info("storage: deleted old data to stay within budget", { files: r.deleted, freedMb: r.freedMb, samples: r.samplesPruned });

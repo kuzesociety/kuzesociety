@@ -5544,6 +5544,7 @@ import {
   writeSync
 } from "node:fs";
 import { join } from "node:path";
+import { getHeapStatistics } from "node:v8";
 import { createGzip, gunzipSync, gzipSync } from "node:zlib";
 import { createInterface } from "node:readline";
 import { createReadStream } from "node:fs";
@@ -5551,6 +5552,13 @@ import { createGunzip, constants as zlibConstants } from "node:zlib";
 import { StringDecoder } from "node:string_decoder";
 var day = (ts) => new Date(ts).toISOString().slice(0, 10);
 var SAMPLE_LIMITS = { checkpoints: 4e4, structural: 2e4, entries: 25e3 };
+function sampleScale(heapLimit = getHeapStatistics().heap_size_limit) {
+  const gb = heapLimit / 1e9;
+  return gb >= 3 ? 3 : gb >= 1.5 ? 2 : 1;
+}
+function sampleLimits(scale = sampleScale()) {
+  return { checkpoints: SAMPLE_LIMITS.checkpoints * scale, structural: SAMPLE_LIMITS.structural * scale, entries: SAMPLE_LIMITS.entries * scale };
+}
 function* forEachLineSteps(path, fn) {
   const fd = openSync(path, "r");
   try {
@@ -5663,11 +5671,11 @@ var DataStore = class {
    * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
    * so memory stays bounded however much has been recorded.
    */
-  loadSamples(days, now = Date.now(), limits = SAMPLE_LIMITS) {
+  loadSamples(days, now = Date.now(), limits = sampleLimits()) {
     return runSteps(this.loadSamplesSteps(days, now, limits));
   }
   /** The same, pausing every few milliseconds so trading goes on while days of samples are read. */
-  loadSamplesAsync(days, now = Date.now(), limits = SAMPLE_LIMITS) {
+  loadSamplesAsync(days, now = Date.now(), limits = sampleLimits()) {
     return runStepsAsync(this.loadSamplesSteps(days, now, limits));
   }
   *loadSamplesSteps(days, now, limits) {

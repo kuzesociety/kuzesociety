@@ -155,7 +155,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 146 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 147 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
@@ -170,4 +170,6 @@ Layout:
 
 Data lives in `DATA_DIR`: `state.json` (atomic writes and a backup), a journal, labelled samples, hourly gzip recordings of market events, models and wallet snapshots.
 
-**Storage never fills the disk.** The data folder stays under `DATA_MAX_GB` (10 by default) and at least `MIN_FREE_GB` (2) of the disk stays free, checked every 10 minutes. Over either, the oldest raw recordings go first (only replays use them), then recorded outcomes older than the newest 3 days (training and the searches use the newest ones), then journals older than a week; trading state, models, the Lab and the autopilot are never touched. If the disk is still too full, raw recording pauses until there is twice the minimum free, and Telegram says so. Each start writes its own recording file, so a crash cannot leave the rest of an hour unreadable. Measured: a recorded market event takes about 136 bytes compressed, a recorded outcome about 1.3 KB.
+**Storage never fills the disk.** The data folder stays under `DATA_MAX_GB` (by default a fifth of the disk, between 10 and 100 GB) and at least `MIN_FREE_GB` (2) of the disk stays free, checked every 10 minutes. Over either, the oldest raw recordings go first (only replays use them), then recorded outcomes older than the newest 3 days (training and the searches use the newest ones), then journals older than a week; trading state, models, the Lab and the autopilot are never touched. If the disk is still too full, raw recording pauses until there is twice the minimum free, and Telegram says so. Each start writes its own recording file, so a crash cannot leave the rest of an hour unreadable. Measured: a recorded market event takes about 136 bytes compressed, a recorded outcome about 1.3 KB.
+
+**How much history learning uses.** Training, the edge finder and the Lab load the newest recorded outcomes, not all of them: 85,000 on a small server, twice that where the bot's memory limit is 1.5 GB or more, three times from 3 GB (a desktop usually). More history makes their answers more precise; the limit keeps memory and time in check (measured, 23 entries: 85,000 outcomes take 186 MB and a 24-second search, 170,000 take 338 MB and 82 s, 340,000 take 640 MB and 250 s). More → health shows both, and what the data folder holds.

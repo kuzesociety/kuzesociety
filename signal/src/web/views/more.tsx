@@ -291,10 +291,22 @@ function HealthView() {
             <dd>{h.loopLagMs ?? 0} ms</dd>
             <dt>Memory · data</dt>
             <dd>
-              {h.memMb ?? "?"} MB · {h.storage ? `${(h.storage.usedMb / 1000).toFixed(1)} of ${(h.storage.maxMb / 1000).toFixed(0)} GB` : `${h.diskMb ?? "?"} MB`}
+              {h.memMb ?? "?"} MB · {h.storage ? `${(h.storage.usedMb / 1000).toFixed(1)} of ${(h.storage.maxMb / 1000).toFixed(0)} GB${h.storage.auto ? " (automatic: a fifth of the disk)" : ""}` : `${h.diskMb ?? "?"} MB`}
             </dd>
             {h.storage && (
               <>
+                <dt>Data kept</dt>
+                <dd>
+                  outcomes {((h.storage.byDir?.samples ?? 0) / 1000).toFixed(1)} GB · raw recordings {((h.storage.byDir?.record ?? 0) / 1000).toFixed(1)} GB
+                </dd>
+                {h.storage.learnSamples && (
+                  <>
+                    <dt>Learning uses</dt>
+                    <dd>
+                      the newest {h.storage.learnSamples.toLocaleString("en-US")} outcomes{h.storage.learnScale > 1 ? ` (${h.storage.learnScale}× — this computer has the memory)` : ""}
+                    </dd>
+                  </>
+                )}
                 <dt>Disk free</dt>
                 <dd class={h.storage.recordingPaused || (h.storage.freeMb !== null && h.storage.freeMb < 2 * h.storage.minFreeMb) ? "bad" : ""}>
                   {h.storage.freeMb === null ? "unknown" : `${(h.storage.freeMb / 1000).toFixed(1)} GB`}

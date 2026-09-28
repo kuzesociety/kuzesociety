@@ -34,8 +34,8 @@ export interface Config {
   record: boolean;
   recordDays: number;
   sampleDays: number;
-  /** the data folder's size limit, and the disk space that must stay free (GB) */
-  dataMaxGb: number;
+  /** the data folder's size limit (GB; null: automatic, a fifth of the disk — store.autoDataMaxMb), and the disk space that must stay free */
+  dataMaxGb: number | null;
   minFreeGb: number;
   learnEveryHours: number;
   simSpeed: number;
@@ -116,7 +116,7 @@ export function loadConfig(env = process.env, argv = process.argv): Config {
     record: env.RECORD !== "0" && env.RECORD !== "false",
     recordDays: n(env.RECORD_DAYS, 5),
     sampleDays: n(env.SAMPLE_DAYS, 30),
-    dataMaxGb: n(env.DATA_MAX_GB, 10),
+    dataMaxGb: env.DATA_MAX_GB && env.DATA_MAX_GB !== "auto" && Number(env.DATA_MAX_GB) > 0 ? Number(env.DATA_MAX_GB) : null,
     minFreeGb: n(env.MIN_FREE_GB, 2),
     learnEveryHours: n(env.LEARN_EVERY_HOURS, 2),
     simSpeed: n(env.SIM_SPEED, 1),
@@ -154,7 +154,7 @@ export function describeConfig(c: Config) {
     liveMaxPositionSol: c.liveMaxPositionSol,
     liveMaxDailyLossSol: c.liveMaxDailyLossSol,
     recording: c.record ? `on (${c.recordDays} days kept)` : "off",
-    storage: `at most ${c.dataMaxGb} GB, keeping ${c.minFreeGb} GB of the disk free`,
+    storage: `${c.dataMaxGb === null ? "a fifth of the disk (10–100 GB)" : `at most ${c.dataMaxGb} GB`}, keeping ${c.minFreeGb} GB of the disk free`,
     learnEveryHours: c.learnEveryHours,
     dataDir: c.dataDir,
     githubSync: c.githubRepo ? `${c.githubRepo}@${c.githubBranch}` : "off",
