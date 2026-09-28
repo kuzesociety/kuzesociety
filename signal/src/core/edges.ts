@@ -95,8 +95,16 @@ export interface EdgeFound extends EdgeRule {
   settings: Partial<Settings>;
 }
 
+/**
+ * How the proof is computed. 2: the holdout counts evidence per market hour. A report made by
+ * an older method is shown but not acted on (core/autopilot).
+ */
+export const EDGE_METHOD = 2;
+
 export interface EdgeReport {
   generatedAt: number;
+  /** EDGE_METHOD of the search that made it (missing: made before methods were numbered) */
+  method?: number;
   status: "ok" | "not_enough_data";
   note: string;
   samples: number;
@@ -301,6 +309,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   const now = opts.now ?? Date.now();
   const base: EdgeReport = {
     generatedAt: now,
+    method: EDGE_METHOD,
     status: "not_enough_data",
     note: "",
     samples: 0,

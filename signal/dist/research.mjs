@@ -935,6 +935,7 @@ var OPEN_FILTERS = {
   maxDevLaunches24h: 0,
   maxDevSoldPct: 100
 };
+var EDGE_METHOD = 2;
 var DEFAULTS = {
   horizonMs: 6 * 36e5,
   minHours: 24,
@@ -1040,6 +1041,7 @@ function* steps(samples, opts) {
   const now = opts.now ?? Date.now();
   const base = {
     generatedAt: now,
+    method: EDGE_METHOD,
     status: "not_enough_data",
     note: "",
     samples: 0,

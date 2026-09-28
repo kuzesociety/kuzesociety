@@ -91,7 +91,7 @@ function Status({ v }: { v: AutopilotView }) {
         <details class="more">
           <summary>Proven rules, best first ({v.ranking.length})</summary>
           <p class="faint" style="font-size:12.5px;margin:0 0 6px">
-            Ranked by what each would earn per day at your size and limits, counted from its worst case on unseen data.{!v.trusted && " The last search is not trusted (too old, or its luck check found rules on shuffled data), so none is used right now."}
+            Ranked by what each would earn per day at your size and limits, counted from its worst case on unseen data.{!v.trusted && " The last search is not used right now: it is too old, was made by an older version of the bot, or its luck check found rules on shuffled data."}
           </p>
           {v.ranking.map((r) => (
             <div class="edge" key={r.text}>

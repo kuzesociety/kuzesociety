@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AUTOPILOT, type AutopilotState, RULE_KEYS, decideAutopilot, emptyAutopilot, worstPerDay } from "../src/core/autopilot.js";
-import type { EdgeFound, EdgeReport } from "../src/core/edges.js";
+import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import type { Position } from "../src/core/positions.js";
 import { type Settings, sanitizeSettings } from "../src/core/settings.js";
@@ -27,9 +27,10 @@ function rule(text: string, o: { mean?: number; lo: number; n?: number; perDay: 
   };
 }
 
-function report(survivors: EdgeFound[], o: { at?: number; placebo?: number } = {}): EdgeReport {
+function report(survivors: EdgeFound[], o: { at?: number; placebo?: number; method?: number | null } = {}): EdgeReport {
   return {
     generatedAt: o.at ?? NOW - HOUR,
+    method: o.method === undefined ? EDGE_METHOD : o.method ?? undefined,
     status: "ok",
     note: "",
     samples: 20_000,
@@ -88,6 +89,11 @@ describe("autopilot", () => {
     expect(decideAutopilot({ report: report([a], { placebo: 0.2 }), settings: settings(), state: emptyAutopilot(), closed: [], now: NOW }).action).toBe("switch");
     expect(decideAutopilot({ report: report([a], { placebo: 0.4 }), settings: settings(), state: emptyAutopilot(), closed: [], now: NOW }).action).toBe("none");
     expect(decideAutopilot({ report: report([a], { at: NOW - 7 * HOUR }), settings: settings(), state: emptyAutopilot(), closed: [], now: NOW }).action).toBe("none");
+    // an answer made by an older version of the bot (weaker proof) is not acted on, even fresh
+    expect(decideAutopilot({ report: report([a], { method: null }), settings: settings(), state: emptyAutopilot(), closed: [], now: NOW }).action).toBe("none");
+    const liveOld = decideAutopilot({ report: report([a], { method: null }), settings: settings({ mode: "live" }), state: emptyAutopilot(), closed: [], now: NOW });
+    expect(liveOld.action).toBe("hold");
+    expect(liveOld.state.holdReason).toMatch(/older version/);
     // a rule in use whose search stops being trusted is dropped: back to the user's own rule
     const state: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - HOUR, proof: { mean: 0.4, lo: 0.2, n: 150 }, own: { minScore: 70 } };
     const d = decideAutopilot({ report: report([a], { placebo: 1.2 }), settings: settings(), state, closed: [], now: NOW });

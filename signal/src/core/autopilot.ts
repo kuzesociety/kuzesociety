@@ -8,7 +8,8 @@
  * at once. While it holds up, another rule replaces it only when clearly better (by 25%).
  *
  * It does not fool itself:
- *   - an answer counts only while fresh (6 hours), and only if the search's own luck check
+ *   - an answer counts only while fresh (6 hours) and made by the current method of proof
+ *     (EDGE_METHOD: after an update, the next search replaces an older answer), and only if the search's own luck check
  *     (the same search on shuffled outcomes) "found" next to nothing (at most 1 rule in 5 runs);
  *     its proof already counts coins bought in the same hour as one piece of evidence, so a
  *     hot hour of the market is not taken for an edge (core/edges.ts holdoutStats);
@@ -20,7 +21,7 @@
  * It changes the rule only — entry, which coins, exits, time limit — never the trade size, the
  * limits or the mode. Changing the rule by hand turns it off (Engine.updateSettings).
  */
-import type { EdgeFound, EdgeReport } from "./edges.js";
+import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "./edges.js";
 import type { Position } from "./positions.js";
 import { ruleSummary } from "./presets.js";
 import type { Settings } from "./settings.js";
@@ -109,9 +110,19 @@ export function ruleChanged(a: Settings, b: Settings): boolean {
 
 const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
 
+/**
+ * What a search can be used for right now: `fresh` — made by the current method, found enough
+ * data, and less than 6 hours old; `trusted` — fresh, and its luck check stayed clean.
+ */
+export function evidenceOf(report: EdgeReport | null, now: number): { fresh: boolean; trusted: boolean } {
+  const fresh = !!report && report.status === "ok" && report.method === EDGE_METHOD && now - report.generatedAt <= AUTOPILOT.freshMs;
+  return { fresh, trusted: fresh && report!.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo };
+}
+
 /** Why no rule can be used right now, in plain words (undefined: there is one). */
 function whyNone(report: EdgeReport | null, fresh: boolean, trusted: boolean, live: boolean, hadSurvivors: boolean): string {
   if (!report || report.status !== "ok") return "the edge finder has no answer yet (it needs about a day of recorded market)";
+  if (report.method !== EDGE_METHOD) return "the edge finder's last answer was made by an older version of the bot; the next search replaces it (the first runs 20 minutes after the bot starts)";
   if (!fresh) return "the edge finder's last answer is more than 6 hours old";
   if (!trusted) return `the edge finder's luck check "found" ${report.placebo.avgSurvivors.toFixed(1)} rules per run on shuffled data, so its answers are not trusted right now`;
   if (!hadSurvivors) return "no rule held up on data the search never saw";
@@ -166,8 +177,7 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
 
   // 2. what the latest search proved
   const report = o.report;
-  const fresh = !!report && report.status === "ok" && now - report.generatedAt <= AUTOPILOT.freshMs;
-  const trusted = fresh && report!.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo;
+  const { fresh, trusted } = evidenceOf(report, now);
   const passes = (r: EdgeFound) => r.holdout.lo > 0 && (!live || (r.holdout.n >= AUTOPILOT.liveMinTrades && r.holdout.lo > AUTOPILOT.liveMinLo));
   const ranked = (trusted ? report!.survivors : [])
     .filter((r) => passes(r) && !((st.benched[r.text] ?? 0) > now))
@@ -214,8 +224,7 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
   const s = o.settings;
   const report = o.report;
   const live = s.mode === "live";
-  const fresh = !!report && report.status === "ok" && o.now - report.generatedAt <= AUTOPILOT.freshMs;
-  const trusted = fresh && report!.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo;
+  const { trusted } = evidenceOf(report, o.now);
   const ranking = (report?.status === "ok" ? report.survivors : [])
     .map((r) => ({
       text: r.text,
