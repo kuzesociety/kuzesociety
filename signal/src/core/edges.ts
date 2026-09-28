@@ -10,7 +10,7 @@
  *   3. Placebo: the whole search is repeated on shuffled outcomes, where no edge exists;
  *      how often it "finds" one there shows how often it fools itself.
  */
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboObserved, seenAt } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, counts } from "./outcomes.js";
 import { ENTRY_POINTS, type Settings } from "./settings.js";
 import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
@@ -96,10 +96,11 @@ export interface EdgeFound extends EdgeRule {
 }
 
 /**
- * How the proof is computed. 2: the holdout counts evidence per market hour. A report made by
- * an older method is shown but not acted on (core/autopilot).
+ * How the proof is computed. 2: the holdout counts evidence per market hour. 3: a recording whose
+ * price stopped reaching us counts only if it was watched for the rule's whole window (counts). A
+ * report made by an older method is shown but not acted on (core/autopilot).
  */
-export const EDGE_METHOD = 2;
+export const EDGE_METHOD = 3;
 
 export interface EdgeReport {
   generatedAt: number;
@@ -160,15 +161,18 @@ const DEFAULTS: Required<Omit<EdgeOptions, "now" | "incumbent">> = {
 export { normInv, tInv } from "./util.js";
 
 /**
- * Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h] — NaN when that exit was
- * not observed (the coin's price stopped reaching us before it happened: see Sample.blind).
+ * Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h] — NaN when it does not
+ * count (the coin's price stopped reaching us before that exit, or before the rule's window ended
+ * where only luck decides which samples are watched that long: see counts, Sample.blind).
  */
 function exitReturn(s: Sample, c: number, h: number): number {
   const ret = s.grid[c]!;
   const hold = HOLDS_MIN[h]!;
-  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
+  const window = hold ? hold * 60 : Infinity;
+  const t = s.gridT?.[c];
+  if (hold === 0 || (t ?? 0) <= hold * 60) return counts(s, t ?? Infinity, window) ? ret : NaN;
   // sold at the time limit
-  if (!seenAt(s, hold * 60)) return NaN;
+  if (!counts(s, window, window)) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold as (typeof PATH_MIN)[number])];
   return v ?? ret;
 }

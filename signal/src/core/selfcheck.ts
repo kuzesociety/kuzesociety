@@ -49,7 +49,9 @@ const pts = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)} points`;
 
 /**
  * What the recording of a trade's signal made under the trade's own exit plan, as far as it was
- * observed (undefined when that cannot be read from the recording).
+ * observed (undefined when that cannot be read from the recording). Seen is enough here, unlike
+ * for evidence (counts): each recording is compared with the real trade on the same coin, so
+ * which coins are compared does not move the difference.
  */
 export function recordedReturn(s: Sample, p: Pick<Position, "plan">): number | undefined {
   const { tpPct, slPct, maxHoldMin } = p.plan;
@@ -169,16 +171,17 @@ export function coverage(samples: Sample[], now: number, feedDown: boolean): Che
   const title = "The bot sees what it records";
   if (feedDown) return { key: "coverage", status: "fail", title, detail: "The trade feed is down: no new entries, and nothing open is observed until it is back." };
   const day = samples.filter((s) => s.resolvedAt >= now - DAY && s.ov === 1);
-  const blind = day.filter((s) => s.blind !== undefined);
   const amm = day.filter((s) => s.stage === "amm");
-  const ammBlind = amm.filter((s) => s.blind !== undefined);
-  const curveBlind = blind.filter((s) => s.stage === "curve").length;
+  const ammBlind = amm.filter((s) => s.blind !== undefined && s.blindBy !== "feed");
+  const outage = day.filter((s) => s.blind !== undefined && s.blindBy === "feed").length;
   const parts: string[] = [];
-  if (amm.length) parts.push(`${Math.round((ammBlind.length / amm.length) * 100)}% of graduated-coin recordings went unobserved before they ended (the bot follows at most 40 pools; those exits are left out, not guessed)`);
-  const curve = day.length - amm.length;
-  if (curve && curveBlind) parts.push(`${Math.round((curveBlind / curve) * 100)}% of the others, from times the trade feed was down`);
+  if (amm.length)
+    parts.push(
+      `${Math.round((ammBlind.length / amm.length) * 100)}% of graduated-coin recordings stopped being watched before they ended (the bot follows at most 40 pools). Those count only for rules whose time limit they were watched through, never by how they ended, so rules on graduated coins that hold long are judged by the bot's own trades`,
+    );
+  if (outage) parts.push(`${Math.round((outage / day.length) * 100)}% of all recordings were cut by times the trade feed was down`);
   if (!day.length) return { key: "coverage", status: "info", title, detail: "No recordings finished in the last 24 h yet." };
-  const status: CheckStatus = curve && curveBlind / curve > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
+  const status: CheckStatus = outage / day.length > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
   return { key: "coverage", status, title, detail: parts.length ? `Last 24 h: ${parts.join("; ")}.` : `Last 24 h: all ${day.length} recordings were observed to the end.` };
 }
 

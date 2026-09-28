@@ -3,8 +3,8 @@ import { Engine } from "../src/core/engine.js";
 import { findEdges } from "../src/core/edges.js";
 import { labelOf } from "../src/core/learn.js";
 import { priorModel } from "../src/core/model.js";
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboObserved } from "../src/core/outcomes.js";
-import { rng } from "../src/core/util.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboCounts, comboObserved, counts, seenAt } from "../src/core/outcomes.js";
+import { normInv, rng } from "../src/core/util.js";
 import { MarketSim } from "../src/sim/market.js";
 import { Scenario, T0, key } from "./helpers.js";
 
@@ -93,6 +93,94 @@ describe("outcomes nobody observed", () => {
       // opened before the quiet minute: seen until it began; opened during it: never seen
       if (x.ts < quietFrom) expect(x.blind).toBeCloseTo((quietFrom - x.ts) / 1000, 0);
       else expect(x.blind).toBe(0);
+    }
+  });
+
+  it("a recording counts for a rule only if it was watched for the rule's whole time, not by how early it ended", () => {
+    // graduated coins held up to 60 min for +50% / −70% (like "15 min after graduating · +50% /
+    // −70% · 60 min"). For most of them the price stops reaching us at some moment — newer
+    // graduates took the pools the bot follows — which has nothing to do with their price.
+    const r = rng(11);
+    const hour = 3600;
+    let all = 0;
+    const seen = { sum: 0, n: 0 };
+    const counted = { sum: 0, n: 0 };
+    const N = 40_000;
+    for (let i = 0; i < N; i++) {
+      let lp = 0;
+      let ret = NaN;
+      let t = hour;
+      for (let m = 1; m <= 60 && Number.isNaN(ret); m++) {
+        lp += -0.004 + 0.07 * normInv(Math.min(Math.max(r(), 1e-9), 1 - 1e-9));
+        if (lp >= Math.log(1.5)) ret = 0.5;
+        else if (lp <= Math.log(0.3)) ret = -0.7;
+        if (!Number.isNaN(ret)) t = m * 60;
+      }
+      if (Number.isNaN(ret)) ret = Math.exp(lp) - 1; // sold at the time limit
+      const s = { stage: "amm", ov: 1, ...(r() < 0.8 ? { blind: r() * 1.5 * hour, blindBy: "pool" } : {}) } as Sample;
+      all += ret;
+      // the old rule: the exit was seen
+      if (seenAt(s, t)) (seen.sum += ret), seen.n++;
+      // the rule now: watched for the whole hour, however it ended
+      if (counts(s, t, hour)) (counted.sum += ret), counted.n++;
+    }
+    const truth = all / N;
+    // keeping the exits that were seen keeps the quick targets and leaves out the slow sells
+    expect(seen.sum / seen.n - truth).toBeGreaterThan(0.05);
+    expect(Math.abs(counted.sum / counted.n - truth)).toBeLessThan(0.01);
+    expect(counted.n).toBeGreaterThan(N * 0.3);
+  });
+
+  it("which recordings count: graduated coins and feed outages need the rule's whole window, a curve coin that graduated only its exit", () => {
+    const amm = { stage: "amm", ov: 1, blind: 1800, blindBy: "pool" } as Sample;
+    expect(counts(amm, 300, 600)).toBe(true); // a 10-minute rule: watched through
+    expect(counts(amm, 700, 600)).toBe(true); // sold at its time limit, watched through
+    expect(counts(amm, 300, 3600)).toBe(false); // a 60-minute rule: its target at 5 min was seen, but only luck decides which of them count
+    expect(counts(amm, 300)).toBe(false); // no time limit: held to the end, not watched to the end
+    expect(counts({ ...amm, blind: undefined, blindBy: undefined }, 20_000)).toBe(true);
+    expect(counts({ ...amm, ov: undefined, blind: undefined }, 300, 600)).toBe(false); // recorded before watching was tracked
+    const outage = { stage: "curve", ov: 1, blind: 1800, blindBy: "feed" } as Sample;
+    expect(counts(outage, 300, 600)).toBe(true);
+    expect(counts(outage, 300)).toBe(false);
+    // bought on the curve, its pool dropped after it graduated: graduating is a result, the exit only needs to be seen
+    const graduated = { stage: "curve", ov: 1, blind: 1800, blindBy: "pool" } as Sample;
+    expect(counts(graduated, 300)).toBe(true);
+    expect(counts(graduated, 2000)).toBe(false);
+    expect(counts(graduated, 5000, 1200)).toBe(true); // sold at 20 min, before watching stopped
+    const g = { ...amm, gridT: GRID.map(() => 300) } as Sample;
+    expect(comboObserved(g, 0)).toBe(true);
+    expect(comboCounts(g, 0)).toBe(false);
+  });
+
+  it("a coin that just graduated gets a minute to name its pool before it counts as unobserved", () => {
+    for (const learnsPool of [true, false]) {
+      const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN });
+      const mint = key(91);
+      s.create(mint, key(92));
+      s.crowd(mint, 12, 0.3, 9300, 5000); // the 20 s and 45 s checkpoints open
+      const gradAt = s.now;
+      // one feed reports the graduation without the pool's address; the other names it a moment later
+      s.emit({ k: "migrate", ts: s.now, src: "pumpportal", sig: key(9400), mint });
+      s.advance(5_000);
+      expect(s.engine.poolsToFollow()).toEqual([]);
+      if (learnsPool) {
+        const c = s.curves.get(mint)!;
+        s.emit({ k: "pool", ts: s.now, src: "rpc", sig: key(9400), pool: key(9401), mint, quoteIsSol: true, base: c.vTok, quote: c.vSol });
+        expect(s.engine.poolsToFollow()).toEqual([key(9401)]);
+      }
+      s.advance(60_000);
+      s.engine.poolsToFollow();
+      s.advance(25 * MIN);
+      const mine = s.engine.samples.toArray().filter((x) => x.mint === mint && x.ts < gradAt);
+      expect(mine.length).toBeGreaterThan(0);
+      for (const x of mine) {
+        if (learnsPool) expect(x.blind).toBeUndefined();
+        else {
+          // never named: nothing after the graduation was seen
+          expect(x.blind).toBeCloseTo((gradAt - x.ts) / 1000, 0);
+          expect(x.blindBy).toBe("pool");
+        }
+      }
     }
   });
 

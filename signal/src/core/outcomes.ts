@@ -83,6 +83,8 @@ export interface Sample {
    * unknown (comboObserved). Missing: observed to the end.
    */
   blind?: number;
+  /** why `blind`: "pool" — its PumpSwap pool was no longer followed; "feed" — the trade feed went quiet */
+  blindBy?: "pool" | "feed";
   /**
    * 1: recorded while `blind` was tracked. Older graduated-coin samples froze at their last price
    * once their pool stopped being followed, without saying when, so none of their exits is trusted.
@@ -139,8 +141,9 @@ interface Hypo {
   path: (number | null)[];
   pathNext: number;
   f?: EntryFacts;
-  /** when the price stopped being observed (ms) */
+  /** when the price stopped being observed (ms), and why */
   blind?: number;
+  blindBy?: "pool" | "feed";
   /** the latest net multiple seen */
   lastM: number;
 }
@@ -152,6 +155,33 @@ interface Hypo {
 export function comboObserved(s: Pick<Sample, "blind" | "gridT" | "ov" | "stage">, gi: number): boolean {
   const t = s.gridT?.[gi];
   return seenAt(s, t ?? Infinity);
+}
+
+/**
+ * Whether a sample's result for an exit counts as evidence about a rule: the exit came `exitSec`
+ * after entry, and the rule holds at most `windowSec` (its time limit; Infinity when it holds
+ * until the target, the stop or the end of the recording).
+ *
+ * Seen is not enough. Keeping every exit seen before the price stopped reaching us keeps the quick
+ * ones and leaves out the slow ones — and quick exits are mostly targets when the target is near
+ * and the stop far — so the rule would look better than it is. When watching stopped for reasons
+ * that have nothing to do with the coin's price (a graduated coin's pool made way for newer ones,
+ * the feed went quiet), a sample therefore counts only if it was watched for the rule's whole
+ * window, however it ended: which samples count is then a matter of luck, not of their results.
+ * A coin bought on the bonding curve can only lose its price by graduating — itself a result, the
+ * curve's biggest one — so leaving those out would leave out the winners; for them the exit only
+ * needs to have been seen (see comboObserved).
+ */
+export function counts(s: Pick<Sample, "blind" | "blindBy" | "ov" | "stage">, exitSec: number, windowSec = Infinity): boolean {
+  if (s.ov === undefined && s.stage === "amm") return false;
+  if (s.blind === undefined) return true;
+  if (s.stage === "amm" || s.blindBy === "feed") return windowSec <= s.blind;
+  return Math.min(exitSec, windowSec) <= s.blind;
+}
+
+/** Whether GRID combo `gi` (held until its target, stop or the end of the recording) counts as evidence (see counts). */
+export function comboCounts(s: Pick<Sample, "blind" | "blindBy" | "gridT" | "ov" | "stage">, gi: number): boolean {
+  return counts(s, s.gridT?.[gi] ?? Infinity);
 }
 
 /** Whether the sample's price was still observed `sec` seconds after entry (see Sample.blind, Sample.ov). */
@@ -203,7 +233,7 @@ export class OutcomeTracker {
    * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
    * dropped — their entry could not be seen.
    */
-  blindMint(mint: string, at: number) {
+  blindMint(mint: string, at: number, by: "pool" | "feed" = "pool") {
     const list = this.byMint.get(mint);
     if (!list) return;
     for (const h of [...list]) {
@@ -213,6 +243,7 @@ export class OutcomeTracker {
       }
       if (h.blind !== undefined) continue;
       h.blind = Math.max(at, h.ts);
+      h.blindBy = by;
       // exits already triggered and landing: at the last price seen, not one seen later
       for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1) this.resolveCombo(h, i, h.lastM);
       if (h.open === 0) this.emit(h, at);
@@ -221,7 +252,7 @@ export class OutcomeTracker {
 
   /** The trade feed went quiet at `at`: nothing open is observed from then on. */
   blindAll(at: number) {
-    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at);
+    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at, "feed");
   }
 
   add(
@@ -417,7 +448,7 @@ export class OutcomeTracker {
       gridT,
       path: h.path.map((v) => (v === null ? null : r4(v))),
       f: h.f,
-      ...(h.blind !== undefined ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {}),
+      ...(h.blind !== undefined ? { blind: Math.round((h.blind - h.ts) / 100) / 10, blindBy: h.blindBy } : {}),
       ov: 1,
       maxMult: h.maxMult,
       minMult: h.minMult,

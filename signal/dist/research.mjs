@@ -524,13 +524,14 @@ var K_SL = 2;
 var COMBOS = 1 + GRID.length;
 var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
 var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
-function comboObserved(s, gi) {
-  const t = s.gridT?.[gi];
-  return seenAt(s, t ?? Infinity);
-}
-function seenAt(s, sec) {
+function counts(s, exitSec, windowSec = Infinity) {
   if (s.ov === void 0 && s.stage === "amm") return false;
-  return s.blind === void 0 || sec <= s.blind;
+  if (s.blind === void 0) return true;
+  if (s.stage === "amm" || s.blindBy === "feed") return windowSec <= s.blind;
+  return Math.min(exitSec, windowSec) <= s.blind;
+}
+function comboCounts(s, gi) {
+  return counts(s, s.gridT?.[gi] ?? Infinity);
 }
 var r4 = (v) => Math.round(v * 1e4) / 1e4;
 var OutcomeTracker = class {
@@ -560,7 +561,7 @@ var OutcomeTracker = class {
    * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
    * dropped — their entry could not be seen.
    */
-  blindMint(mint, at) {
+  blindMint(mint, at, by = "pool") {
     const list = this.byMint.get(mint);
     if (!list) return;
     for (const h of [...list]) {
@@ -570,13 +571,14 @@ var OutcomeTracker = class {
       }
       if (h.blind !== void 0) continue;
       h.blind = Math.max(at, h.ts);
+      h.blindBy = by;
       for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1) this.resolveCombo(h, i, h.lastM);
       if (h.open === 0) this.emit(h, at);
     }
   }
   /** The trade feed went quiet at `at`: nothing open is observed from then on. */
   blindAll(at) {
-    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at);
+    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at, "feed");
   }
   add(t, kind, tag, now, score, p, x, custom, facts) {
     if (this.openCount >= this.opts.maxOpen) {
@@ -751,7 +753,7 @@ var OutcomeTracker = class {
       gridT,
       path: h.path.map((v) => v === null ? null : r4(v)),
       f: h.f,
-      ...h.blind !== void 0 ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {},
+      ...h.blind !== void 0 ? { blind: Math.round((h.blind - h.ts) / 100) / 10, blindBy: h.blindBy } : {},
       ov: 1,
       maxMult: h.maxMult,
       minMult: h.minMult,
@@ -971,7 +973,7 @@ var OPEN_FILTERS = {
   maxDevLaunches24h: 0,
   maxDevSoldPct: 100
 };
-var EDGE_METHOD = 2;
+var EDGE_METHOD = 3;
 var DEFAULTS = {
   horizonMs: 6 * 36e5,
   minHours: 24,
@@ -986,8 +988,10 @@ var DEFAULTS = {
 function exitReturn(s, c, h) {
   const ret = s.grid[c];
   const hold = HOLDS_MIN[h];
-  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
-  if (!seenAt(s, hold * 60)) return NaN;
+  const window = hold ? hold * 60 : Infinity;
+  const t = s.gridT?.[c];
+  if (hold === 0 || (t ?? 0) <= hold * 60) return counts(s, t ?? Infinity, window) ? ret : NaN;
+  if (!counts(s, window, window)) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold)];
   return v ?? ret;
 }
@@ -1204,7 +1208,7 @@ function* steps(samples, opts) {
     }
   for (let e = 0; e < EXITS; e++) colMean[e] = colN[e] ? colMean[e] / colN[e] : 0;
   const rand = rng(o.seed);
-  const counts = [];
+  const counts2 = [];
   for (let r = 0; r < o.placeboRuns; r++) {
     const perm = new Int32Array(n);
     for (let i = 0; i < n; i++) perm[i] = i;
@@ -1214,7 +1218,7 @@ function* steps(samples, opts) {
       perm[i] = perm[j];
       perm[j] = t;
     }
-    counts.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0, hour: hour2 }, groups, o)).passed.length);
+    counts2.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0, hour: hour2 }, groups, o)).passed.length);
   }
   const discHours = hours * (2 / 3);
   return {
@@ -1228,9 +1232,9 @@ function* steps(samples, opts) {
     survivors,
     failed,
     placebo: {
-      runs: counts.length,
-      avgSurvivors: counts.length ? counts.reduce((a, b) => a + b, 0) / counts.length : 0,
-      maxSurvivors: counts.length ? Math.max(...counts) : 0
+      runs: counts2.length,
+      avgSurvivors: counts2.length ? counts2.reduce((a, b) => a + b, 0) / counts2.length : 0,
+      maxSurvivors: counts2.length ? Math.max(...counts2) : 0
     }
   };
 }
@@ -1961,7 +1965,7 @@ var SAME_MOMENT_MS = 3e3;
 function labelOf(s, target) {
   const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
   if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
-    if (!comboObserved(s, gi)) return null;
+    if (!comboCounts(s, gi)) return null;
     const r = s.grid[gi];
     return Number.isFinite(r) ? r > 0 ? 1 : 0 : null;
   }
@@ -3382,6 +3386,7 @@ var DEFAULT_CONFIG = {
   seed: 1
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
+var POOL_WAIT_MS = 6e4;
 function entryFacts(t, f2) {
   const r = (v, d = 4) => Number.isFinite(v) ? Math.round(v * 10 ** d) / 10 ** d : 0;
   return {
@@ -4448,7 +4453,9 @@ var Engine = class {
     followed.sort((a, b) => b.at - a.at);
     for (const f2 of followed) {
       if (f2.pool && out.size < max) out.add(f2.pool);
-      else if (!(f2.pool && out.has(f2.pool))) this.outcomes.blindMint(f2.mint, this.now);
+      else if (f2.pool && out.has(f2.pool)) continue;
+      else if (!f2.pool && this.now - f2.at < POOL_WAIT_MS) continue;
+      else this.outcomes.blindMint(f2.mint, f2.pool || !f2.at ? this.now : f2.at);
     }
     return [...out];
   }
@@ -4735,7 +4742,7 @@ function observedReturn(s, tp, sl) {
   if (s.blind !== void 0 || s.ov === void 0 && s.stage === "amm") {
     if (!gridOf(s)) return void 0;
     const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
-    if (!comboObserved(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return void 0;
+    if (!comboCounts(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return void 0;
   }
   return sampleReturn(s, tp, sl).ret;
 }
@@ -4831,7 +4838,7 @@ function buildReport(samples, settings, model, closed, now) {
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid = GRID.map((g, i) => {
-    const st = statsOf(valuesOf(pool, (s) => comboObserved(s, i) ? gridOf(s)?.[i] : void 0));
+    const st = statsOf(valuesOf(pool, (s) => comboCounts(s, i) ? gridOf(s)?.[i] : void 0));
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
   const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
@@ -4869,7 +4876,7 @@ function buildReport(samples, settings, model, closed, now) {
     const older = rows.filter((s) => s.ts < mid);
     const newer = rows.filter((s) => s.ts >= mid);
     GRID.forEach((g, i) => {
-      const val = (s) => comboObserved(s, i) ? gridOf(s)?.[i] : void 0;
+      const val = (s) => comboCounts(s, i) ? gridOf(s)?.[i] : void 0;
       const all = valuesOf(rows, val);
       if (all.v.length < 150) return;
       const lo = bound(all, strict);

@@ -93,15 +93,19 @@ describe("self-check", () => {
   });
 
   it("says how much of what it records it could actually see", () => {
-    const s = (stage: "curve" | "amm", blind?: number) => ({ stage, ov: 1, resolvedAt: NOW - HOUR, ...(blind !== undefined ? { blind } : {}) }) as Sample;
+    const s = (stage: "curve" | "amm", blind?: number, blindBy: "pool" | "feed" = "pool") => ({ stage, ov: 1, resolvedAt: NOW - HOUR, ...(blind !== undefined ? { blind, blindBy } : {}) }) as Sample;
     expect(coverage([s("curve")], NOW, true).status).toBe("fail");
     expect(coverage([s("curve"), s("amm")], NOW, false).status).toBe("ok");
     const amm = [...Array.from({ length: 30 }, () => s("amm", 600)), ...Array.from({ length: 10 }, () => s("amm"))];
     const c = coverage(amm, NOW, false);
     expect(c.status).toBe("info");
-    expect(c.detail).toMatch(/75% of graduated-coin recordings went unobserved/);
-    const outage = [...Array.from({ length: 5 }, () => s("curve", 60)), ...Array.from({ length: 20 }, () => s("curve"))];
+    expect(c.detail).toMatch(/75% of graduated-coin recordings stopped being watched before they ended/);
+    const outage = [...Array.from({ length: 5 }, () => s("curve", 60, "feed")), ...Array.from({ length: 20 }, () => s("curve"))];
     expect(coverage(outage, NOW, false).status).toBe("warn");
+    expect(coverage(outage, NOW, false).detail).toMatch(/20% of all recordings were cut by times the trade feed was down/);
+    // coins bought on the curve whose pool was dropped after they graduated are not an outage
+    const graduated = [...Array.from({ length: 5 }, () => s("curve", 900)), ...Array.from({ length: 20 }, () => s("curve"))];
+    expect(coverage(graduated, NOW, false).status).toBe("ok");
   });
 
   it("flags promises a real market is unlikely to keep", () => {

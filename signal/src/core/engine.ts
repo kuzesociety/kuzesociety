@@ -222,6 +222,8 @@ interface ScoreEntry {
 }
 
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
+/** How long a graduated coin may wait for its pool's address before it counts as unobserved. */
+const POOL_WAIT_MS = 60_000;
 
 /** What the bot's filters would see at this moment (same fields, same units). */
 function entryFacts(t: TokenState, f: RawFeatures): EntryFacts {
@@ -1377,7 +1379,11 @@ export class Engine {
     followed.sort((a, b) => b.at - a.at);
     for (const f of followed) {
       if (f.pool && out.size < max) out.add(f.pool);
-      else if (!(f.pool && out.has(f.pool))) this.outcomes.blindMint(f.mint, this.now);
+      else if (f.pool && out.has(f.pool)) continue;
+      // the pool's address arrives moments after the graduation (another feed may report it first)
+      else if (!f.pool && this.now - f.at < POOL_WAIT_MS) continue;
+      // never learned its pool: nothing after the graduation was seen
+      else this.outcomes.blindMint(f.mint, f.pool || !f.at ? this.now : f.at);
     }
     return [...out];
   }
