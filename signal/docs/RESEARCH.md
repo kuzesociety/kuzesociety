@@ -195,6 +195,22 @@ The learning loop runs every 2 hours: retrain the score (switch only if the new 
 - **Only the rule.** Entry, coins, take profit, stop loss and time limit. Never size, limits or mode. A manual change of the rule turns it off; in paper mode, with nothing proven, the user's own rule is traded.
 - **One standard for every finding.** The score is replaced automatically when a new model predicts unseen coins better (section 7); the rule, when the edge finder proves one on unseen data. The Learn tab's in-sample suggestion searches a subset of the edge finder's rules (score levels × any coin × exits), so with the autopilot on it is not a separate path. Deliberately never automatic: trade size, limits and mode (risk is the owner's decision, and sizing up on past results is the classic way to blow up), and realism settings such as the paper delay, which "optimizing" would only make less honest.
 
+**On the simulator** (*sim*; the whole loop without a person: 48 simulated hours at 6 launches a minute; the score retrains every 2 hours; the edge finder answers every 4 hours from hour 24 (on the server: every 2); the bot starts on the default plan — first reaches 75, +100% / −50%, 0.1 SOL, 3 positions, 4-hour limit, 1.5 s delay, every cost; profit from hour 24, when the first search can answer, to hour 48):
+
+| World | Seed | The plan all along (autopilot off) | Autopilot on |
+|---|---|---|---|
+| predictability 0.35 | 77 | +17.3 SOL | +37.4 SOL |
+| | 78 | +16.9 SOL | +36.7 SOL |
+| predictability 0 | 77 | +17.7 SOL | +51.5 SOL |
+| | 78 | +14.4 SOL | +48.3 SOL |
+
+The first search with a day of finished outcomes answered at hour 28, and the autopilot switched at once. Every search after that found 16–20 rules on unseen hours and none on shuffled data. Of the 16 later answers, 8 switched rules and 8 kept the one in use. A switch needs a rule worth at least 25% more a day, or the rule in use dropping out of the proven set. Once, it chose a rule with a lower average per trade (+208% against +236%) because it qualified more coins a day at the same limits. The rules then made about what had proved them: +111% to +275% per trade over 6-hour stretches, against +155% to +270% on the unseen hours. The watchdog never had a reason to bench one.
+
+What this means, and what it does not:
+- **The numbers are the simulator's, not pump.fun's.** Every rule was a version of one idea: buy when a coin first reaches 75–95, with a tight stop, and sell after 10 minutes (the +500% target almost never triggers). That is the simulator's strong short-term momentum (section 6). An edge of +100% to +275% per trade on a real venue would be competed away. These runs say nothing about what the autopilot will earn on pump.fun.
+- **What they do show:** the loop runs end to end on its own. It learns, searches, switches the moment a rule is proven and ranks rules by what they earn at the user's limits. It does not chase a slightly better rule, and the rules it picks keep delivering on coins that did not exist when it picked them.
+- **What they cannot show:** behaviour where there is no edge. This simulator always has one. That case is covered on synthetic data: pure noise, and markets with hot and cold hours, where the finder "proves" nothing (section 6), so the autopilot switches nothing and, with real money, waits.
+
 What it cannot know: whether the past keeps paying. Every guard above is about not trusting luck; none makes a rule's future certain. A rule that buys at a score level was proven with the scores the bot gave at the time; after a retrain the same level selects the same share of coins (the anchored scale) but not the same coins, and only the next searches and the rule's own trades show whether it still pays. The watchdog limits how long a rule that stopped working keeps trading (30 trades), and the real-money bar is deliberately strict.
 
 ## 9. Method
