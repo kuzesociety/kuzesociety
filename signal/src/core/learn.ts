@@ -63,7 +63,7 @@ export function labelOf(s: Sample, target: { tpPct: number; slPct: number }): 0 
     const r = s.grid[gi]!;
     return Number.isFinite(r) ? (r > 0 ? 1 : 0) : null;
   }
-  if (s.blind !== undefined) return null;
+  if (s.blind !== undefined || (s.ov === undefined && s.stage === "amm")) return null;
   if (s.tp === target.tpPct && s.sl === target.slPct && Number.isFinite(s.ret)) return s.ret > 0 ? 1 : 0;
   return null;
 }

@@ -108,7 +108,7 @@ describe("outcomes nobody observed", () => {
         const grid = GRID.map((g) => (r() < 0.55 ? g.tp / 100 : -(g.sl / 100 + 0.05)));
         return {
           id: `s${i}`, kind: "checkpoint", tag: "mig3600", mint: `m${i}`, symbol: "X", ts, stage: "amm", score: 50, p: 0.1, x: [], entryMcap: 400, tp: 100, sl: 50, y: 0, ret: 0,
-          exit: "timeout", grid, gv: GRID_VERSION, gridT: GRID.map(() => 3600 + r() * 7200), path: PATH_MIN.map(() => -0.05), resolvedAt: ts + 6 * 3_600_000, maxMult: 1, minMult: 1, secToMax: 0,
+          exit: "timeout", grid, gv: GRID_VERSION, ov: 1, gridT: GRID.map(() => 3600 + r() * 7200), path: PATH_MIN.map(() => -0.05), resolvedAt: ts + 6 * 3_600_000, maxMult: 1, minMult: 1, secToMax: 0,
           f: { mcap: 400, age: 5000, buyers: 200, top10: 0.3, bundle: 0.05, devShare: 0.01, devSold: 0, socials: 1, launches24h: 1 },
           ...(blind ? { blind: 1800 } : {}),
         } as Sample;
@@ -120,5 +120,11 @@ describe("outcomes nobody observed", () => {
     const honest = findEdges(make(true), { now, placeboRuns: 0 });
     expect(honest.survivors).toHaveLength(0);
     expect(ENTRY_LEVELS.length).toBeGreaterThan(0);
+    // recorded before the bot tracked when observation stopped: a graduated coin's outcome may
+    // have frozen at any point, so none of its exits is trusted (coins on the curve were always seen)
+    const old = make(false).map(({ ov: _ov, ...x }) => x as Sample);
+    expect(findEdges(old, { now, placeboRuns: 0 }).survivors).toHaveLength(0);
+    expect(labelOf({ ...old[0]!, grid: GRID.map(() => 1) }, { tpPct: 100, slPct: 50 })).toBeNull();
+    expect(labelOf({ ...old[0]!, stage: "curve", grid: GRID.map(() => 1) }, { tpPct: 100, slPct: 50 })).toBe(1);
   });
 });

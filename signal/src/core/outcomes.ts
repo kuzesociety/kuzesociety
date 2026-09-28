@@ -83,6 +83,11 @@ export interface Sample {
    * unknown (comboObserved). Missing: observed to the end.
    */
   blind?: number;
+  /**
+   * 1: recorded while `blind` was tracked. Older graduated-coin samples froze at their last price
+   * once their pool stopped being followed, without saying when, so none of their exits is trusted.
+   */
+  ov?: number;
   maxMult: number;
   minMult: number;
   secToMax: number;
@@ -144,10 +149,15 @@ interface Hypo {
  * Whether GRID combo `gi` of a sample ended (target, stop, or the coin's end) while its price was
  * still observed. A stop that was never seen because nobody was watching is not a win.
  */
-export function comboObserved(s: Pick<Sample, "blind" | "gridT">, gi: number): boolean {
-  if (s.blind === undefined) return true;
+export function comboObserved(s: Pick<Sample, "blind" | "gridT" | "ov" | "stage">, gi: number): boolean {
   const t = s.gridT?.[gi];
-  return t !== undefined && t <= s.blind;
+  return seenAt(s, t ?? Infinity);
+}
+
+/** Whether the sample's price was still observed `sec` seconds after entry (see Sample.blind, Sample.ov). */
+export function seenAt(s: Pick<Sample, "blind" | "ov" | "stage">, sec: number): boolean {
+  if (s.ov === undefined && s.stage === "amm") return false;
+  return s.blind === undefined || sec <= s.blind;
 }
 
 export interface OutcomeOptions {
@@ -408,6 +418,7 @@ export class OutcomeTracker {
       path: h.path.map((v) => (v === null ? null : r4(v))),
       f: h.f,
       ...(h.blind !== undefined ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {}),
+      ov: 1,
       maxMult: h.maxMult,
       minMult: h.minMult,
       secToMax: Math.max(0, (h.maxAt - h.ts) / 1000),

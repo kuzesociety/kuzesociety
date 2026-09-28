@@ -525,9 +525,12 @@ var COMBOS = 1 + GRID.length;
 var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
 var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
 function comboObserved(s, gi) {
-  if (s.blind === void 0) return true;
   const t = s.gridT?.[gi];
-  return t !== void 0 && t <= s.blind;
+  return seenAt(s, t ?? Infinity);
+}
+function seenAt(s, sec) {
+  if (s.ov === void 0 && s.stage === "amm") return false;
+  return s.blind === void 0 || sec <= s.blind;
 }
 var r4 = (v) => Math.round(v * 1e4) / 1e4;
 var OutcomeTracker = class {
@@ -749,6 +752,7 @@ var OutcomeTracker = class {
       path: h.path.map((v) => v === null ? null : r4(v)),
       f: h.f,
       ...h.blind !== void 0 ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {},
+      ov: 1,
       maxMult: h.maxMult,
       minMult: h.minMult,
       secToMax: Math.max(0, (h.maxAt - h.ts) / 1e3),
@@ -983,7 +987,7 @@ function exitReturn(s, c, h) {
   const ret = s.grid[c];
   const hold = HOLDS_MIN[h];
   if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
-  if (s.blind !== void 0 && hold * 60 > s.blind) return NaN;
+  if (!seenAt(s, hold * 60)) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold)];
   return v ?? ret;
 }
@@ -1961,7 +1965,7 @@ function labelOf(s, target) {
     const r = s.grid[gi];
     return Number.isFinite(r) ? r > 0 ? 1 : 0 : null;
   }
-  if (s.blind !== void 0) return null;
+  if (s.blind !== void 0 || s.ov === void 0 && s.stage === "amm") return null;
   if (s.tp === target.tpPct && s.sl === target.slPct && Number.isFinite(s.ret)) return s.ret > 0 ? 1 : 0;
   return null;
 }
@@ -4716,7 +4720,7 @@ function gridOf(s) {
   return s.grid?.length === GRID.length ? s.grid : void 0;
 }
 function observedReturn(s, tp, sl) {
-  if (s.blind !== void 0) {
+  if (s.blind !== void 0 || s.ov === void 0 && s.stage === "amm") {
     if (!gridOf(s)) return void 0;
     const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
     if (!comboObserved(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return void 0;

@@ -79,7 +79,7 @@ export function gridOf(s: Sample): number[] | undefined {
 
 /** The sample's return for (tp, sl) when that exit was observed (see Sample.blind), else undefined. */
 export function observedReturn(s: Sample, tp: number, sl: number): number | undefined {
-  if (s.blind !== undefined) {
+  if (s.blind !== undefined || (s.ov === undefined && s.stage === "amm")) {
     if (!gridOf(s)) return undefined;
     const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
     if (!comboObserved(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return undefined;

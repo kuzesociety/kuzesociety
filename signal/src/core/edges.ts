@@ -10,7 +10,7 @@
  *   3. Placebo: the whole search is repeated on shuffled outcomes, where no edge exists;
  *      how often it "finds" one there shows how often it fools itself.
  */
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboObserved } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboObserved, seenAt } from "./outcomes.js";
 import { ENTRY_POINTS, type Settings } from "./settings.js";
 import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
@@ -168,7 +168,7 @@ function exitReturn(s: Sample, c: number, h: number): number {
   const hold = HOLDS_MIN[h]!;
   if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
   // sold at the time limit
-  if (s.blind !== undefined && hold * 60 > s.blind) return NaN;
+  if (!seenAt(s, hold * 60)) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold as (typeof PATH_MIN)[number])];
   return v ?? ret;
 }

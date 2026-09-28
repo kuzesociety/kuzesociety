@@ -22,7 +22,7 @@ function makeEntries(n: number, days: number, seed: number, edge?: (s: Sample, c
     const s: Sample = {
       id: `e${i}${tag}`, kind: tag.startsWith("x") ? "entry" : "checkpoint", tag, mint: `m${i}`, symbol: "X", ts, stage: tag.startsWith("mig") || (tag.startsWith("x") && r() < 0.4) ? "amm" : "curve",
       score: level, p: 0.1, x: [], entryMcap: 50, tp: 100, sl: 50, y: 0, ret: 0, exit: "timeout", grid: [], maxMult: 1, minMult: 1, secToMax: 0,
-      resolvedAt: ts + 3_600_000, gv: GRID_VERSION, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
+      resolvedAt: ts + 3_600_000, gv: GRID_VERSION, ov: 1, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
       f: { mcap: 20 + r() * 600, age: 10 + r() * 1800, buyers: Math.floor(3 + r() * 300), top10: 0.1 + r() * 0.7, bundle: r() * 0.4, devShare: r() * 0.3, devSold: r() < 0.5 ? 0 : r(), socials: Math.floor(r() * 4), launches24h: 1 + Math.floor(r() * 6) },
     };
     GRID.forEach((g, c) => {
@@ -112,7 +112,7 @@ describe("edge finder", () => {
         const s: Sample = {
           id: `e${i}x${level}`, kind: "entry", tag: `x${level}`, mint: `m${i}`, symbol: "X", ts, stage: r() < 0.4 ? "amm" : "curve",
           score: level, p: 0.1, x: [], entryMcap: 50, tp: 100, sl: 50, y: 0, ret: 0, exit: "timeout", grid: [], maxMult: 1, minMult: 1, secToMax: 0,
-          resolvedAt: ts + 3_600_000, gv: GRID_VERSION, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
+          resolvedAt: ts + 3_600_000, gv: GRID_VERSION, ov: 1, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
           f: { mcap: 20 + r() * 600, age: 10 + r() * 1800, buyers: Math.floor(3 + r() * 300), top10: 0.1 + r() * 0.7, bundle: r() * 0.4, devShare: r() * 0.3, devSold: r() < 0.5 ? 0 : r(), socials: Math.floor(r() * 4), launches24h: 1 + Math.floor(r() * 6) },
         };
         for (const g of GRID) {
