@@ -44,8 +44,11 @@ export const ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
  * signal:     the moment the coin crossed the user's own threshold (exact settings)
  * entry:      the first moment the coin reached one of ENTRY_LEVELS (tag `x75` …) — how the
  *             bot would have entered at that threshold, used to compare thresholds honestly
+ * moment:     a point in the coin's life you chose (Settings.moments: some time after launch or
+ *             after graduating), recorded like a checkpoint for rules at it; the score does not
+ *             train on it, so what it learns does not depend on the moments you pick
  */
-export type SampleKind = "checkpoint" | "signal" | "entry";
+export type SampleKind = "checkpoint" | "signal" | "entry" | "moment";
 
 export interface Sample {
   id: string;

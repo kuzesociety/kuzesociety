@@ -255,7 +255,7 @@ export class DataStore {
     const cap: Record<Bucket, number> = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
     const used: Record<Bucket, number> = { cp: 0, st: 0, en: 0 };
     const bucketOf = (line: string): Bucket =>
-      !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
+      line.includes('"kind":"moment"') ? "st" : !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
     for (const f of files) {
       const room: Record<Bucket, number> = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
       if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;

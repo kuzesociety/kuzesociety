@@ -5,7 +5,7 @@
  */
 import type { EdgeReport } from "./edges.js";
 import { describeCond } from "./lab.js";
-import { ENTRY_POINTS, type RuleCond, type Settings } from "./settings.js";
+import { type RuleCond, type Settings, entryLabel } from "./settings.js";
 
 export interface Preset {
   key: string;
@@ -51,7 +51,7 @@ export function followsPreset(s: Settings, p: Partial<Settings>): boolean {
 /** "score ≥ 95 · +500% / −20% · 10 min", or "halfway to graduation · +50% / −30% · 30 min" */
 export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin"> & { entryAt?: string; conds?: RuleCond[] }): string {
   const time = s.maxHoldMin > 0 ? (s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min`) : "no time limit";
-  const entry = s.entryAt && s.entryAt !== "score" ? (ENTRY_POINTS[s.entryAt] ?? s.entryAt) : `score ≥ ${s.minScore}`;
+  const entry = s.entryAt && s.entryAt !== "score" ? entryLabel(s.entryAt) : `score ≥ ${s.minScore}`;
   const when = s.conds?.length ? ` · ${s.conds.map(describeCond).join(", ")}` : "";
   return `${entry}${when} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
 }

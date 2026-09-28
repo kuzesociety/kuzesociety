@@ -112,9 +112,9 @@ export async function main() {
       journal: (j) => store.journal(j),
       onSample: (s) => store.sample(s),
       onSignal: (rec) => server?.broadcast("signal", rec),
-      onSettings: (s) => {
+      onSettings: (s, why) => {
         server?.broadcast("settings", s);
-        learner?.onSettings(s);
+        learner?.onSettings(s, why);
       },
       onModel: (m) => {
         try {

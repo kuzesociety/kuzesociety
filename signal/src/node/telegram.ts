@@ -11,7 +11,7 @@ import type { Check } from "../core/selfcheck.js";
 import type { LearningView } from "../core/insight.js";
 import type { Position } from "../core/positions.js";
 import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
-import type { Settings } from "../core/settings.js";
+import { type Settings, ruleChanged } from "../core/settings.js";
 import type { Logger } from "../core/util.js";
 import { getJson, postJson } from "./http.js";
 
@@ -177,11 +177,13 @@ export class Telegram {
     const e = this.o.engine();
     const [cmd, arg, extra] = text.split(/\s+/) as [string, string | undefined, string | undefined];
     const n = arg !== undefined ? Number(arg) : NaN;
-    /** A rule change by hand; says so when it turned the autopilot off. */
+    /** A rule change by hand; with the autopilot on, says that your rule now competes with the proven ones. */
     const byHand = (patch: Partial<Settings>): string => {
-      const was = e.settings.autopilot;
+      const before = e.settings;
       e.updateSettings(patch);
-      return was && !e.settings.autopilot ? "\n🤖 Autopilot off: you picked the rule. /autopilot on hands it back." : "";
+      return before.autopilot && e.settings.autopilot && ruleChanged(before, e.settings)
+        ? "\n🤖 The autopilot stays on: it keeps your rule unless a proven rule does clearly better (/autopilot off to trade it no matter what)."
+        : "";
     };
     switch (cmd.toLowerCase().replace(/@.*/, "")) {
       case "/start":
@@ -260,7 +262,7 @@ export class Telegram {
             return "You are trading LIVE. The autopilot switches the rule by itself (never the size or the limits) and waits while no rule is proven for real money. Send /autopilot on yes to turn it on.";
           e.updateSettings({ autopilot: want === "on" });
           return want === "on"
-            ? "🤖 Autopilot is on: it trades the best rule proven on data the search never saw, and switches when a clearly better one is proven."
+            ? "🤖 Autopilot is on: it trades the best rule proven on data the search never saw, and switches when a clearly better one is proven. A rule you pick yourself competes too: it stays unless a proven rule does clearly better."
             : "Autopilot is off: the rule stays as it is now. Change it with /strategy or in the Bot tab.";
         }
         return autopilotMessage(this.o.autopilot?.() ?? null, e.settings.autopilot);
@@ -437,7 +439,7 @@ function autopilotLine(v: AutopilotView | null, on: boolean): string {
   if (!on) return "🤖 Autopilot off (/autopilot on)";
   if (!v) return "🤖 Autopilot on";
   if (v.holding) return `🤖 Autopilot: holding new live entries — ${esc(v.holdReason)}`;
-  return v.active ? "🤖 Autopilot: trading the best proven rule" : "🤖 Autopilot: on your own rule until one is proven";
+  return v.active ? "🤖 Autopilot: trading the best proven rule" : "🤖 Autopilot: on your own rule until a proven one does clearly better";
 }
 
 /** The autopilot, for the phone. */
@@ -451,7 +453,17 @@ export function autopilotMessage(v: AutopilotView | null, on: boolean, now = Dat
       `Trading since ${agoText(v.since, now)}: ${esc(v.active)}`,
       `It showed ${signedPct(v.proof.mean)} per trade on ${v.proof.n} trades the search never saw (worst case ${signedPct(v.proof.lo)}).`,
     );
-  else lines.push(`On your own rule (${esc(v.rule)}) until a rule is proven on unseen data.`);
+  else {
+    lines.push(`On your own rule (${esc(v.rule)}): a proven rule replaces it only when it does clearly better.`);
+    const own = v.own;
+    if (own && "from" in own)
+      lines.push(
+        own.from === "trades"
+          ? `Weighed by its own ${own.n} trades: ${signedPct(own.mean)} each (at least ${signedPct(own.lo)}), ~${own.worstSolPerDay.toFixed(2)} SOL/day at its worst.`
+          : `Weighed on the newest recordings: ${signedPct(own.mean)} per trade on ${own.n} coins (at least ${signedPct(own.lo)}), ~${own.worstSolPerDay.toFixed(2)} SOL/day at its worst.`,
+      );
+    else if (own && "why" in own) lines.push(`Nothing to weigh it by yet: ${esc(own.why)}.`);
+  }
   const top = v.ranking.filter((r) => !r.active).slice(0, 2);
   if (top.length) lines.push("Next best:", ...top.map((r) => `• ${esc(r.text)} — worst case ~${r.worstSolPerDay.toFixed(2)} SOL/day at your limits`));
   const last = v.log[0];

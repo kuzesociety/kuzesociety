@@ -30,7 +30,7 @@
 import { type EdgeFound, EXITS, HOLDS_MIN, exitReturn } from "./edges.js";
 import { FEATURE_KEYS, fmtAge } from "./features.js";
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "./outcomes.js";
-import { ENTRY_POINTS, type RuleCond, type Settings, condsHold } from "./settings.js";
+import { ENTRY_POINTS, type RuleCond, type Settings, condsHold, entryLabel } from "./settings.js";
 import { clusteredMeanCI, hourOf, newId } from "./util.js";
 
 const DAY = 86_400_000;
@@ -174,7 +174,7 @@ function condCode(c: RuleCond): string {
 }
 
 function entryWords(at: string): string {
-  return at.startsWith("x") ? `Buy when a coin first reaches ${at.slice(1)}` : `Buy every coin ${ENTRY_POINTS[at] ?? at}`;
+  return at.startsWith("x") ? `Buy when a coin first reaches ${at.slice(1)}` : `Buy every coin ${entryLabel(at)}`;
 }
 
 /** In words: "Lab: Buy every coin 5 min after graduating with top 10 holders ≤ 25% and smart wallets in ≥ 1 · sell at +100% or −30%, or after 30 min". */

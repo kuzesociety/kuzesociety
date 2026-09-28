@@ -4,6 +4,7 @@
  * exit settings they were opened with; changes apply to new entries.
  */
 import { FEATURE_KEYS } from "./features.js";
+import type { EntryFacts } from "./outcomes.js";
 import { clamp, num } from "./util.js";
 
 export type Mode = "paper" | "live";
@@ -44,10 +45,17 @@ export interface Settings {
   /** enter when score ≥ this (0–100) */
   minScore: number;
   /**
-   * What triggers an entry: "score" (the score reaches minScore), or a fixed point in a
-   * coin's life (see ENTRY_POINTS) — for rules the edge finder proves on recorded data.
+   * What triggers an entry: "score" (the score reaches minScore), or a point in a coin's life:
+   * one the bot always records (ENTRY_POINTS), or a moment of your own — some time after launch
+   * or after graduating (customMoment), which the bot then records too (`moments`).
    */
   entryAt: string;
+  /**
+   * Moments of your own the bot records for every coin, like the fixed ones (at most
+   * MAX_MOMENTS): a custom entry moment is added here, so rules at it can be measured and
+   * searched even after you switch to another rule.
+   */
+  moments: string[];
   /**
    * More conditions of the rule, on the facts recorded about a coin at the moment of entry — set
    * by rules the Lab proved (core/lab). Every one must hold, whatever "score only" says.
@@ -101,8 +109,8 @@ export interface Settings {
   /**
    * Autopilot: trade the best rule the edge finder has proven on data it never saw, switch as
    * soon as a clearly better one is proven, drop a rule that stops working in practice, and
-   * with real money wait until a rule meets the go-live bar (core/autopilot.ts). Changing the
-   * rule by hand turns it off.
+   * with real money wait until a rule meets the go-live bar (core/autopilot.ts). A rule you pick
+   * by hand competes with the proven ones: it stays unless one does clearly better.
    */
   autopilot: boolean;
   filters: Filters;
@@ -128,11 +136,66 @@ export const ENTRY_POINTS: Record<string, string> = {
   mig3600: "1 h after graduating",
 };
 
+/** Moments of your own recorded at most (each adds a would-be trade per coin that reaches it). */
+export const MAX_MOMENTS = 4;
+
+/** How long after launch (still on the bonding curve) or after graduating a moment of your own can be, in seconds. */
+export const MOMENT_RANGE = { age: [10, 86_400], mig: [30, 86_400] } as const;
+
+/** Seconds on the grid moments of your own use, so every one has an exact name: whole seconds under 2 min, half minutes under 2 h, half hours beyond. */
+export function snapMomentSec(sec: number): number {
+  if (sec < 120) return Math.round(sec);
+  if (sec < 7_200) return Math.round(sec / 30) * 30;
+  return Math.round(sec / 1_800) * 1_800;
+}
+
+/** A moment of your own: `age{s}` (s seconds after launch, on the bonding curve) or `mig{s}` (s seconds after graduating); null for anything else, the fixed points included. */
+export function customMoment(tag: string): { kind: "age" | "mig"; sec: number } | null {
+  const m = /^(age|mig)(\d{1,6})$/.exec(tag);
+  if (!m || tag in ENTRY_POINTS) return null;
+  const kind = m[1] as "age" | "mig";
+  const sec = Number(m[2]);
+  const [lo, hi] = MOMENT_RANGE[kind];
+  return sec >= lo && sec <= hi && snapMomentSec(sec) === sec ? { kind, sec } : null;
+}
+
+/** The tag of a moment `sec` seconds after launch ("age") or graduating ("mig"), snapped to the grid and kept in range. */
+export function momentTag(kind: "age" | "mig", sec: number): string {
+  const [lo, hi] = MOMENT_RANGE[kind];
+  return `${kind}${snapMomentSec(Math.min(hi, Math.max(lo, sec)))}`;
+}
+
+/** Whether `tag` is a point in a coin's life the bot records: a fixed one or a moment of your own. */
+export function isMomentTag(tag: string): boolean {
+  return tag in ENTRY_POINTS || customMoment(tag) !== null;
+}
+
+const duration = (sec: number) => (sec < 120 ? `${sec} s` : sec < 7_200 ? `${+(sec / 60).toFixed(1)} min` : `${+(sec / 3_600).toFixed(1)} h`);
+
+/** A point in a coin's life in plain words ("5 min after graduating", "2.5 min after launch"). */
+export function entryLabel(tag: string): string {
+  const fixed = ENTRY_POINTS[tag];
+  if (fixed) return fixed;
+  const c = customMoment(tag);
+  return c ? `${duration(c.sec)} after ${c.kind === "age" ? "launch" : "graduating"}` : tag;
+}
+
+/** The tag of a point in a coin's life from its plain words (entryLabel), or null. */
+export function tagOfLabel(label: string): string | null {
+  for (const [k, v] of Object.entries(ENTRY_POINTS)) if (v === label) return k;
+  const m = /^(\d+(?:\.\d+)?) (s|min|h) after (launch|graduating)$/.exec(label);
+  if (!m) return null;
+  const sec = Math.round(Number(m[1]) * (m[2] === "s" ? 1 : m[2] === "min" ? 60 : 3_600));
+  const tag = `${m[3] === "launch" ? "age" : "mig"}${sec}`;
+  return isMomentTag(tag) ? tag : null;
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   enabled: false,
   mode: "paper",
   minScore: 75,
   entryAt: "score",
+  moments: [],
   conds: [],
   scoreOnly: false,
   tradeCurve: true,
@@ -202,7 +265,8 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     enabled: bool(i.enabled, b.enabled),
     mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
     minScore: clamp(num(i.minScore, b.minScore), 0, 100),
-    entryAt: i.entryAt === "score" || (typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS) ? i.entryAt : b.entryAt,
+    entryAt: i.entryAt === "score" || (typeof i.entryAt === "string" && isMomentTag(i.entryAt)) ? i.entryAt : b.entryAt,
+    moments: sanitizeMoments(i.moments, b.moments),
     conds: sanitizeConds(i.conds, b.conds),
     scoreOnly: bool(i.scoreOnly, b.scoreOnly),
     tradeCurve: bool(i.tradeCurve, b.tradeCurve),
@@ -242,7 +306,20 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     },
   };
   if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
+  // a moment of your own that the rule buys at is always recorded, and stays recorded afterwards
+  if (customMoment(out.entryAt) && !out.moments.includes(out.entryAt)) {
+    out.moments.push(out.entryAt);
+    while (out.moments.length > MAX_MOMENTS) out.moments.splice(out.moments.findIndex((m) => m !== out.entryAt), 1);
+  }
   return out;
+}
+
+/** Up to MAX_MOMENTS distinct moments of your own from `v`; `d` (copied) when `v` is not a list. */
+export function sanitizeMoments(v: unknown, d: readonly string[] = []): string[] {
+  if (!Array.isArray(v)) return [...d];
+  const out: string[] = [];
+  for (const m of v) if (typeof m === "string" && customMoment(m) && !out.includes(m)) out.push(m);
+  return out.slice(-MAX_MOMENTS);
 }
 
 /** Up to three valid conditions from `v`; `d` (copied) when `v` is not a list. */
@@ -256,6 +333,56 @@ export function sanitizeConds(v: unknown, d: RuleCond[] = []): RuleCond[] {
     if (out.length === 3) break;
   }
   return out;
+}
+
+/**
+ * The filter a coin fails at entry, or null: one check for the engine's entries and for rules
+ * measured on recordings (core/edges measureRule), which store the same facts (EntryFacts).
+ */
+export function filterBlock(f: Filters, x: EntryFacts): string | null {
+  if (f.minMcapSol > 0 && x.mcap < f.minMcapSol) return "filter:mcap_min";
+  if (f.maxMcapSol > 0 && x.mcap > f.maxMcapSol) return "filter:mcap_max";
+  if (x.devShare * 100 > f.maxDevPct) return "filter:dev";
+  if (x.top10 * 100 > f.maxTop10Pct) return "filter:top10";
+  if (x.bundle * 100 > f.maxBundlePct) return "filter:bundle";
+  if (x.buyers < f.minBuyers) return "filter:buyers";
+  if (f.minAgeSec > 0 && x.age < f.minAgeSec) return "filter:age_min";
+  if (f.maxAgeMin > 0 && x.age > f.maxAgeMin * 60) return "filter:age_max";
+  if (f.requireSocials && x.socials === 0) return "filter:socials";
+  if (f.maxDevLaunches24h > 0 && x.launches24h > f.maxDevLaunches24h) return "filter:serial_dev";
+  if (f.maxDevSoldPct < 100 && x.devSold * 100 > f.maxDevSoldPct) return "filter:dev_sold";
+  return null;
+}
+
+/** The settings a trading rule is made of (what a strategy or an edge-finder rule sets). */
+export const RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"] as const;
+
+/** The rule part of the settings (a copy). */
+export function ruleOf(s: Settings): Partial<Settings> {
+  const out: Record<string, unknown> = {};
+  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
+  return out as Partial<Settings>;
+}
+
+/** Whether a settings change touches the rule (entry, coins, exits). */
+export function touchesRule(patch: Record<string, unknown>): boolean {
+  return RULE_KEYS.some((k) => k in patch);
+}
+
+/** Whether the rule (entry, coins, exits) differs between two settings. */
+export function ruleChanged(a: Settings, b: Settings): boolean {
+  return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
+}
+
+/** A short fingerprint of the rule (entry, coins, exits): trades opened under it are its track record. */
+export function ruleKey(s: Settings): string {
+  const text = JSON.stringify(ruleOf(s));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
 }
 
 /** Whether a coin's facts at entry (features.ts featureVector) meet every condition. */
@@ -296,7 +423,7 @@ export function settingsChanges(draft: Settings, base: Settings): Partial<Settin
   const out: Record<string, unknown> = {};
   for (const k of Object.keys(draft) as (keyof Settings)[]) {
     if (k === "filters") continue;
-    if (k === "conds" ? JSON.stringify(draft.conds) !== JSON.stringify(base.conds) : draft[k] !== base[k]) out[k] = draft[k];
+    if (k === "conds" || k === "moments" ? JSON.stringify(draft[k]) !== JSON.stringify(base[k]) : draft[k] !== base[k]) out[k] = draft[k];
   }
   const f: Record<string, unknown> = {};
   for (const k of Object.keys(draft.filters) as (keyof Settings["filters"])[]) if (draft.filters[k] !== base.filters[k]) f[k] = draft.filters[k];

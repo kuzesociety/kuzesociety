@@ -254,7 +254,7 @@ function EdgeFinder({ mode, autopilot }: { mode: string; autopilot: boolean }) {
     try {
       await api("/api/settings", s.settings);
       setConfirm(null);
-      toast(`Now trading this rule — score, exits, time limit and filters were replaced${autopilot ? ". Autopilot is off now: you picked the rule" : ""}`);
+      toast(`Now trading this rule — score, exits, time limit and filters were replaced${autopilot ? ". The autopilot stays on: it keeps this rule unless a proven rule does clearly better" : ""}`);
     } catch (e) {
       toast(String((e as Error).message));
     }
@@ -299,7 +299,7 @@ function EdgeFinder({ mode, autopilot }: { mode: string; autopilot: boolean }) {
           {r.survivors.length > 0 && autopilot && (
             <p class="note">
               {r.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo
-                ? "Autopilot is on: the bot trades the best of these by itself (Bot tab). Picking one here turns it off."
+                ? "Autopilot is on: the bot trades the best of these by itself (Bot tab). Picking one here makes it your rule, and the autopilot stays on: a proven rule replaces it only when clearly better."
                 : "Autopilot is on but does not use these: on shuffled data the same search found rules too, so they may be luck."}
             </p>
           )}

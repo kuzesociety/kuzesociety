@@ -982,11 +982,37 @@ var ENTRY_POINTS = {
   mig900: "15 min after graduating",
   mig3600: "1 h after graduating"
 };
+var MAX_MOMENTS = 4;
+var MOMENT_RANGE = { age: [10, 86400], mig: [30, 86400] };
+function snapMomentSec(sec) {
+  if (sec < 120) return Math.round(sec);
+  if (sec < 7200) return Math.round(sec / 30) * 30;
+  return Math.round(sec / 1800) * 1800;
+}
+function customMoment(tag) {
+  const m = /^(age|mig)(\d{1,6})$/.exec(tag);
+  if (!m || tag in ENTRY_POINTS) return null;
+  const kind = m[1];
+  const sec = Number(m[2]);
+  const [lo, hi] = MOMENT_RANGE[kind];
+  return sec >= lo && sec <= hi && snapMomentSec(sec) === sec ? { kind, sec } : null;
+}
+function isMomentTag(tag) {
+  return tag in ENTRY_POINTS || customMoment(tag) !== null;
+}
+var duration = (sec) => sec < 120 ? `${sec} s` : sec < 7200 ? `${+(sec / 60).toFixed(1)} min` : `${+(sec / 3600).toFixed(1)} h`;
+function entryLabel(tag) {
+  const fixed = ENTRY_POINTS[tag];
+  if (fixed) return fixed;
+  const c = customMoment(tag);
+  return c ? `${duration(c.sec)} after ${c.kind === "age" ? "launch" : "graduating"}` : tag;
+}
 var DEFAULT_SETTINGS = {
   enabled: false,
   mode: "paper",
   minScore: 75,
   entryAt: "score",
+  moments: [],
   conds: [],
   scoreOnly: false,
   tradeCurve: true,
@@ -1051,7 +1077,8 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     enabled: bool(i.enabled, b.enabled),
     mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
     minScore: clamp(num(i.minScore, b.minScore), 0, 100),
-    entryAt: i.entryAt === "score" || typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS ? i.entryAt : b.entryAt,
+    entryAt: i.entryAt === "score" || typeof i.entryAt === "string" && isMomentTag(i.entryAt) ? i.entryAt : b.entryAt,
+    moments: sanitizeMoments(i.moments, b.moments),
     conds: sanitizeConds(i.conds, b.conds),
     scoreOnly: bool(i.scoreOnly, b.scoreOnly),
     tradeCurve: bool(i.tradeCurve, b.tradeCurve),
@@ -1091,7 +1118,17 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     }
   };
   if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
+  if (customMoment(out.entryAt) && !out.moments.includes(out.entryAt)) {
+    out.moments.push(out.entryAt);
+    while (out.moments.length > MAX_MOMENTS) out.moments.splice(out.moments.findIndex((m) => m !== out.entryAt), 1);
+  }
   return out;
+}
+function sanitizeMoments(v, d = []) {
+  if (!Array.isArray(v)) return [...d];
+  const out = [];
+  for (const m of v) if (typeof m === "string" && customMoment(m) && !out.includes(m)) out.push(m);
+  return out.slice(-MAX_MOMENTS);
 }
 function sanitizeConds(v, d = []) {
   if (!Array.isArray(v)) return d.map((c) => ({ ...c }));
@@ -1103,6 +1140,38 @@ function sanitizeConds(v, d = []) {
     if (out.length === 3) break;
   }
   return out;
+}
+function filterBlock(f2, x) {
+  if (f2.minMcapSol > 0 && x.mcap < f2.minMcapSol) return "filter:mcap_min";
+  if (f2.maxMcapSol > 0 && x.mcap > f2.maxMcapSol) return "filter:mcap_max";
+  if (x.devShare * 100 > f2.maxDevPct) return "filter:dev";
+  if (x.top10 * 100 > f2.maxTop10Pct) return "filter:top10";
+  if (x.bundle * 100 > f2.maxBundlePct) return "filter:bundle";
+  if (x.buyers < f2.minBuyers) return "filter:buyers";
+  if (f2.minAgeSec > 0 && x.age < f2.minAgeSec) return "filter:age_min";
+  if (f2.maxAgeMin > 0 && x.age > f2.maxAgeMin * 60) return "filter:age_max";
+  if (f2.requireSocials && x.socials === 0) return "filter:socials";
+  if (f2.maxDevLaunches24h > 0 && x.launches24h > f2.maxDevLaunches24h) return "filter:serial_dev";
+  if (f2.maxDevSoldPct < 100 && x.devSold * 100 > f2.maxDevSoldPct) return "filter:dev_sold";
+  return null;
+}
+var RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"];
+function ruleOf(s) {
+  const out = {};
+  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
+  return out;
+}
+function ruleChanged(a, b) {
+  return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
+}
+function ruleKey(s) {
+  const text = JSON.stringify(ruleOf(s));
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 function condsHold(conds, x) {
   for (const c of conds) {
@@ -1170,8 +1239,10 @@ var DEFAULTS = {
   seed: 7
 };
 function exitReturn(s, c, h) {
+  return exitReturnAt(s, c, HOLDS_MIN[h]);
+}
+function exitReturnAt(s, c, hold) {
   const ret = s.grid[c];
-  const hold = HOLDS_MIN[h];
   const window = hold ? hold * 60 : Infinity;
   const t = s.gridT?.[c];
   if (hold === 0 || (t ?? 0) <= hold * 60) return counts(s, t ?? Infinity, window) ? ret : NaN;
@@ -1183,7 +1254,7 @@ function describe(r) {
   const cond = CONDITIONS.find((c) => c.key === r.cond);
   const when = r.cond === "any" ? "" : ` \xB7 ${cond.label}`;
   const time = r.hold ? `, or after ${r.hold} min` : "";
-  const entry = r.at ? `Buy every coin ${ENTRY_POINTS[r.at] ?? r.at}` : `Buy when a coin first reaches ${r.level}`;
+  const entry = r.at ? `Buy every coin ${entryLabel(r.at)}` : `Buy when a coin first reaches ${r.level}`;
   return `${entry}${when} \xB7 sell at +${r.tp}% or \u2212${r.sl}%${time}`;
 }
 function settingsFor(r, horizonMs) {
@@ -1203,6 +1274,72 @@ function settingsFor(r, horizonMs) {
     scoreOnly: !cond.filters
   };
   if (cond.filters) out.filters = { ...OPEN_FILTERS, ...cond.filters };
+  return out;
+}
+function recordedRows(samples, horizonMs) {
+  let lastResolved = 0;
+  for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
+  const cutoff = lastResolved - horizonMs;
+  return samples.filter(
+    (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS || s.kind === "moment" && customMoment(s.tag) !== null) && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
+  ).sort((a, b) => a.ts - b.ts);
+}
+function whyUnmeasurable(s, horizonMs) {
+  if (s.entryAt === "score" && !ENTRY_LEVELS.includes(s.minScore)) return `score ${s.minScore} is not one of the levels the bot records (${ENTRY_LEVELS.join(", ")})`;
+  if (s.entryAt === "score" && s.reentry) return "buying the same coin again is not recorded";
+  if (!GRID.some((g) => g.tp === s.tpPct && g.sl === s.slPct))
+    return `+${s.tpPct}% / \u2212${s.slPct}% is not among the exits the bot records (take profit ${GRID_TP_TEXT}; stop loss ${GRID_SL_TEXT})`;
+  if (holdOf(s, horizonMs) === null) return `a time limit of ${s.maxHoldMin} min is not among the ones the bot records (${PATH_MIN.join(", ")} min, ${Math.round(horizonMs / 36e5)} h or none)`;
+  if (s.trailPct > 0) return "a trailing stop is not recorded";
+  if (s.takeInitials) return "taking the initials out is not recorded";
+  return null;
+}
+var GRID_TP_TEXT = [...new Set(GRID.map((g) => g.tp))].map((x) => `${x}%`).join(", ");
+var GRID_SL_TEXT = [...new Set(GRID.map((g) => g.sl))].map((x) => `${x}%`).join(", ");
+function holdOf(s, horizonMs) {
+  if (s.maxHoldMin === 0 || s.maxHoldMin * 6e4 >= horizonMs) return 0;
+  return PATH_MIN.includes(s.maxHoldMin) ? s.maxHoldMin : null;
+}
+function measureRule(rows, s, o) {
+  const key = ruleKey(s);
+  const none = (why) => ({ key, ok: false, why, n: 0, mean: NaN, lo: NaN, hi: NaN, coinsPerDay: 0 });
+  const bad = whyUnmeasurable(s, o.horizonMs);
+  if (bad) return none(bad);
+  const tag = s.entryAt === "score" ? `x${s.minScore}` : s.entryAt;
+  const family = rows.filter((r) => r.tag === tag);
+  if (family.length < 2) return none(`the bot has no finished recordings of ${s.entryAt === "score" ? `coins reaching ${s.minScore}` : `coins ${entryLabel(tag)}`} yet`);
+  const f0 = family[0].ts;
+  const f1 = family[family.length - 1].ts;
+  const split = f0 + (f1 - f0) * 2 / 3;
+  const combo = GRID.findIndex((g) => g.tp === s.tpPct && g.sl === s.slPct);
+  const hold = holdOf(s, o.horizonMs);
+  const t0 = rows[0].ts;
+  const vals = [];
+  const hours = [];
+  const mints = /* @__PURE__ */ new Set();
+  let held = 0;
+  let wins2 = 0;
+  for (const r of family) {
+    if (r.ts < split) continue;
+    if (r.stage === "curve" && !s.tradeCurve || r.stage === "amm" && !s.tradeAmm) continue;
+    if (s.conds.length && !condsHold(s.conds, r.x)) continue;
+    if (!s.scoreOnly && filterBlock(s.filters, r.f)) continue;
+    mints.add(r.mint);
+    const v = exitReturnAt(r, combo, hold);
+    if (Number.isNaN(v)) continue;
+    vals.push(v);
+    hours.push(Math.floor((r.ts - t0) / 36e5));
+    if (v > 0) wins2++;
+    const sec = r.gridT?.[combo] ?? 0;
+    held += hold ? Math.min(sec, hold * 60) : sec;
+  }
+  const minN = o.minN ?? DEFAULTS.minHoldout;
+  const minWins = o.minWins ?? DEFAULTS.minWins;
+  if (vals.length < minN) return none(`only ${vals.length} coins qualified for it on the newest recordings (${minN} needed)`);
+  const m = clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, o.tests ?? DEFAULTS.candidates));
+  const days = Math.max(1 / 24, (f1 - split) / 864e5);
+  const out = { key, ok: true, n: vals.length, mean: m.mean, lo: m.lo, hi: m.hi, coinsPerDay: mints.size / days, avgHoldMin: held / vals.length / 60 };
+  if (wins2 < minWins) return { ...out, ok: false, why: `only ${wins2} of its ${vals.length} coins won \u2014 too few to count on` };
   return out;
 }
 function forwardTest(rows, rule, after) {
@@ -1301,15 +1438,10 @@ function* steps(samples, opts) {
     failed: [],
     placebo: { runs: 0, avgSurvivors: 0, maxSurvivors: 0 }
   };
-  let lastResolved = 0;
-  for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
-  const cutoff = lastResolved - o.horizonMs;
-  const rows = samples.filter(
-    (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS) && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
-  );
-  rows.sort((a, b) => a.ts - b.ts);
+  const rows = recordedRows(samples, o.horizonMs);
   if (rows.length) base.cutoff = rows[rows.length - 1].ts;
   if (opts.incumbent) base.incumbent = forwardTest(rows, opts.incumbent.rule, opts.incumbent.after);
+  const own = (tests) => opts.own ? { own: measureRule(rows, opts.own, { horizonMs: o.horizonMs, tests, minN: o.minHoldout, minWins: o.minWins }) } : {};
   const n = rows.length;
   const t0 = n ? rows[0].ts : 0;
   const t1 = n ? rows[n - 1].ts : 0;
@@ -1318,7 +1450,7 @@ function* steps(samples, opts) {
   base.hours = hours;
   if (n < o.minSamples || hours < o.minHours) {
     base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished would-be trades (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 36e5)} hours after its entry.`;
-    return base;
+    return { ...base, ...own(o.candidates) };
   }
   const R = new Float32Array(n * EXITS);
   for (let i = 0; i < n; i++) {
@@ -1333,9 +1465,10 @@ function* steps(samples, opts) {
     if (!list) byEntry.set(s.tag, list = []);
     list.push(i);
   });
+  const yours = [...new Set(rows.filter((s) => s.kind === "moment").map((s) => s.tag))].sort();
   const families = [
     ...ENTRY_LEVELS.map((level) => ({ tag: `x${level}`, level })),
-    ...Object.keys(ENTRY_POINTS).map((at) => ({ tag: at, level: 0, at }))
+    ...[...Object.keys(ENTRY_POINTS), ...yours].map((at) => ({ tag: at, level: 0, at }))
   ];
   for (const fam of families) {
     const idx = byEntry.get(fam.tag) ?? [];
@@ -1408,6 +1541,7 @@ function* steps(samples, opts) {
   const discHours = hours * (2 / 3);
   return {
     ...base,
+    ...own(run.cands.length),
     status: "ok",
     note: survivors.length ? `${survivors.length} rule${survivors.length > 1 ? "s" : ""} held up on the newest data the search never saw.` : "No rule held up on the newest data yet. That is a real answer: keep recording, the search runs again every few hours.",
     discoveryHours: discHours,
@@ -1573,13 +1707,13 @@ function* boostSteps(train, valid, keys, params = {}) {
     const tree = { f: [], t: [], l: [], r: [], v: [] };
     const splitBin = [];
     const gain = new Array(keys.length).fill(0);
-    const leafOf = (G, H2) => -G / (H2 + p.lambda) * p.lr;
-    const newNode = (G, H2) => {
+    const leafOf = (G, H) => -G / (H + p.lambda) * p.lr;
+    const newNode = (G, H) => {
       tree.f.push(-1);
       tree.t.push(0);
       tree.l.push(-1);
       tree.r.push(-1);
-      tree.v.push(leafOf(G, H2));
+      tree.v.push(leafOf(G, H));
       splitBin.push(-1);
       return tree.f.length - 1;
     };
@@ -2130,10 +2264,10 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
   let fPrev = objective(beta);
   let converged = false;
   const g = new Float64Array(d);
-  const H2 = new Float64Array(d * d);
+  const H = new Float64Array(d * d);
   for (let iter = 0; iter < maxIter; iter++) {
     g.fill(0);
-    H2.fill(0);
+    H.fill(0);
     for (let i = 0; i < n; i++) {
       const o = i * k;
       let s = beta[0];
@@ -2142,26 +2276,26 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
       const r = w[i] * (p - y[i]);
       const v = w[i] * Math.max(p * (1 - p), 1e-9);
       g[0] += r;
-      H2[0] += v;
+      H[0] += v;
       for (let j = 0; j < k; j++) {
         const zj = Z[o + j];
         g[j + 1] += r * zj;
-        H2[j + 1] += v * zj;
+        H[j + 1] += v * zj;
         const vz = v * zj;
         const row = (j + 1) * d + 1;
-        for (let m = 0; m <= j; m++) H2[row + m] += vz * Z[o + m];
+        for (let m = 0; m <= j; m++) H[row + m] += vz * Z[o + m];
       }
       if ((i & 4095) === 4095) yield;
     }
     for (let j = 1; j < d; j++) {
       g[j] += lambda * (beta[j] - prior[j]);
-      H2[j * d + j] += lambda;
-      H2[j * d] = H2[j];
-      for (let m = 1; m < j; m++) H2[m * d + j] = H2[j * d + m];
+      H[j * d + j] += lambda;
+      H[j * d] = H[j];
+      for (let m = 1; m < j; m++) H[m * d + j] = H[j * d + m];
     }
     g[0] += 1e-4 * (beta[0] - prior[0]);
-    H2[0] += 1e-4;
-    const step = choleskyFlat(H2, g, d);
+    H[0] += 1e-4;
+    const step = choleskyFlat(H, g, d);
     if (!step) break;
     let t = 1;
     let next = beta;
@@ -2371,7 +2505,7 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
   const L = o.calibrate === false ? lin : yield* calibrateSteps(lin, partB);
   const sL = yield* scoreRowsSteps(L, val);
   const mL = sL.metrics;
-  let H2 = null;
+  let H = null;
   let mH = null;
   let treesZ = 0;
   let treeCount = 0;
@@ -2381,19 +2515,19 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
     const res = yield* boostSteps(dataA, dataB, FEATURE_KEYS, boost);
     if (res.ens.trees.length) {
       const withTrees = { ...lin, trees: res.ens };
-      H2 = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
-      const sH = yield* scoreRowsSteps(H2, val);
+      H = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
+      const sH = yield* scoreRowsSteps(H, val);
       mH = sH.metrics;
       treesZ = lossGainZ(sL.losses, sH.losses, val).z;
       treeCount = res.ens.trees.length;
     }
   }
-  const treesWin = !!(H2 && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
-  const cand = treesWin ? H2 : L;
+  const treesWin = !!(H && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
+  const cand = treesWin ? H : L;
   const recipe = treesWin ? "trees" : "linear";
   const fresh = val.filter((r) => r.ts > seenTo);
   const freshPos = fresh.reduce((s, r) => s + r.y, 0);
-  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H2 ? treesZ : void 0 };
+  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H ? treesZ : void 0 };
   if (fresh.length < o.minFreshRows || freshPos < o.minFreshPositives) {
     return {
       rows,
@@ -2831,166 +2965,6 @@ var NarrativeIndex = class {
     return this.launches.length;
   }
 };
-
-// src/core/lab.ts
-var DAY = 864e5;
-var NF = FEATURE_KEYS.length;
-var H = HOLDS_MIN.length;
-var LAB = {
-  /** ideas from the search tested at once */
-  maxActive: 20,
-  /** your own ideas tested at once */
-  mineMax: 5,
-  /** new ideas from one search at most, one per entry */
-  newPerRun: 3,
-  /** finished coins at which an idea is looked at; it can be proven only at these */
-  looks: [60, 120, 240, 480],
-  /** one-sided error per look: an idea without an edge passes a look by luck at most this often */
-  alpha: 5e-4,
-  /** a proof resting on a handful of lucky wins is not trusted */
-  minWins: 10,
-  /** an idea not proven after this long leaves */
-  maxAgeMs: 7 * DAY,
-  /** a proven idea leaves after this long, and has to be found and proven again */
-  provenMs: 14 * DAY,
-  /** coins after its proof before a proven idea can be dropped for falling short */
-  postMin: 40,
-  /** the search: fewest trades a rule needs on the data it is invented from */
-  minSeen: 60,
-  /** the search needs this much finished data */
-  minHours: 24,
-  minRows: 1e3,
-  /** candidate thresholds: these shares of each fact's values at each entry */
-  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9],
-  /** thresholds per entry that get every exit after the first look (on SCREEN exits) */
-  screenTop: 16,
-  /** single conditions per entry carried into pairs */
-  pairTop: 8,
-  /** a failed idea is not suggested again for this long */
-  retryAfterMs: 3 * DAY,
-  /** retired ideas kept to show */
-  keepRetired: 30,
-  /** results kept per idea (oldest dropped beyond) */
-  keepVals: 3e3
-};
-var sig2 = (v) => v === 0 || !Number.isFinite(v) ? 0 : Number(v.toPrecision(2));
-var signedPct = (x) => `${x >= 0 ? "+" : ""}${Math.round(x * 100)}%`;
-var pctFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => `${Math.round(r * 100)}%`, pct: true });
-var countFact = (key, label) => ({ key, label, raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r >= 10 ? sig2(r) : Math.round(r), show: (r) => `${Math.round(r)}` });
-var solFact = (key, label) => ({ key, label, raw: Math.sinh, x: Math.asinh, nice: sig2, show: (r) => `${r} SOL` });
-var moveFact = (key, label) => ({ key, label, raw: (x) => Math.exp(x) - 1, x: (r) => Math.max(-2, Math.min(2, Math.log(1 + Math.max(-0.99, r)))), nice: (r) => Math.round(r * 100) / 100, show: signedPct, pct: true });
-var yesNoFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => r >= 0.5 ? 1 : 0, show: (r) => r >= 0.5 ? "yes" : "no", yesNo: true });
-var LAB_FACTS = [
-  { key: "age", label: "Age", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r < 90 ? Math.round(r / 5) * 5 : r < 5400 ? Math.round(r / 60) * 60 : Math.round(r / 600) * 600, show: fmtAge },
-  { key: "mcap", label: "Market cap", raw: Math.exp, x: (r) => Math.log(Math.max(r, 1)), nice: sig2, show: (r) => `${r} SOL` },
-  pctFact("progress", "Curve progress"),
-  solFact("net60", "Net inflow 60s"),
-  solFact("net300", "Net inflow 5m"),
-  { key: "accel", label: "Acceleration", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 10) / 10, show: (r) => r.toFixed(1) },
-  pctFact("buyRatio", "Buy share 60s"),
-  countFact("uniq60", "New buyers 60s"),
-  countFact("uniqTotal", "Buyers total"),
-  countFact("trades60", "Trades 60s"),
-  { key: "avgBuy", label: "Avg buy 5m", raw: (x) => Math.exp(x) - 0.01, x: (r) => Math.log(0.01 + Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
-  pctFact("whale", "Largest buy share"),
-  pctFact("devShare", "Dev holds"),
-  pctFact("devSold", "Dev sold"),
-  pctFact("bundle", "Bundled supply"),
-  pctFact("early", "Sniper supply"),
-  pctFact("top10", "Top 10 holders"),
-  countFact("holders", "Holders"),
-  pctFact("drawdown", "Below peak"),
-  moveFact("chg30", "Move 30s"),
-  moveFact("chg120", "Move 2m"),
-  countFact("smart", "Smart wallets in"),
-  pctFact("fresh", "Fresh wallets"),
-  { key: "socials", label: "Socials", raw: (x) => x * 3, x: (r) => r / 3, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 3` },
-  yesNoFact("tweet", "Tweet-linked"),
-  { key: "cluster", label: "Narrative heat", raw: Math.exp, x: (r) => Math.log(Math.max(1, r)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} similar coins` },
-  yesNoFact("leader", "Narrative leader"),
-  yesNoFact("copycat", "Copycat"),
-  { key: "serial", label: "Dev launches in 24 h", raw: (x) => Math.expm1(x) + 1, x: (r) => Math.log1p(Math.max(0, r - 1)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)}` },
-  { key: "creatorBest", label: "Dev's best coin", raw: (x) => Math.expm1(x) * 100, x: (r) => Math.log1p(Math.max(0, r) / 100), nice: sig2, show: (r) => `${r} SOL` },
-  { key: "heat", label: "Market heat", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => r.toFixed(2) },
-  { key: "liquidity", label: "Liquidity", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
-  { key: "dex", label: "DEX listing paid", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 2` }
-];
-var FACT = new Map(LAB_FACTS.map((f2) => [f2.key, f2]));
-var FACT_INDEX = LAB_FACTS.map((f2) => FEATURE_KEYS.indexOf(f2.key));
-var GRID_TPS = [...new Set(GRID.map((g) => g.tp))];
-var GRID_SLS = [...new Set(GRID.map((g) => g.sl))];
-var LAB_FORMAT = `entry, then up to 3 conditions, then the exit \u2014 e.g. "mig300 top10<=25% smart>=1 tp100 sl30 hold30". Entry: score50\u2026score95 (the first time the score reaches it) or ${Object.keys(ENTRY_POINTS).join(", ")}. Optional: stage=curve or stage=amm. Conditions on: ${LAB_FACTS.map((f2) => f2.key).join(", ")} (with >= or <=; % for shares; =1 / =0 for yes/no). Take profit tp: ${GRID_TPS.join(", ")}; stop loss sl: ${GRID_SLS.join(", ")}; time limit hold (minutes): ${HOLDS_MIN.filter((h) => h > 0).join(", ")}, or none.`;
-var STRICT = 1 - 2 * LAB.alpha;
-var SCREEN = [
-  [25, 10, 0],
-  [50, 20, 0],
-  [50, 20, 10],
-  [100, 30, 0],
-  [100, 30, 30],
-  [100, 50, 0],
-  [200, 50, 0],
-  [150, 40, 60],
-  [300, 70, 0],
-  [500, 50, 0]
-].map(([tp, sl, hold]) => GRID.findIndex((g) => g.tp === tp && g.sl === sl) * H + HOLDS_MIN.indexOf(hold)).filter((e) => e >= 0);
-
-// src/core/presets.ts
-var BASE = { entryAt: "score", conds: [], trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
-var PRESETS = [
-  {
-    key: "plan",
-    name: "Your plan",
-    note: "Buy when a coin reaches 75 \xB7 sell at 2\xD7 or \u221250% \xB7 time limit 4 hours. Score only.",
-    proof: "yours",
-    settings: { ...BASE, minScore: 75, tpPct: 100, slPct: 50, maxHoldMin: 240 }
-  },
-  {
-    key: "sim-momentum",
-    name: "Simulator finding: fast momentum",
-    note: "Buy when a coin reaches 95 \xB7 sell at +500% or \u221220%, or after 10 minutes. It won in the simulator, which has more momentum than pump.fun \u2014 paper-test it before trusting it.",
-    proof: "unproven",
-    settings: { ...BASE, minScore: 95, tpPct: 500, slPct: 20, maxHoldMin: 10 }
-  }
-];
-
-// src/core/autopilot.ts
-var HOUR2 = 36e5;
-var RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"];
-var AUTOPILOT = {
-  /** an edge-finder answer older than this switches nothing */
-  freshMs: 6 * HOUR2,
-  /** a new rule replaces one that still holds up only when it earns this much more per day */
-  better: 1.25,
-  /** real money: the go-live bar */
-  liveMinTrades: 100,
-  liveMinLo: 0.02,
-  /** the search is trusted only while it "finds" at most this many rules per run on shuffled data (1 in 5 runs) */
-  maxPlacebo: 0.2,
-  /** trades of the rule in use before its own results are judged */
-  checkAfter: 30,
-  /** coins that qualified after it was proven, before its forward test is judged */
-  forwardMin: 40,
-  /** trades of the user's own rule before its track record counts against a proven rule */
-  trackMin: 30,
-  benchMs: 24 * HOUR2
-};
-function ruleOf(s) {
-  const out = {};
-  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
-  return out;
-}
-function ruleChanged(a, b) {
-  return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
-}
-function ruleKey(s) {
-  const text = JSON.stringify(ruleOf(s));
-  let h = 2166136261;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return (h >>> 0).toString(36);
-}
 
 // src/core/token.ts
 var BUCKET_MS = 5e3;
@@ -3914,12 +3888,13 @@ var Engine = class {
    */
   checkpoints(t, e, now) {
     const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
-    const add = (tag) => {
+    const add = (tag, kind = "checkpoint") => {
       if (e.cps.includes(tag)) return;
       e.cps.push(tag);
-      this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
+      this.outcomes.add(t, kind, tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
       if (this.settings.entryAt === tag) this.fire(t, e, now, true);
     };
+    const own = this.ownMoments();
     if (t.stage === "curve") {
       const age = (now - t.createdAt) / 1e3;
       if (t.partial) return;
@@ -3927,10 +3902,27 @@ var Engine = class {
       for (const s of this.cfg.checkpointsCurveSec) if (age >= s && age < s * 1.6) tag = `age${s}`;
       if (tag) add(tag);
       for (const p of this.cfg.checkpointsProgress) if (t.progress >= p && t.progress < p + 0.1) add(`prog${Math.round(p * 100)}`);
+      for (const m of own) if (m.kind === "age" && age >= m.sec && age < m.sec * 1.6) add(m.tag, "moment");
     } else if (t.stage === "amm" && t.migrateAt) {
       const since = (now - t.migrateAt) / 1e3;
       for (const s of this.cfg.checkpointsAmmSec) if (since >= s && since < s * 1.6) add(`mig${s}`);
+      for (const m of own) if (m.kind === "mig" && since >= m.sec && since < m.sec * 1.6) add(m.tag, "moment");
     }
+  }
+  momentsOf = null;
+  moments = [];
+  /** Moments of your own to record (Settings.moments, and the rule's entry if it is one), parsed once per settings. */
+  ownMoments() {
+    const s = this.settings;
+    if (this.momentsOf !== s) {
+      this.momentsOf = s;
+      const tags = /* @__PURE__ */ new Set([...s.moments, s.entryAt]);
+      this.moments = [...tags].flatMap((tag) => {
+        const c = customMoment(tag);
+        return c ? [{ tag, ...c }] : [];
+      });
+    }
+    return this.moments;
   }
   /**
    * Follows the first entry at every level the way the bot would have bought it: the score
@@ -4026,20 +4018,18 @@ var Engine = class {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
     if (s.scoreOnly) return null;
-    const f2 = s.filters;
     const raw = e.f;
-    if (f2.minMcapSol > 0 && t.mcapSol < f2.minMcapSol) return "filter:mcap_min";
-    if (f2.maxMcapSol > 0 && t.mcapSol > f2.maxMcapSol) return "filter:mcap_max";
-    if (raw.devShare * 100 > f2.maxDevPct) return "filter:dev";
-    if (raw.top10 * 100 > f2.maxTop10Pct) return "filter:top10";
-    if (raw.bundleShare * 100 > f2.maxBundlePct) return "filter:bundle";
-    if (raw.uniqTotal < f2.minBuyers) return "filter:buyers";
-    if (f2.minAgeSec > 0 && raw.ageSec < f2.minAgeSec) return "filter:age_min";
-    if (f2.maxAgeMin > 0 && raw.ageSec > f2.maxAgeMin * 60) return "filter:age_max";
-    if (f2.requireSocials && raw.socials === 0) return "filter:socials";
-    if (f2.maxDevLaunches24h > 0 && raw.creatorLaunches24h > f2.maxDevLaunches24h) return "filter:serial_dev";
-    if (f2.maxDevSoldPct < 100 && raw.devSold * 100 > f2.maxDevSoldPct) return "filter:dev_sold";
-    return null;
+    return filterBlock(s.filters, {
+      mcap: t.mcapSol,
+      age: raw.ageSec,
+      buyers: raw.uniqTotal,
+      top10: raw.top10,
+      bundle: raw.bundleShare,
+      devShare: raw.devShare,
+      devSold: raw.devSold,
+      socials: raw.socials,
+      launches24h: raw.creatorLaunches24h
+    });
   }
   /** A prior model trades only after it has been scaled to the live market once. */
   modelReady() {
@@ -4378,17 +4368,13 @@ var Engine = class {
   // Controls
   // -------------------------------------------------------------------------
   /**
-   * Apply a settings change. `by`: who made it — a change to the rule (entry, coins, exits) made
-   * by the user turns the autopilot off, so it never undoes what the user just chose.
+   * Apply a settings change. `by`: who made it. A rule you pick by hand with the autopilot on
+   * leaves it on: your rule then competes with the proven ones (the learner is told, onSettings).
    */
   updateSettings(patch, by = "user") {
     const prev = this.settings;
     const next = sanitizeSettings(patch, prev);
-    const p = patch && typeof patch === "object" ? patch : {};
-    if (by === "user" && prev.autopilot && next.autopilot && p.autopilot !== true && ruleChanged(prev, next)) {
-      next.autopilot = false;
-      this.journal({ type: "autopilot_off", why: "rule changed by hand" });
-    }
+    if (by === "user" && prev.autopilot && next.autopilot && ruleChanged(prev, next)) this.journal({ type: "rule_picked", rule: ruleKey(next) });
     if (!next.autopilot) this.autoHold = null;
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
@@ -4400,7 +4386,7 @@ var Engine = class {
       if (next.reentry) e.armed = true;
       else if (moved) e.armed = e.res.score < next.minScore;
     }
-    this.hooks.onSettings?.(next);
+    this.hooks.onSettings?.(next, { by, prev });
     this.journal({ type: "settings", settings: next });
     this.markDirty();
     return next;
@@ -5698,7 +5684,7 @@ var DataStore = class {
     const perFile = [];
     const cap = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
     const used = { cp: 0, st: 0, en: 0 };
-    const bucketOf = (line) => !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
+    const bucketOf = (line) => line.includes('"kind":"moment"') ? "st" : !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
     for (const f2 of files) {
       const room = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
       if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;

@@ -1,9 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { CONDITIONS, findEdges, normInv, tInv } from "../src/core/edges.js";
+import { CONDITIONS, HOLDS_MIN, describeRule, edgeRuleFromText, findEdges, measureRule, normInv, recordedRows, settingsFor, tInv } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import { priorModel } from "../src/core/model.js";
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "../src/core/outcomes.js";
 import { MarketSim } from "../src/sim/market.js";
+import { ENTRY_POINTS, entryLabel, momentTag, sanitizeSettings } from "../src/core/settings.js";
 import { rng } from "../src/core/util.js";
 
 const T0 = Date.UTC(2026, 8, 1);
@@ -20,7 +21,7 @@ function makeEntries(n: number, days: number, seed: number, edge?: (s: Sample, c
     const level = ENTRY_LEVELS[Math.floor(r() * ENTRY_LEVELS.length)]!;
     const tag = tags ? tags[Math.floor(r() * tags.length)]! : `x${level}`;
     const s: Sample = {
-      id: `e${i}${tag}`, kind: tag.startsWith("x") ? "entry" : "checkpoint", tag, mint: `m${i}`, symbol: "X", ts, stage: tag.startsWith("mig") || (tag.startsWith("x") && r() < 0.4) ? "amm" : "curve",
+      id: `e${i}${tag}`, kind: tag.startsWith("x") ? "entry" : tag in ENTRY_POINTS ? "checkpoint" : "moment", tag, mint: `m${i}`, symbol: "X", ts, stage: tag.startsWith("mig") || (tag.startsWith("x") && r() < 0.4) ? "amm" : "curve",
       score: level, p: 0.1, x: [], entryMcap: 50, tp: 100, sl: 50, y: 0, ret: 0, exit: "timeout", grid: [], maxMult: 1, minMult: 1, secToMax: 0,
       resolvedAt: ts + 3_600_000, gv: GRID_VERSION, ov: 1, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
       f: { mcap: 20 + r() * 600, age: 10 + r() * 1800, buyers: Math.floor(3 + r() * 300), top10: 0.1 + r() * 0.7, bundle: r() * 0.4, devShare: r() * 0.3, devSold: r() < 0.5 ? 0 : r(), socials: Math.floor(r() * 4), launches24h: 1 + Math.floor(r() * 6) },
@@ -151,6 +152,90 @@ describe("edge finder", () => {
     expect(hit).toBeDefined();
     expect(hit!.settings.scoreOnly).toBe(false);
     expect(hit!.settings.filters).toMatchObject({ minBuyers: 100, maxDevPct: 100, maxTop10Pct: 100, maxBundlePct: 100, minMcapSol: 0, maxAgeMin: 0 });
+  });
+
+  it("measures your own rule exactly as it checks a candidate: the same unseen coins, the same bar", () => {
+    const target = GRID.findIndex((g) => g.tp === 50 && g.sl === 20);
+    const samples = makeEntries(14_000, 10, 3, (s, c) => (c === target && s.stage === "amm" && s.score >= 70 ? 0.55 : null));
+    const rep = findEdges(samples, { now: T0 + 11 * 86_400_000 });
+    const checked = [...rep.survivors, ...rep.failed];
+    expect(checked.length).toBeGreaterThan(1);
+    const rows = recordedRows(samples, 6 * 3_600_000);
+    // every rule the search checked, set as your own rule, measures what the search measured
+    for (const r of checked) {
+      const m = measureRule(rows, sanitizeSettings(r.settings), { horizonMs: 6 * 3_600_000, tests: rep.candidates, minN: 2, minWins: 0 });
+      expect(m.ok).toBe(true);
+      expect(m.n).toBe(r.holdout.n);
+      expect(m.mean).toBeCloseTo(r.holdout.mean, 5);
+      expect(m.lo).toBeCloseTo(r.holdout.lo, 5);
+      expect(m.coinsPerDay).toBeCloseTo(r.tradesPerDay, 6);
+      expect(m.avgHoldMin!).toBeCloseTo(r.avgHoldMin!, 4);
+    }
+    // your filters are applied as the engine applies them: a narrower rule measures fewer coins
+    const top = rep.survivors[0]!;
+    const narrow = measureRule(rows, sanitizeSettings({ ...top.settings, scoreOnly: false, filters: { minBuyers: 150, maxTop10Pct: 100, maxDevPct: 100, maxBundlePct: 100, maxDevLaunches24h: 0 } }), { horizonMs: 6 * 3_600_000, minN: 2, minWins: 0 });
+    expect(narrow.n).toBeGreaterThan(0);
+    expect(narrow.n).toBeLessThan(top.holdout.n);
+    // …and the search reports the rule in use measured this way, at its own bar
+    const withOwn = findEdges(samples, { now: T0 + 11 * 86_400_000, own: sanitizeSettings(top.settings) });
+    expect(withOwn.own).toMatchObject({ ok: true, n: top.holdout.n });
+    expect(withOwn.own!.lo).toBeCloseTo(top.holdout.lo, 5);
+  });
+
+  it("never approximates a rule the recordings cannot express: it says why", () => {
+    const rows = recordedRows(makeEntries(6_000, 4, 5), 6 * 3_600_000);
+    const why = (patch: Record<string, unknown>) => measureRule(rows, sanitizeSettings({ entryAt: "score", minScore: 70, tpPct: 50, slPct: 20, maxHoldMin: 30, scoreOnly: true, ...patch }), { horizonMs: 6 * 3_600_000 }).why ?? "";
+    expect(why({})).toBe("");
+    expect(why({ minScore: 72 })).toMatch(/score 72 is not one of the levels/);
+    expect(why({ tpPct: 123 })).toMatch(/\+123% \/ −20% is not among the exits/);
+    expect(why({ maxHoldMin: 240 })).toMatch(/a time limit of 240 min/);
+    expect(why({ maxHoldMin: 360 })).toBe(""); // the horizon: followed as long as a rule without a limit
+    expect(why({ maxHoldMin: 120 })).toBe("");
+    expect(why({ trailPct: 20 })).toMatch(/trailing stop/);
+    expect(why({ reentry: true })).toMatch(/same coin again/);
+    expect(why({ entryAt: "mig1800" })).toMatch(/no finished recordings of coins 30 min after graduating/);
+    // too few coins, or too few wins, is not evidence either
+    expect(measureRule(rows.slice(0, 300), sanitizeSettings({ minScore: 70, tpPct: 50, slPct: 20, maxHoldMin: 30, scoreOnly: true }), { horizonMs: 6 * 3_600_000 }).why).toMatch(/needed/);
+    expect(measureRule(rows, sanitizeSettings({ minScore: 70, tpPct: 500, slPct: 10, maxHoldMin: 0, scoreOnly: true }), { horizonMs: 6 * 3_600_000, minN: 2 }).why).toMatch(/too few to count on/);
+  });
+
+  it("reads its own rule texts back, for every entry, condition and exit", () => {
+    const ats = [...Object.keys(ENTRY_POINTS), momentTag("mig", 1800), momentTag("age", 150), momentTag("mig", 9000)];
+    let n = 0;
+    for (const cond of CONDITIONS)
+      for (const g of GRID)
+        for (const hold of HOLDS_MIN)
+          for (const e of [...ENTRY_LEVELS.map((level) => ({ level })), ...ats.map((at) => ({ level: 0, at }))]) {
+            if ((n++ & 7) !== 0) continue; // a sample of the combinations keeps the test quick
+            const rule = { ...e, cond: cond.key, tp: g.tp, sl: g.sl, hold };
+            const text = describeRule(rule);
+            expect(edgeRuleFromText(text)).toEqual(rule);
+          }
+    expect(entryLabel(momentTag("mig", 1800))).toBe("30 min after graduating");
+    expect(entryLabel(momentTag("age", 150))).toBe("2.5 min after launch");
+    expect(entryLabel(momentTag("mig", 9000))).toBe("2.5 h after graduating");
+    expect(edgeRuleFromText("Buy every coin 7 min after lunch · sell at +50% or −20%")).toBeNull();
+    expect(edgeRuleFromText("Buy when a coin first reaches 72 · sell at +50% or −20%")).toBeNull();
+    expect(settingsFor(edgeRuleFromText("Buy every coin 15 min after graduating · market cap ≥ 300 SOL · sell at +50% or −70%, or after 60 min")!, 6 * 3_600_000)).toMatchObject({
+      entryAt: "mig900",
+      tpPct: 50,
+      slPct: 70,
+      maxHoldMin: 60,
+      scoreOnly: false,
+      filters: { minMcapSol: 300 },
+    });
+  });
+
+  it("searches moments of your own once they are recorded, like the fixed ones", () => {
+    const target = GRID.findIndex((g) => g.tp === 75 && g.sl === 30);
+    const mine = momentTag("mig", 1800);
+    const entries = makeEntries(9_000, 10, 23);
+    const moments = makeEntries(4_000, 10, 24, (s, c) => (c === target ? 0.6 : null), [mine], 6);
+    const rep = findEdges([...entries, ...moments], { now: T0 + 11 * 86_400_000 });
+    const found = rep.survivors.find((r) => r.at === mine);
+    expect(found).toBeDefined();
+    expect(found!.text).toMatch(/^Buy every coin 30 min after graduating/);
+    expect(found!.settings.entryAt).toBe(mine);
   });
 
   it("waits for enough complete data", () => {

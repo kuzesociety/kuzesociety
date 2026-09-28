@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTOPILOT, type AutopilotState, RULE_KEYS, decideAutopilot, emptyAutopilot, ruleKey, worstPerDay } from "../src/core/autopilot.js";
+import { AUTOPILOT, type AutopilotState, type OwnMeasure, RULE_KEYS, autopilotView, decideAutopilot, emptyAutopilot, pickRule, ruleKey, ruleOf, worstPerDay } from "../src/core/autopilot.js";
 import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import type { Position } from "../src/core/positions.js";
@@ -220,23 +220,91 @@ describe("autopilot", () => {
 });
 
 describe("autopilot in the engine", () => {
-  it("a rule changed by hand turns it off; its own changes and other settings do not", () => {
-    const s = new Scenario({});
-    const e = s.engine;
+  it("a rule picked by hand leaves the autopilot on, and the learner is told who changed it", () => {
+    const seen: { by?: string; changed: boolean }[] = [];
+    const e = new Engine({ now: NOW, hooks: { onSettings: (s, why) => seen.push({ by: why?.by, changed: !!why && JSON.stringify(ruleOf(s)) !== JSON.stringify(ruleOf(why.prev)) }) } });
     expect(e.settings.autopilot).toBe(true);
     e.updateSettings({ positionSol: 0.2, maxOpen: 4 });
-    expect(e.settings.autopilot).toBe(true);
     e.updateSettings(rule("A", { lo: 0.1, perDay: 10 }).settings, "autopilot");
-    expect(e.settings.autopilot).toBe(true);
     expect(e.settings.minScore).toBe(85);
-    e.updateSettings({ autopilot: true, tpPct: 60 });
-    expect(e.settings.autopilot).toBe(true);
-    // sending the rule it already has changes nothing
-    e.updateSettings({ tpPct: 60, filters: { ...e.settings.filters } });
-    expect(e.settings.autopilot).toBe(true);
     e.updateSettings({ tpPct: 50 });
-    expect(e.settings.autopilot).toBe(false);
+    expect(e.settings.autopilot).toBe(true);
     expect(e.settings.tpPct).toBe(50);
+    expect(seen).toEqual([
+      { by: "user", changed: false },
+      { by: "autopilot", changed: true },
+      { by: "user", changed: true },
+    ]);
+  });
+
+  it("your pick competes: a proven rule you pick is traded as its own, any other becomes your own rule", () => {
+    const a = rule("A", { lo: 0.1, perDay: 20, tp: 150 });
+    const b = rule("B", { lo: 0.12, perDay: 20, tp: 200 });
+    const rep = report([a, b]);
+    const onA: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - 5 * HOUR, proof: { mean: 0.3, lo: 0.1, n: 150 }, rule: a, own: { minScore: 70, tpPct: 100 } };
+    // you pick B, which the search proved: it is the autopilot's rule now, judged like its own picks
+    const pickedB = pickRule({ state: onA, settings: settings(b.settings), prev: settings(a.settings), report: rep, now: NOW });
+    expect(pickedB).toMatchObject({ active: "B", proof: { lo: 0.12, n: 150 }, own: { minScore: 70 }, pickedAt: NOW });
+    expect(pickedB.log.at(-1)!.what).toMatch(/^You picked "B", a rule proven/);
+    expect(pickedB.log.at(-1)!.rules![0]!.settings).toEqual(b.settings);
+    // …and stays while nothing clearly better is proven
+    expect(decideAutopilot({ report: rep, settings: settings(b.settings), state: pickedB, closed: [], now: NOW + 60_000 }).action).toBe("none");
+    // you pick a rule of your own: it is your own rule, the autopilot stays on
+    const mine = settings({ ...a.settings, tpPct: 300, slPct: 50 });
+    const pickedMine = pickRule({ state: pickedB, settings: mine, prev: settings(b.settings), report: rep, now: NOW });
+    expect(pickedMine).toMatchObject({ active: null, proof: null, own: null });
+    expect(pickedMine.log.at(-1)!.what).toMatch(/^You picked your own rule: score ≥ 85 · \+300% \/ −50%/);
+    // while it is being measured, nothing replaces it
+    expect(decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW, measuring: true }).action).toBe("none");
+    const measured = (lo: number, n = 200): OwnMeasure => ({ key: ruleKey(mine), ok: true, n, mean: lo + 0.1, lo, hi: lo + 0.2, coinsPerDay: 20, avgHoldMin: 20, at: NOW });
+    // measured on the newest recordings at about B's level: kept, and said once
+    const kept = decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW, measured: measured(0.11) });
+    expect(kept.action).toBe("none");
+    expect(kept.note).toMatch(/^Kept your own rule: on the newest recordings, the part the search checks its candidates on, it made \+21\.0% per trade on 200 coins/);
+    expect(kept.state.log.at(-1)!.rules![0]!.text).toBe("B");
+    expect(decideAutopilot({ report: rep, settings: mine, state: kept.state, closed: [], now: NOW + HOUR, measured: measured(0.11) }).note).toBe("");
+    // clearly worse than B: B is traded, and the decision says what your rule showed
+    const replaced = decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW, measured: measured(0.02) });
+    expect(replaced.action).toBe("switch");
+    expect(replaced.rule!.text).toBe("B");
+    expect(replaced.note).toMatch(/Your own rule \(score ≥ 85 · \+300% \/ −50% · 6 h\): on the newest recordings/);
+    expect(replaced.state.own).toMatchObject({ tpPct: 300, slPct: 50 });
+    // both rules are one click away in that decision
+    expect(replaced.state.log.at(-1)!.rules!.map((r) => r.text)).toEqual(["B", "your own rule (score ≥ 85 · +300% / −50% · 6 h)"]);
+    // a measure of another rule, or an old one, is no evidence for this one
+    expect(decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW, measured: { ...measured(0.2), key: "other" } }).action).toBe("switch");
+    expect(decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW + 7 * HOUR, measured: measured(0.2) }).action).toBe("none"); // the search is old too
+    // what could not be measured is said
+    const blank = decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: [], now: NOW, measured: { ...measured(0), ok: false, why: "a trailing stop is not recorded" } });
+    expect(blank.note).toMatch(/has nothing to show yet: a trailing stop is not recorded, and it has fewer than 30 trades of its own/);
+    // its own trades, once there are enough, count before the recordings
+    const own = trades(40, (i) => (i % 2 ? 60 : 0), 0).map((p, i) => ({ ...p, openedAt: NOW - (40 - i) * HOUR, rule: ruleKey(mine) }) as Position);
+    expect(decideAutopilot({ report: rep, settings: mine, state: pickedMine, closed: own, now: NOW, measured: measured(0.01) }).note).toMatch(/^Kept your own rule: its 40 trades made/);
+  });
+
+  it("every decision names its rules, one click away — older decisions are read back from their words", () => {
+    const text = "Buy every coin 15 min after graduating · market cap ≥ 300 SOL · sell at +50% or −70%, or after 60 min";
+    const state: AutopilotState = {
+      ...emptyAutopilot(),
+      log: [
+        { at: NOW - 3 * HOUR, what: `Now trading: ${text}. On 290 trades the search never saw it made +61.2% per trade (worst case +15.6%), about 454 coins a day; at your size and limits that is at least ~71.02 SOL a day on that data. Past results can stop working: it is checked against its own trades.` },
+        { at: NOW - HOUR, what: "Back to your own rule (1 h after graduating · +500% / −30% · 6 h): no rule held up on data the search never saw." },
+      ],
+    };
+    const s = settings({ entryAt: "mig3600", tpPct: 500, slPct: 30, maxHoldMin: 360 });
+    const v = autopilotView({ report: null, settings: s, state, now: NOW, horizonMs: 6 * HOUR });
+    expect(v.log[1]!.rules).toEqual([
+      {
+        text,
+        settings: expect.objectContaining({ entryAt: "mig900", tpPct: 50, slPct: 70, maxHoldMin: 60, tradeAmm: true, scoreOnly: false, filters: expect.objectContaining({ minMcapSol: 300, maxMcapSol: 0 }) }),
+        inUse: false,
+      },
+    ]);
+    // an old "back to your own rule" did not keep the rule, and its words are not enough to rebuild it
+    expect(v.log[0]!.rules).toEqual([]);
+    // once used again, it shows as in use
+    const now = settings({ ...s, ...v.log[1]!.rules[0]!.settings });
+    expect(autopilotView({ report: null, settings: now, state, now: NOW, horizonMs: 6 * HOUR }).log[1]!.rules[0]!.inUse).toBe(true);
   });
 
   it("after an update, a bot trading real money keeps its own rule until the owner turns the autopilot on", () => {
@@ -301,13 +369,9 @@ describe("autopilot in the engine", () => {
     expect(dropped.note).not.toMatch(/top 10 holders/);
     // and a rule's conditions show wherever the rule is summed up
     expect(ruleSummary({ ...settings(d.settings) })).toMatch(/top 10 holders ≤ 25%/);
-    // a Lab rule's conditions are part of the rule: changing them by hand turns the autopilot off
-    const e = new Engine({ now: NOW, settings: { autopilot: true } });
-    e.updateSettings({ conds }, "autopilot");
-    expect(e.settings.autopilot).toBe(true);
-    e.updateSettings({ conds: [] });
-    expect(e.settings.autopilot).toBe(false);
+    // a Lab rule's conditions are part of the rule: changing them by hand is a pick of your own
     expect(RULE_KEYS).toContain("conds");
+    expect(ruleKey(settings({ conds }))).not.toBe(ruleKey(settings({ conds: [] })));
   });
 
   it("the engine trades a Lab rule's conditions exactly as they were recorded", () => {

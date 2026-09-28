@@ -11,7 +11,7 @@
  *      how often it "finds" one there shows how often it fools itself.
  */
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, counts } from "./outcomes.js";
-import { ENTRY_POINTS, type Settings } from "./settings.js";
+import { ENTRY_POINTS, type Settings, condsHold, customMoment, entryLabel, filterBlock, ruleKey, tagOfLabel } from "./settings.js";
 import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
 /** Time limits tried with every take-profit/stop-loss pair (minutes, 0 = none). */
@@ -74,7 +74,7 @@ export interface EdgeStats {
 export interface EdgeRule {
   /** entry when the score first reaches this level (0 when `at` is set) */
   level: number;
-  /** or entry at a fixed point in every coin's life (a key of ENTRY_POINTS) */
+  /** or entry at a point in every coin's life (a key of ENTRY_POINTS, or a recorded moment of your own) */
   at?: string;
   cond: string;
   tp: number;
@@ -127,6 +127,31 @@ export interface EdgeReport {
    * proven, as far as observed: its forward test. Range: 95%, counted per hour.
    */
   incumbent?: { text: string; n: number; mean: number; lo: number; hi: number };
+  /** your own rule (EdgeOptions.own) on the same unseen coins as the candidates, with the same bar (measureRule) */
+  own?: RuleMeasure;
+}
+
+/**
+ * A rule you set, measured on the recordings the way the search checks its candidates: every
+ * coin that qualified for it exactly (entry, stages, filters, conditions) on the newest third of
+ * its entry's data, which the search never used to pick anything, counted per market hour, with
+ * the lower bound corrected for the candidates checked at the same time (`tests`). A rule the
+ * recordings cannot express exactly is not measured (`why`), never approximated.
+ */
+export interface RuleMeasure {
+  /** the rule measured (settings ruleKey) */
+  key: string;
+  ok: boolean;
+  /** why it could not be measured, in plain words */
+  why?: string;
+  n: number;
+  mean: number;
+  lo: number;
+  hi: number;
+  /** distinct coins a day that qualified on the measured data */
+  coinsPerDay: number;
+  /** average minutes a trade stayed open (as for EdgeFound) */
+  avgHoldMin?: number;
 }
 
 export interface EdgeOptions {
@@ -144,9 +169,11 @@ export interface EdgeOptions {
   seed?: number;
   /** the rule in use and the newest entry its proof used: measured on what came after (EdgeReport.incumbent) */
   incumbent?: { rule: EdgeRule; after: number };
+  /** your own rule: measured like a candidate (EdgeReport.own) */
+  own?: Settings;
 }
 
-const DEFAULTS: Required<Omit<EdgeOptions, "now" | "incumbent">> = {
+const DEFAULTS: Required<Omit<EdgeOptions, "now" | "incumbent" | "own">> = {
   horizonMs: 6 * 3_600_000,
   minHours: 24,
   minSamples: 1_000,
@@ -166,8 +193,12 @@ export { normInv, tInv } from "./util.js";
  * where only luck decides which samples are watched that long: see counts, Sample.blind).
  */
 export function exitReturn(s: Sample, c: number, h: number): number {
+  return exitReturnAt(s, c, HOLDS_MIN[h]!);
+}
+
+/** exitReturn for a time limit in minutes: 0 (none: followed for the horizon) or one of PATH_MIN. */
+export function exitReturnAt(s: Sample, c: number, hold: number): number {
   const ret = s.grid[c]!;
-  const hold = HOLDS_MIN[h]!;
   const window = hold ? hold * 60 : Infinity;
   const t = s.gridT?.[c];
   if (hold === 0 || (t ?? 0) <= hold * 60) return counts(s, t ?? Infinity, window) ? ret : NaN;
@@ -177,16 +208,39 @@ export function exitReturn(s: Sample, c: number, h: number): number {
   return v ?? ret;
 }
 
+/** A rule in plain words ("Buy every coin 5 min after graduating · sell at +50% or −20%, or after 30 min"). */
+export function describeRule(r: EdgeRule): string {
+  return describe(r);
+}
+
 function describe(r: EdgeRule): string {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const when = r.cond === "any" ? "" : ` · ${cond.label}`;
   const time = r.hold ? `, or after ${r.hold} min` : "";
-  const entry = r.at ? `Buy every coin ${ENTRY_POINTS[r.at] ?? r.at}` : `Buy when a coin first reaches ${r.level}`;
+  const entry = r.at ? `Buy every coin ${entryLabel(r.at)}` : `Buy when a coin first reaches ${r.level}`;
   return `${entry}${when} · sell at +${r.tp}% or −${r.sl}%${time}`;
 }
 
+/** The rule an edge-finder text describes (the inverse of its description), or null. */
+export function edgeRuleFromText(text: string): EdgeRule | null {
+  const m = /^Buy (?:every coin (.+?)|when a coin first reaches (\d+))(?: · (.+?))? · sell at \+(\d+)% or −(\d+)%(?:, or after (\d+) min)?$/.exec(text.trim());
+  if (!m) return null;
+  const at = m[1] !== undefined ? tagOfLabel(m[1]) : undefined;
+  if (m[1] !== undefined && !at) return null;
+  const level = m[2] !== undefined ? Number(m[2]) : 0;
+  if (m[2] !== undefined && !(ENTRY_LEVELS as readonly number[]).includes(level)) return null;
+  const cond = m[3] === undefined ? CONDITIONS[0] : CONDITIONS.find((c) => c.label === m[3]);
+  const tp = Number(m[4]);
+  const sl = Number(m[5]);
+  const hold = m[6] === undefined ? 0 : Number(m[6]);
+  if (!cond || !GRID.some((g) => g.tp === tp && g.sl === sl) || !(HOLDS_MIN as readonly number[]).includes(hold)) return null;
+  const rule: EdgeRule = { level, cond: cond.key, tp, sl, hold };
+  if (at) rule.at = at;
+  return describe(rule) === text.trim() ? rule : null;
+}
+
 /** Settings that trade the rule as it was tested: without a time limit, a trade was followed for `horizonMs`. */
-function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
+export function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const out: Partial<Settings> = {
     entryAt: r.at ?? "score",
@@ -203,6 +257,99 @@ function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
     scoreOnly: !cond.filters,
   };
   if (cond.filters) out.filters = { ...OPEN_FILTERS, ...cond.filters };
+  return out;
+}
+
+/**
+ * The recordings the search and the measures use: would-be entries of the current layout — the
+ * first time a coin reached each score level, and every coin at each recorded point in its life —
+ * complete (older than the follow-up horizon), oldest first.
+ */
+export function recordedRows(samples: Sample[], horizonMs: number): Sample[] {
+  let lastResolved = 0;
+  for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
+  const cutoff = lastResolved - horizonMs;
+  return samples
+    .filter(
+      (s) =>
+        (s.kind === "entry" || (s.kind === "checkpoint" && s.tag in ENTRY_POINTS) || (s.kind === "moment" && customMoment(s.tag) !== null)) &&
+        s.gv === GRID_VERSION &&
+        s.f &&
+        s.gridT?.length === GRID.length &&
+        s.path?.length === PATH_MIN.length &&
+        s.ts <= cutoff,
+    )
+    .sort((a, b) => a.ts - b.ts);
+}
+
+/** Why the recordings cannot express a rule exactly, or null (see measureRule). */
+export function whyUnmeasurable(s: Settings, horizonMs: number): string | null {
+  if (s.entryAt === "score" && !(ENTRY_LEVELS as readonly number[]).includes(s.minScore)) return `score ${s.minScore} is not one of the levels the bot records (${ENTRY_LEVELS.join(", ")})`;
+  if (s.entryAt === "score" && s.reentry) return "buying the same coin again is not recorded";
+  if (!GRID.some((g) => g.tp === s.tpPct && g.sl === s.slPct))
+    return `+${s.tpPct}% / −${s.slPct}% is not among the exits the bot records (take profit ${GRID_TP_TEXT}; stop loss ${GRID_SL_TEXT})`;
+  if (holdOf(s, horizonMs) === null) return `a time limit of ${s.maxHoldMin} min is not among the ones the bot records (${PATH_MIN.join(", ")} min, ${Math.round(horizonMs / 3_600_000)} h or none)`;
+  if (s.trailPct > 0) return "a trailing stop is not recorded";
+  if (s.takeInitials) return "taking the initials out is not recorded";
+  return null;
+}
+
+const GRID_TP_TEXT = [...new Set(GRID.map((g) => g.tp))].map((x) => `${x}%`).join(", ");
+const GRID_SL_TEXT = [...new Set(GRID.map((g) => g.sl))].map((x) => `${x}%`).join(", ");
+
+/** The recorded time limit a rule sells at: 0 (none, or at least the horizon), a PATH_MIN one, or null. */
+function holdOf(s: Settings, horizonMs: number): number | null {
+  if (s.maxHoldMin === 0 || s.maxHoldMin * 60_000 >= horizonMs) return 0;
+  return (PATH_MIN as readonly number[]).includes(s.maxHoldMin) ? s.maxHoldMin : null;
+}
+
+/**
+ * Your own rule on the recordings (RuleMeasure): the coins that qualified for it exactly, on the
+ * newest third of its entry's data — the part on which the search checks its candidates — with
+ * their bound corrected for `tests` candidates checked at once, so your rule and the proven ones
+ * meet the same bar on the same coins. `rows`: recordedRows.
+ */
+export function measureRule(rows: Sample[], s: Settings, o: { horizonMs: number; tests?: number; minN?: number; minWins?: number }): RuleMeasure {
+  const key = ruleKey(s);
+  const none = (why: string): RuleMeasure => ({ key, ok: false, why, n: 0, mean: NaN, lo: NaN, hi: NaN, coinsPerDay: 0 });
+  const bad = whyUnmeasurable(s, o.horizonMs);
+  if (bad) return none(bad);
+  const tag = s.entryAt === "score" ? `x${s.minScore}` : s.entryAt;
+  const family = rows.filter((r) => r.tag === tag);
+  if (family.length < 2) return none(`the bot has no finished recordings of ${s.entryAt === "score" ? `coins reaching ${s.minScore}` : `coins ${entryLabel(tag)}`} yet`);
+  const f0 = family[0]!.ts;
+  const f1 = family[family.length - 1]!.ts;
+  const split = f0 + ((f1 - f0) * 2) / 3;
+  const combo = GRID.findIndex((g) => g.tp === s.tpPct && g.sl === s.slPct);
+  const hold = holdOf(s, o.horizonMs)!;
+  // market hours counted as the search counts them, from its first entry
+  const t0 = rows[0]!.ts;
+  const vals: number[] = [];
+  const hours: number[] = [];
+  const mints = new Set<string>();
+  let held = 0;
+  let wins = 0;
+  for (const r of family) {
+    if (r.ts < split) continue;
+    if ((r.stage === "curve" && !s.tradeCurve) || (r.stage === "amm" && !s.tradeAmm)) continue;
+    if (s.conds.length && !condsHold(s.conds, r.x)) continue;
+    if (!s.scoreOnly && filterBlock(s.filters, r.f!)) continue;
+    mints.add(r.mint);
+    const v = exitReturnAt(r, combo, hold);
+    if (Number.isNaN(v)) continue; // not observed for this exit
+    vals.push(v);
+    hours.push(Math.floor((r.ts - t0) / 3_600_000));
+    if (v > 0) wins++;
+    const sec = r.gridT?.[combo] ?? 0;
+    held += hold ? Math.min(sec, hold * 60) : sec;
+  }
+  const minN = o.minN ?? DEFAULTS.minHoldout;
+  const minWins = o.minWins ?? DEFAULTS.minWins;
+  if (vals.length < minN) return none(`only ${vals.length} coins qualified for it on the newest recordings (${minN} needed)`);
+  const m = clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, o.tests ?? DEFAULTS.candidates));
+  const days = Math.max(1 / 24, (f1 - split) / 86_400_000);
+  const out: RuleMeasure = { key, ok: true, n: vals.length, mean: m.mean, lo: m.lo, hi: m.hi, coinsPerDay: mints.size / days, avgHoldMin: held / vals.length / 60 };
+  if (wins < minWins) return { ...out, ok: false, why: `only ${wins} of its ${vals.length} coins won — too few to count on` };
   return out;
 }
 
@@ -304,7 +451,7 @@ interface SearchResult {
 
 const wins = (st: EdgeStats) => Math.round(st.winRate * st.n);
 
-function* search(d: Data, groups: Group[], o: Required<Omit<EdgeOptions, "now" | "incumbent">>): Generator<void, SearchResult> {
+function* search(d: Data, groups: Group[], o: Required<Omit<EdgeOptions, "now" | "incumbent" | "own">>): Generator<void, SearchResult> {
   let tested = 0;
   const best: Scored[] = [];
   for (const g of groups) {
@@ -369,22 +516,11 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   };
 
   // Would-be entries in the current layout, complete (older than the follow-up horizon): the
-  // first time a coin reached each score level, and every coin at each fixed point in its life.
-  let lastResolved = 0;
-  for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
-  const cutoff = lastResolved - o.horizonMs;
-  const rows = samples.filter(
-    (s) =>
-      (s.kind === "entry" || (s.kind === "checkpoint" && s.tag in ENTRY_POINTS)) &&
-      s.gv === GRID_VERSION &&
-      s.f &&
-      s.gridT?.length === GRID.length &&
-      s.path?.length === PATH_MIN.length &&
-      s.ts <= cutoff,
-  );
-  rows.sort((a, b) => a.ts - b.ts);
+  // first time a coin reached each score level, and every coin at each point in its life.
+  const rows = recordedRows(samples, o.horizonMs);
   if (rows.length) base.cutoff = rows[rows.length - 1]!.ts;
   if (opts.incumbent) base.incumbent = forwardTest(rows, opts.incumbent.rule, opts.incumbent.after);
+  const own = (tests: number) => (opts.own ? { own: measureRule(rows, opts.own, { horizonMs: o.horizonMs, tests, minN: o.minHoldout, minWins: o.minWins }) } : {});
   const n = rows.length;
   const t0 = n ? rows[0]!.ts : 0;
   const t1 = n ? rows[n - 1]!.ts : 0;
@@ -393,7 +529,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   base.hours = hours;
   if (n < o.minSamples || hours < o.minHours) {
     base.note = `Needs at least ${o.minHours} hours of recorded market and ${o.minSamples.toLocaleString("en-US")} finished would-be trades (so far: ${hours.toFixed(1)} h, ${n.toLocaleString("en-US")}). Each outcome finishes ${Math.round(o.horizonMs / 3_600_000)} hours after its entry.`;
-    return base;
+    return { ...base, ...own(o.candidates) };
   }
 
   // Net return of every row for every exit, computed once.
@@ -413,9 +549,11 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     if (!list) byEntry.set(s.tag, (list = []));
     list.push(i);
   });
+  // moments of your own are searched like the fixed points once they are recorded
+  const yours = [...new Set(rows.filter((s) => s.kind === "moment").map((s) => s.tag))].sort();
   const families: { tag: string; level: number; at?: string }[] = [
     ...ENTRY_LEVELS.map((level) => ({ tag: `x${level}`, level })),
-    ...Object.keys(ENTRY_POINTS).map((at) => ({ tag: at, level: 0, at })),
+    ...[...Object.keys(ENTRY_POINTS), ...yours].map((at) => ({ tag: at, level: 0, at })),
   ];
   for (const fam of families) {
     const idx = byEntry.get(fam.tag) ?? [];
@@ -498,6 +636,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
   const discHours = hours * (2 / 3);
   return {
     ...base,
+    ...own(run.cands.length),
     status: "ok",
     note: survivors.length
       ? `${survivors.length} rule${survivors.length > 1 ? "s" : ""} held up on the newest data the search never saw.`

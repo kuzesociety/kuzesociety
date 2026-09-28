@@ -15,7 +15,7 @@ import { type RawFeatures, MarketPulse, extractFeatures, featureVector } from ".
 import { Funnel, type SignalRecord } from "./funnel.js";
 import { type ModelSpec, type ScoreResult, type StageKey, priorModel, scalePrior, scoreToken, validateModel } from "./model.js";
 import { NarrativeIndex } from "./narratives.js";
-import { ENTRY_LEVELS, type EntryFacts, OutcomeTracker, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, type EntryFacts, OutcomeTracker, type Sample, type SampleKind } from "./outcomes.js";
 import {
   type CostModel,
   DEFAULT_COSTS,
@@ -27,8 +27,7 @@ import {
   quoteBuy,
   quoteSell,
 } from "./positions.js";
-import { ruleChanged, ruleKey } from "./autopilot.js";
-import { DEFAULT_SETTINGS, type Settings, condsHold, exitPlanFrom, sanitizeSettings } from "./settings.js";
+import { DEFAULT_SETTINGS, type Settings, condsHold, customMoment, exitPlanFrom, filterBlock, ruleChanged, ruleKey, sanitizeSettings } from "./settings.js";
 import { type TokenState, TokenState as Token } from "./token.js";
 import type { AmmSwap, MarketEvent, TradeEvent } from "./types.js";
 import { type Logger, Ring, clamp, newId, rng, silentLogger } from "./util.js";
@@ -151,7 +150,8 @@ export interface EngineHooks {
   watchMint?(mint: string, on: boolean): void;
   persist?(state: PersistedState): void;
   journal?(entry: Record<string, unknown>): void;
-  onSettings?(s: Settings): void;
+  /** `why`: who changed them (the user or the autopilot) and what they were before */
+  onSettings?(s: Settings, why?: { by: "user" | "autopilot"; prev: Settings }): void;
   onModel?(m: ModelSpec): void;
 }
 
@@ -660,12 +660,14 @@ export class Engine {
    */
   private checkpoints(t: TokenState, e: ScoreEntry, now: number) {
     const custom = { tp: this.settings.tpPct, sl: this.settings.slPct };
-    const add = (tag: string) => {
+    const add = (tag: string, kind: SampleKind = "checkpoint") => {
       if (e.cps.includes(tag)) return;
       e.cps.push(tag);
-      this.outcomes.add(t, "checkpoint", tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
+      this.outcomes.add(t, kind, tag, now, e.res.score, e.res.p, e.x, custom, entryFacts(t, e.f));
       if (this.settings.entryAt === tag) this.fire(t, e, now, true);
     };
+    // moments of your own are recorded like the fixed ones, as their own kind: the score does not learn from them
+    const own = this.ownMoments();
     if (t.stage === "curve") {
       const age = (now - t.createdAt) / 1000;
       if (t.partial) return; // unknown true age: keep samples clean
@@ -673,10 +675,29 @@ export class Engine {
       for (const s of this.cfg.checkpointsCurveSec) if (age >= s && age < s * 1.6) tag = `age${s}`;
       if (tag) add(tag);
       for (const p of this.cfg.checkpointsProgress) if (t.progress >= p && t.progress < p + 0.1) add(`prog${Math.round(p * 100)}`);
+      for (const m of own) if (m.kind === "age" && age >= m.sec && age < m.sec * 1.6) add(m.tag, "moment");
     } else if (t.stage === "amm" && t.migrateAt) {
       const since = (now - t.migrateAt) / 1000;
       for (const s of this.cfg.checkpointsAmmSec) if (since >= s && since < s * 1.6) add(`mig${s}`);
+      for (const m of own) if (m.kind === "mig" && since >= m.sec && since < m.sec * 1.6) add(m.tag, "moment");
     }
+  }
+
+  private momentsOf: Settings | null = null;
+  private moments: { tag: string; kind: "age" | "mig"; sec: number }[] = [];
+
+  /** Moments of your own to record (Settings.moments, and the rule's entry if it is one), parsed once per settings. */
+  private ownMoments() {
+    const s = this.settings;
+    if (this.momentsOf !== s) {
+      this.momentsOf = s;
+      const tags = new Set([...s.moments, s.entryAt]);
+      this.moments = [...tags].flatMap((tag) => {
+        const c = customMoment(tag);
+        return c ? [{ tag, ...c }] : [];
+      });
+    }
+    return this.moments;
   }
 
   /**
@@ -784,20 +805,19 @@ export class Engine {
       if (!this.executor || !this.executor.ready()) return "live_disabled";
     } else if (this.paperBalance < s.positionSol * LAMPORTS_PER_SOL) return "insufficient_balance";
     if (s.scoreOnly) return null;
-    const f = s.filters;
+    // the same check as for rules measured on recordings, which store these facts (entryFacts)
     const raw = e.f;
-    if (f.minMcapSol > 0 && t.mcapSol < f.minMcapSol) return "filter:mcap_min";
-    if (f.maxMcapSol > 0 && t.mcapSol > f.maxMcapSol) return "filter:mcap_max";
-    if (raw.devShare * 100 > f.maxDevPct) return "filter:dev";
-    if (raw.top10 * 100 > f.maxTop10Pct) return "filter:top10";
-    if (raw.bundleShare * 100 > f.maxBundlePct) return "filter:bundle";
-    if (raw.uniqTotal < f.minBuyers) return "filter:buyers";
-    if (f.minAgeSec > 0 && raw.ageSec < f.minAgeSec) return "filter:age_min";
-    if (f.maxAgeMin > 0 && raw.ageSec > f.maxAgeMin * 60) return "filter:age_max";
-    if (f.requireSocials && raw.socials === 0) return "filter:socials";
-    if (f.maxDevLaunches24h > 0 && raw.creatorLaunches24h > f.maxDevLaunches24h) return "filter:serial_dev";
-    if (f.maxDevSoldPct < 100 && raw.devSold * 100 > f.maxDevSoldPct) return "filter:dev_sold";
-    return null;
+    return filterBlock(s.filters, {
+      mcap: t.mcapSol,
+      age: raw.ageSec,
+      buyers: raw.uniqTotal,
+      top10: raw.top10,
+      bundle: raw.bundleShare,
+      devShare: raw.devShare,
+      devSold: raw.devSold,
+      socials: raw.socials,
+      launches24h: raw.creatorLaunches24h,
+    });
   }
 
   /** A prior model trades only after it has been scaled to the live market once. */
@@ -1162,17 +1182,13 @@ export class Engine {
   // -------------------------------------------------------------------------
 
   /**
-   * Apply a settings change. `by`: who made it — a change to the rule (entry, coins, exits) made
-   * by the user turns the autopilot off, so it never undoes what the user just chose.
+   * Apply a settings change. `by`: who made it. A rule you pick by hand with the autopilot on
+   * leaves it on: your rule then competes with the proven ones (the learner is told, onSettings).
    */
   updateSettings(patch: unknown, by: "user" | "autopilot" = "user"): Settings {
     const prev = this.settings;
     const next = sanitizeSettings(patch, prev);
-    const p = (patch && typeof patch === "object" ? patch : {}) as Record<string, unknown>;
-    if (by === "user" && prev.autopilot && next.autopilot && p.autopilot !== true && ruleChanged(prev, next)) {
-      next.autopilot = false;
-      this.journal({ type: "autopilot_off", why: "rule changed by hand" });
-    }
+    if (by === "user" && prev.autopilot && next.autopilot && ruleChanged(prev, next)) this.journal({ type: "rule_picked", rule: ruleKey(next) });
     if (!next.autopilot) this.autoHold = null;
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
@@ -1186,7 +1202,7 @@ export class Engine {
       if (next.reentry) e.armed = true;
       else if (moved) e.armed = e.res.score < next.minScore;
     }
-    this.hooks.onSettings?.(next);
+    this.hooks.onSettings?.(next, { by, prev });
     this.journal({ type: "settings", settings: next });
     this.markDirty();
     return next;

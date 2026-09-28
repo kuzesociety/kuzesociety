@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
-import type { EdgeReport } from "../../core/edges";
+import { type EdgeReport, whyUnmeasurable } from "../../core/edges";
 import { type Preset, followsPreset, ruleSummary, strategyList } from "../../core/presets";
-import { ENTRY_POINTS, type Settings, rebaseSettings, settingsChanges } from "../../core/settings";
+import { type Settings, customMoment, entryLabel, momentTag, rebaseSettings, ruleChanged, settingsChanges } from "../../core/settings";
 import { ext } from "../ext";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
@@ -74,8 +74,8 @@ export function Bot() {
         setDraft(r.settings);
         setDirty(false);
       }
-      const off = settings.autopilot && !r.settings.autopilot && !(patch && "autopilot" in patch) ? " · Autopilot is off now: you picked the rule" : "";
-      toast(`${patch ? "Updated" : "Saved — applies to new trades"}${off}`);
+      const picked = settings.autopilot && r.settings.autopilot && ruleChanged(settings, r.settings) ? " · The autopilot stays on: it keeps your rule unless a proven rule does clearly better" : "";
+      toast(`${patch ? "Updated" : "Saved — applies to new trades"}${picked}`);
       void refreshState();
     } catch (e) {
       toast(String((e as Error).message));
@@ -115,14 +115,9 @@ export function Bot() {
       <div class="grid two" style="margin-top:12px">
         <div class="card">
           <h2>Entry</h2>
-          {draft.entryAt !== "score" && (
-            <div class="note" style="margin:0 0 10px;padding:10px 12px;border-radius:var(--r-sm);background:var(--flare-soft)">
-              <b>Buying every coin {ENTRY_POINTS[draft.entryAt] ?? draft.entryAt}</b> (a rule the edge finder proved), filters below applied — the score is not used.{" "}
-              <button class="btn sm" disabled={busy} onClick={() => save({ entryAt: "score" })}>
-                Enter by score instead
-              </button>
-            </div>
-          )}
+          <EntryMoment draft={draft} saved={settings} edit={edit} />
+          {draft.entryAt === "score" && (
+            <>
           <Field
             label={`Minimum score: ${draft.minScore}`}
             htmlFor="minScore"
@@ -142,16 +137,18 @@ export function Bot() {
             <span />
           </Field>
           <input id="minScore" type="range" min={0} max={100} step={1} value={draft.minScore} onInput={(e) => set("minScore", Number((e.target as HTMLInputElement).value))} style="width:100%" aria-label="minimum score" />
+            </>
+          )}
 
           <div class="field" style={draft.scoreOnly ? "background:var(--flare-soft);border-radius:10px;padding:12px;margin:8px 0;border:0" : ""}>
             <div class="row">
               <label for="scoreOnly" style="flex:1;font-weight:700">
-                Score only
+                {draft.entryAt === "score" ? "Score only" : "No filters"}
               </label>
-              <Switch id="scoreOnly" checked={draft.scoreOnly} label="Score only" onChange={(v) => set("scoreOnly", v)} />
+              <Switch id="scoreOnly" checked={draft.scoreOnly} label={draft.entryAt === "score" ? "Score only" : "No filters"} onChange={(v) => set("scoreOnly", v)} />
             </div>
             <div class="help">
-              When on, the bot buys on the score alone and ignores every filter below. Your budget limits still apply (size, max open positions, daily loss, one entry per coin) — they protect the wallet, they don't judge the coin.
+              {draft.entryAt === "score" ? "When on, the bot buys on the score alone and ignores every filter below." : "When on, the bot buys every coin at this moment and ignores every filter below."} Your budget limits still apply (size, max open positions, daily loss, one entry per coin) — they protect the wallet, they don't judge the coin.
             </div>
           </div>
 
@@ -161,7 +158,11 @@ export function Bot() {
           <Field label="Stop loss" htmlFor="sl" help="From your entry cost, fixed (not trailing). In a crash the fill can land below this — the bot always sells.">
             <NumInput id="sl" value={draft.slPct} onChange={(v) => set("slPct", v)} min={1} max={99} suffix="%" />
           </Field>
-          <Field label="Sell after" htmlFor="hold" help="Time limit for each trade: sells at market if neither the target nor the stop was hit by then. 0 = no limit.">
+          <Field
+            label="Sell after"
+            htmlFor="hold"
+            help="Time limit for each trade: sells at market if neither the target nor the stop was hit by then. 0 = no limit. The recordings keep 5, 10, 30, 60 and 120 min and 6 h (360), so a rule with one of these can be weighed on them."
+          >
             <NumInput id="hold" value={draft.maxHoldMin} onChange={(v) => set("maxHoldMin", v)} min={0} suffix="min" />
           </Field>
           <Field label="Size per trade" htmlFor="size" help={settings.mode === "live" && health?.live ? `Server cap: ${health.live.maxPositionSol} SOL per live trade.` : "Fees included."}>
@@ -190,6 +191,7 @@ export function Bot() {
               </button>
             )}
           </div>
+          {settings.autopilot && <Weighable draft={draft} />}
           <p class="faint" style="font-size:12px;margin:10px 0 0">Open positions keep the exit settings they were bought with.</p>
         </div>
 
@@ -446,8 +448,8 @@ function Strategies({ settings, onApplied }: { settings: Settings; onApplied: ()
     setBusy(p.key);
     try {
       await api("/api/settings", p.settings);
-      const off = settings.autopilot ? " Autopilot is off now: you picked the rule." : "";
-      toast(settings.enabled ? `Now trading: ${p.name}.${off}` : `Strategy set: ${p.name}. Switch Auto-trading on to start.${off}`);
+      const stays = settings.autopilot ? " The autopilot stays on: it keeps this rule unless a proven rule does clearly better." : "";
+      toast(settings.enabled ? `Now trading: ${p.name}.${stays}` : `Strategy set: ${p.name}. Switch Auto-trading on to start.${stays}`);
       setConfirm(null);
       onApplied();
     } catch (e) {
@@ -462,7 +464,7 @@ function Strategies({ settings, onApplied }: { settings: Settings; onApplied: ()
       <h2>Strategy</h2>
       <p class="faint" style="margin:0 0 4px;font-size:12.5px">
         One tap sets the whole rule — entry score, which coins, take profit, stop loss and time limit. Fine-tune it below afterwards.
-        {settings.autopilot && " The autopilot is choosing the rule now: picking one here, or changing the rule below, turns it off."}
+        {settings.autopilot && " The autopilot stays on when you pick one here or change the rule below: your rule then competes with the proven ones, and stays unless one does clearly better."}
       </p>
       {custom && (
         <div class="strat active">
@@ -501,5 +503,130 @@ function Strategies({ settings, onApplied }: { settings: Settings; onApplied: ()
       })}
       {live && <p class="faint note">You are live: switching asks for a second tap. Open positions keep the rule they were bought with.</p>}
     </div>
+  );
+}
+
+const RECORDED: Record<"age" | "mig" | "prog", string[]> = {
+  age: ["age20", "age45", "age90", "age180", "age360", "age720"],
+  mig: ["mig60", "mig300", "mig900", "mig3600"],
+  prog: ["prog25", "prog50", "prog75"],
+};
+
+/** When to buy: when the score reaches your minimum, or at a point in every coin's life — one the bot always records, or a moment of your own. */
+function EntryMoment({ draft, saved, edit }: { draft: Settings; saved: Settings; edit: (s: Settings) => void }) {
+  const at = draft.entryAt;
+  const kind: "score" | "age" | "mig" | "prog" = at === "score" ? "score" : at.startsWith("age") ? "age" : at.startsWith("mig") ? "mig" : "prog";
+  // buying after graduating needs graduated coins traded; after launch or on the curve, curve coins
+  const pick = (tag: string) => edit({ ...draft, entryAt: tag, ...(tag.startsWith("mig") ? { tradeAmm: true } : tag === "score" ? {} : { tradeCurve: true }) });
+  const own = customMoment(at);
+  const kinds: [typeof kind, string, string][] = [
+    ["score", "When the score reaches", "score"],
+    ["age", "After launch", "age180"],
+    ["mig", "After graduating", "mig300"],
+    ["prog", "On the way to graduation", "prog50"],
+  ];
+  return (
+    <div class="field">
+      <div style="font-weight:700;margin-bottom:6px">Buy</div>
+      <div class="chips">
+        {kinds.map(([k, label, first]) => (
+          <button key={k} class="chip" aria-pressed={kind === k} onClick={() => kind !== k && pick(first)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {(kind === "age" || kind === "mig") && (
+        <div class="row wrap" style="gap:6px;margin-top:8px">
+          <MomentInput kind={kind} sec={Number(at.slice(3))} onChange={(sec) => pick(momentTag(kind, sec))} />
+          {RECORDED[kind].map((t) => (
+            <button key={t} class="chip" aria-pressed={at === t} onClick={() => pick(t)}>
+              {entryLabel(t).replace(/ after .*/, "")}
+            </button>
+          ))}
+        </div>
+      )}
+      {kind === "prog" && (
+        <div class="chips" style="margin-top:8px">
+          {RECORDED.prog.map((t) => (
+            <button key={t} class="chip" aria-pressed={at === t} onClick={() => pick(t)}>
+              {entryLabel(t).replace(" to graduation", "")}
+            </button>
+          ))}
+        </div>
+      )}
+      <div class="help">
+        {kind === "score" ? (
+          "Buys a coin the first time its score reaches your minimum and holds it."
+        ) : (
+          <>
+            Buys every coin <b>{entryLabel(at)}</b>{kind === "mig" ? " (graduated coins)" : " (still on the bonding curve)"} — the score is not used.{" "}
+            {own
+              ? saved.moments.includes(at)
+                ? "A moment of your own: the bot records it for every coin since you added it, so rules at it are measured and searched like the fixed ones."
+                : "A moment of your own: once saved, the bot records it for every coin, so rules at it can be measured and searched after about a day of recordings."
+              : "The bot records this moment for every coin, so the autopilot can weigh a rule at it right away."}
+          </>
+        )}
+      </div>
+      {draft.moments.length > 0 && (
+        <div class="help row wrap" style="gap:6px">
+          <span>Moments of your own recorded for every coin:</span>
+          {draft.moments.map((m) => (
+            <span key={m} class="row" style="gap:2px">
+              <Tag>{entryLabel(m)}</Tag>
+              {m !== at && (
+                <button class="btn sm ghost" aria-label={`stop recording ${entryLabel(m)}`} title="Stop recording it" onClick={() => edit({ ...draft, moments: draft.moments.filter((x) => x !== m) })}>
+                  ×
+                </button>
+              )}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Minutes after launch or graduating; the moment snaps to the nearest one with an exact name (whole seconds under 2 min, half minutes under 2 h, half hours beyond). */
+function MomentInput({ kind, sec, onChange }: { kind: "age" | "mig"; sec: number; onChange: (sec: number) => void }) {
+  const show = (x: number) => String(+(x / 60).toFixed(2));
+  const [text, setText] = useState(show(sec));
+  const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    if (!focused) setText(show(sec));
+  }, [sec, focused]);
+  return (
+    <span class="row" style="gap:6px">
+      <input
+        class="inp"
+        style="width:84px"
+        type="text"
+        inputMode="decimal"
+        value={text}
+        aria-label={kind === "age" ? "minutes after launch" : "minutes after graduating"}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        onInput={(e) => {
+          const t = (e.target as HTMLInputElement).value;
+          setText(t);
+          const v = Number(t.replace(",", "."));
+          if (Number.isFinite(v) && v > 0) onChange(Math.round(v * 60));
+        }}
+      />
+      <span class="muted">min</span>
+    </span>
+  );
+}
+
+/** With the autopilot on: whether your rule can be weighed on the recordings against the proven rules, and if not, why. */
+function Weighable({ draft }: { draft: Settings }) {
+  // would-be trades are followed for 6 hours (the engine's outcome horizon)
+  const why = whyUnmeasurable(draft, 6 * 3_600_000);
+  return (
+    <p class="faint" style="font-size:12.5px;margin:10px 0 0">
+      {why
+        ? `The autopilot cannot weigh this rule on the recordings: ${why}. Until it has 30 trades of its own, any proven rule replaces it — pick recorded values to let it compete.`
+        : "The autopilot can weigh this rule on the recordings, with the same bar as the proven rules: it stays unless one does clearly better."}
+    </p>
   );
 }

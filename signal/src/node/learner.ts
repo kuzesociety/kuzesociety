@@ -14,8 +14,8 @@
  *      recovers, is sent to Telegram at once, and once a day a check-up.
  * Everything pauses every few milliseconds, so trading never waits for it.
  */
-import { AUTOPILOT, type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot, trackRecord } from "../core/autopilot.js";
-import { type EdgeReport, findEdgesAsync } from "../core/edges.js";
+import { AUTOPILOT, type AutopilotState, type OwnMeasure, autopilotView, decideAutopilot, emptyAutopilot, pickRule, trackRecord } from "../core/autopilot.js";
+import { type EdgeReport, findEdgesAsync, measureRule, recordedRows } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import { type FreshCheck, type LearnRun, adoptionNote, freshCheckAsync, learnRunOf } from "../core/insight.js";
 import { LAB, type LabState, addLabIdea, emptyLab, labForward, labProofs, labSummary, labView, parseLabRule, restoreLab, runLabAsync } from "../core/lab.js";
@@ -25,7 +25,7 @@ import type { Sample } from "../core/outcomes.js";
 import { ruleSummary } from "../core/presets.js";
 import { buildReport } from "../core/report.js";
 import { type Check, type CheckStatus, checkChanges, checksSummary, runChecks } from "../core/selfcheck.js";
-import type { Settings } from "../core/settings.js";
+import { type Settings, ruleChanged, ruleKey } from "../core/settings.js";
 import type { Logger } from "../core/util.js";
 import type { DataStore } from "./store.js";
 
@@ -66,6 +66,13 @@ export class Learner {
   private stopped = false;
   private piloting = false;
   private seen: Pick<Settings, "autopilot" | "mode"> | null = null;
+  /** your own rule measured on the recordings (core/edges measureRule): at every search, and right after you pick one */
+  ownMeasure: OwnMeasure | null = null;
+  /** your pick is being measured: the autopilot does not replace it before that is known */
+  measuring = false;
+  private measureAgain = false;
+  /** a learning cycle holds the samples: a pick made meanwhile is measured with them at its end */
+  private cycling = false;
 
   constructor(
     private o: {
@@ -95,12 +102,17 @@ export class Learner {
 
   start() {
     this.lastEdges = (this.o.store.loadEdges() as EdgeReport | null) ?? null;
+    if (this.lastEdges?.own) this.ownMeasure = { ...this.lastEdges.own, at: this.lastEdges.generatedAt };
     this.history = this.o.store.loadLearnHistory() as LearnRun[];
     this.autopilot = { ...emptyAutopilot(), ...((this.o.store.loadAutopilot() as Partial<AutopilotState> | null) ?? {}) };
     this.lab = restoreLab(this.o.store.loadLab());
     this.seen = { autopilot: this.o.engine().settings.autopilot, mode: this.o.engine().settings.mode };
     this.startedAt = Date.now();
     this.lastDaily = ((this.o.store.loadSelfCheck() as { lastDaily?: number } | null)?.lastDaily ?? 0) || Date.now();
+    // your own rule is weighed before a proven rule may replace it (an answer from before this
+    // version has no measure of it, and the rule may have changed since the last search)
+    const s = this.o.engine().settings;
+    if (s.autopilot && s.mode === "paper" && !this.autopilot.active && this.ownMeasure?.key !== ruleKey(s) && (this.lastEdges?.survivors.length ?? 0) > 0) void this.measureOwn();
     // with real money and nothing proven, entries wait from the first second — not after the first search
     this.pilot();
     this.watch = setInterval(() => {
@@ -143,6 +155,7 @@ export class Learner {
 
   /** One pass of the loop (see the top of the file). */
   private async cycle() {
+    this.cycling = true;
     try {
       const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
       if (Date.now() >= this.learnDueAfter(Date.now() - 1)) await this.learn(samples, this.lastRun ? "schedule" : "start");
@@ -150,11 +163,59 @@ export class Learner {
       await this.runLab(samples);
       await this.checkDrift(samples);
       this.selfCheck(samples);
+      // a rule picked while the cycle ran is measured with its samples
+      this.cycling = false;
+      if (this.measureAgain) await this.measureOwn(samples);
     } catch (e) {
       this.o.log.error("learning cycle failed", { err: String(e) });
     } finally {
+      this.cycling = false;
+      if (this.measureAgain && !this.measuring) void this.measureOwn();
       if (!this.stopped) this.schedule(CYCLE_MS);
     }
+  }
+
+  /**
+   * Measures the rule in use on the recordings (core/edges measureRule) for the autopilot, then
+   * lets it decide. Loads the samples unless given; while a cycle holds them, waits for its end.
+   */
+  async measureOwn(samples?: Sample[]): Promise<OwnMeasure | null> {
+    if (this.measuring || (this.cycling && !samples)) {
+      this.measureAgain = true;
+      return this.ownMeasure;
+    }
+    this.measuring = true;
+    try {
+      let rows = samples ? recordedRows(samples, this.horizonMs()) : null;
+      do {
+        this.measureAgain = false;
+        if (!rows) rows = recordedRows(await this.o.store.loadSamplesAsync(this.o.sampleDays), this.horizonMs());
+        const s = this.o.engine().settings;
+        // the same correction as the candidates of the latest search
+        const tests = this.lastEdges?.status === "ok" ? this.lastEdges.candidates : undefined;
+        this.ownMeasure = { ...measureRule(rows, s, { horizonMs: this.horizonMs(), tests }), at: Date.now() };
+      } while (this.measureAgain);
+    } catch (e) {
+      this.o.log.warn("measuring your rule failed", { err: String(e) });
+    } finally {
+      this.measuring = false;
+    }
+    this.pilot();
+    return this.ownMeasure;
+  }
+
+  /** You changed the rule by hand with the autopilot on: it stays on, and your pick competes (core/autopilot pickRule). */
+  private picked(s: Settings, prev: Settings) {
+    const now = Date.now();
+    this.autopilot = pickRule({ state: this.autopilot, settings: s, prev, report: this.lastEdges, extra: labProofs(this.lab, now), now });
+    try {
+      this.o.store.saveAutopilot(this.autopilot);
+    } catch (e) {
+      this.o.log.warn("autopilot state save failed", { err: String(e) });
+    }
+    // a rule the autopilot had proven needs no measuring; yours is measured before it decides
+    if (this.autopilot.active) this.pilot();
+    else void this.measureOwn();
   }
 
   /** Retrains early when a trained model clearly stopped ranking new coins (once per model). */
@@ -182,7 +243,9 @@ export class Learner {
     try {
       const ap = this.autopilot;
       const incumbent = ap.active && ap.rule ? { rule: ap.rule, after: ap.proofTo ?? 0 } : undefined;
-      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5, horizonMs: this.horizonMs(), incumbent });
+      const own = this.o.engine().settings;
+      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5, horizonMs: this.horizonMs(), incumbent, own });
+      if (rep.own) this.ownMeasure = { ...rep.own, at: rep.generatedAt };
       const before = new Set(this.lastEdges?.survivors.map((x) => x.text) ?? []);
       const fresh = rep.survivors.filter((x) => !before.has(x.text));
       this.lastEdges = rep;
@@ -295,6 +358,8 @@ export class Learner {
         now,
         extra: labProofs(this.lab, now),
         forward: this.autopilot.active ? labForward(this.lab, this.autopilot.active) : undefined,
+        measured: this.ownMeasure,
+        measuring: this.measuring || this.measureAgain,
       });
       this.autopilot = d.state;
       if (d.settings) {
@@ -318,10 +383,14 @@ export class Learner {
     }
   }
 
-  /** The engine's settings changed: turning the autopilot on or off, or a new mode, is acted on at once. */
-  onSettings(s: Settings) {
+  /**
+   * The engine's settings changed: turning the autopilot on or off, or a new mode, is acted on at
+   * once; a rule you pick by hand with the autopilot on competes with the proven ones (picked).
+   */
+  onSettings(s: Settings, why?: { by: "user" | "autopilot"; prev: Settings }) {
     const was = this.seen;
     this.seen = { autopilot: s.autopilot, mode: s.mode };
+    if (why?.by === "user" && why.prev.autopilot && s.autopilot && ruleChanged(why.prev, s)) return this.picked(s, why.prev);
     if (!was || was.autopilot !== s.autopilot || was.mode !== s.mode) this.pilot();
   }
 
@@ -393,13 +462,18 @@ export class Learner {
   /** What the dashboard shows about the autopilot. */
   autopilotView() {
     const now = Date.now();
+    const engine = this.o.engine();
     return autopilotView({
       report: this.lastEdges,
-      settings: this.o.engine().settings,
+      settings: engine.settings,
       state: this.autopilot,
       now,
       extra: labProofs(this.lab, now),
       forward: this.autopilot.active ? labForward(this.lab, this.autopilot.active) : undefined,
+      closed: engine.closed.toArray(),
+      measured: this.ownMeasure,
+      measuring: this.measuring || this.measureAgain,
+      horizonMs: this.horizonMs(),
     });
   }
 

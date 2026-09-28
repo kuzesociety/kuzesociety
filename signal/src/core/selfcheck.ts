@@ -163,10 +163,14 @@ export function ruleDelivers(i: SelfCheckInput): Check {
 export function decisions(st: AutopilotState, now: number): Check {
   const title = "Autopilot decisions are steady";
   const day = st.log.filter((x) => x.at >= now - DAY);
-  const switches = day.filter((x) => /^(Now trading|Back to your own rule|Dropped)/.test(x.what)).length;
+  // an answer to a rule you just picked (within 15 minutes) is not the autopilot changing its mind
+  const answer = (i: number) => day.slice(0, i).some((y) => /^You picked/.test(y.what) && day[i]!.at - y.at <= 15 * 60_000);
+  const switches = day.filter((x, i) => /^(Now trading|Back to your own rule|Dropped)/.test(x.what) && !answer(i)).length;
+  const picks = day.filter((x) => /^You picked/.test(x.what)).length;
+  const yours = picks ? ` You picked the rule ${picks} time${picks === 1 ? "" : "s"} (not counted).` : "";
   if (switches > SELFCHECK.maxSwitches)
-    return { key: "decisions", status: "warn", title, detail: `${switches} rule changes in the last 24 h. A rule should stay until its results turn; this many changes looks like chasing noise.` };
-  return { key: "decisions", status: "ok", title, detail: `${switches} rule change${switches === 1 ? "" : "s"} in the last 24 h.` };
+    return { key: "decisions", status: "warn", title, detail: `${switches} rule changes by the autopilot in the last 24 h. A rule should stay until its results turn; this many changes looks like chasing noise.${yours}` };
+  return { key: "decisions", status: "ok", title, detail: `${switches} rule change${switches === 1 ? "" : "s"} by the autopilot in the last 24 h.${yours}` };
 }
 
 /** 4. What the bot can see. */

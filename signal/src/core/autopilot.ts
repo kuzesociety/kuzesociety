@@ -22,19 +22,23 @@
  *     qualified for it after its proof (after 40, as far as their prices were observed): if either
  *     is clearly worse than it had shown (the upper 95% bound of the average below its worst case
  *     on unseen data), it is benched for a day and the next best, or the user's own rule, takes over.
+ * Your own rule competes too. A rule you pick by hand leaves the autopilot on (pickRule): a rule it
+ * had proven is traded and judged as its own pick; any other becomes your own rule, and a proven
+ * rule replaces it only when it does clearly better (25% more a day at its worst case) than the
+ * best evidence about yours — its own trades once there are 30, until then the newest recordings,
+ * the part on which the search checks its candidates, with the same bar (core/edges measureRule).
  * It changes the rule only — entry, which coins, exits, time limit — never the trade size, the
- * limits or the mode. Changing the rule by hand turns it off (Engine.updateSettings).
+ * limits or the mode. Every decision names the rules it is about, so any of them is one click away.
  */
-import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "./edges.js";
+import { EDGE_METHOD, type EdgeFound, type EdgeReport, type RuleMeasure, edgeRuleFromText, settingsFor } from "./edges.js";
 import type { Position } from "./positions.js";
-import { ruleSummary } from "./presets.js";
-import type { Settings } from "./settings.js";
+import { followsPreset, ruleSummary } from "./presets.js";
+import { type Settings, ruleKey, ruleOf } from "./settings.js";
 import { clusteredMeanCI, hourOf, meanCI } from "./util.js";
 
-const HOUR = 3_600_000;
+export { RULE_KEYS, ruleChanged, ruleKey, ruleOf, touchesRule } from "./settings.js";
 
-/** The settings a trading rule is made of (what a strategy or an edge-finder rule sets). */
-export const RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"] as const;
+const HOUR = 3_600_000;
 
 export const AUTOPILOT = {
   /** an edge-finder answer older than this switches nothing */
@@ -69,15 +73,26 @@ export interface AutopilotState {
   holdReason: string;
   /** rules that failed in practice → until when they are benched */
   benched: Record<string, number>;
-  /** decisions, newest last */
-  log: { at: number; what: string }[];
+  /** decisions, newest last, with the rules each is about */
+  log: { at: number; what: string; rules?: LoggedRule[] }[];
   /** the rule in use as it was proven: valued with it, and tested forward, when a search does not list it again */
   rule?: EdgeFound | null;
   /** the newest would-be entry its proof used; the coins after it are its forward test */
   proofTo?: number;
   /** the proven rule last declined because the user's own rule did better (noted once) */
   keptOwnOver?: string;
+  /** when you last picked the rule by hand */
+  pickedAt?: number;
 }
+
+/** A rule a decision is about, with the settings that trade it: one click puts it back in use. */
+export interface LoggedRule {
+  text: string;
+  settings: Partial<Settings>;
+}
+
+/** Your own rule measured on the recordings (core/edges measureRule), at `at`. */
+export type OwnMeasure = RuleMeasure & { at: number };
 
 export function emptyAutopilot(): AutopilotState {
   return { active: null, since: 0, proof: null, own: null, holding: false, holdReason: "", benched: {}, log: [], rule: null, proofTo: 0 };
@@ -105,34 +120,6 @@ export function worstPerDay(rule: EdgeFound, s: Settings): number {
   return Math.max(0, rule.holdout.lo) * Math.min(rule.tradesPerDay, capacityPerDay(rule, s));
 }
 
-/** The rule part of the settings (a copy). */
-export function ruleOf(s: Settings): Partial<Settings> {
-  const out: Record<string, unknown> = {};
-  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
-  return out as Partial<Settings>;
-}
-
-/** Whether a settings change touches the rule (entry, coins, exits). */
-export function touchesRule(patch: Record<string, unknown>): boolean {
-  return RULE_KEYS.some((k) => k in patch);
-}
-
-/** Whether the rule (entry, coins, exits) differs between two settings. */
-export function ruleChanged(a: Settings, b: Settings): boolean {
-  return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
-}
-
-/** A short fingerprint of the rule (entry, coins, exits): trades opened under it are its track record. */
-export function ruleKey(s: Settings): string {
-  const text = JSON.stringify(ruleOf(s));
-  let h = 0x811c9dc5;
-  for (let i = 0; i < text.length; i++) {
-    h ^= text.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return (h >>> 0).toString(36);
-}
-
 /**
  * What the rule in `s` has actually made, per day and at its worst case, from its own trades
  * (the last 3 days, same mode): the lower end of the 95% range per trade (counted per hour) ×
@@ -153,6 +140,31 @@ export function trackRecord(s: Settings, closed: Position[], now: number): { n: 
 }
 
 const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
+
+/**
+ * What your own rule is worth, per day at its worst case, from the best evidence there is: its
+ * own trades once it has AUTOPILOT.trackMin (trackRecord); until then the newest recordings, the
+ * part the search checks its candidates on, with the same bar (`measured`, while it is fresh and
+ * about this very rule). Null: nothing to go on — the recordings cannot express it, or too few
+ * coins qualified yet.
+ */
+export function ownEvidence(s: Settings, closed: Position[], now: number, measured?: OwnMeasure | null): { v: number; n: number; mean: number; lo: number; perDay: number; from: "trades" | "recordings" } | null {
+  const track = trackRecord(s, closed, now);
+  if (track) return { v: track.v, n: track.n, mean: track.mean, lo: track.lo, perDay: track.perDay, from: "trades" };
+  const m = measured;
+  if (!m || !m.ok || m.key !== ruleKey(s) || now - m.at > AUTOPILOT.freshMs) return null;
+  const perDay = Math.min(m.coinsPerDay, capacityPerDay({ avgHoldMin: m.avgHoldMin, hold: s.maxHoldMin }, s));
+  return { v: Math.max(0, m.lo) * perDay, n: m.n, mean: m.mean, lo: m.lo, perDay, from: "recordings" };
+}
+
+/** Your own rule's evidence in words. */
+function ownWords(own: NonNullable<ReturnType<typeof ownEvidence>>): string {
+  return own.from === "trades"
+    ? `its ${own.n} trades made ${pct(own.mean)} each (at least ${pct(own.lo)}), about ${own.perDay.toFixed(0)} a day`
+    : `on the newest recordings, the part the search checks its candidates on, it made ${pct(own.mean)} per trade on ${own.n} coins (at least ${pct(own.lo)}), about ${own.perDay.toFixed(0)} trades a day at your limits`;
+}
+
+const logged = (r: EdgeFound): LoggedRule => ({ text: r.text, settings: r.settings });
 
 /**
  * What a search can be used for right now: `fresh` — made by the current method, found enough
@@ -189,14 +201,20 @@ export function decideAutopilot(o: {
   extra?: EdgeFound[];
   /** the rule in use on the coins after its proof, when the Lab proved it (core/lab labForward) */
   forward?: EdgeReport["incumbent"];
+  /** your own rule measured on the recordings (ownEvidence) */
+  measured?: OwnMeasure | null;
+  /** your pick is being measured right now: your own rule is not replaced before that is known */
+  measuring?: boolean;
 }): AutopilotDecision {
   const s = o.settings;
   const now = o.now;
   const st: AutopilotState = { ...o.state, benched: { ...o.state.benched }, log: [...o.state.log] };
   const notes: string[] = [];
+  /** the rules the notes are about */
+  const named: LoggedRule[] = [];
   const done = (action: AutopilotDecision["action"], extra: Partial<AutopilotDecision> = {}): AutopilotDecision => {
     const note = notes.join(" ");
-    if (note) st.log = [...st.log, { at: now, what: note }].slice(-30);
+    if (note) st.log = [...st.log, { at: now, what: note, ...(named.length ? { rules: named } : {}) }].slice(-30);
     return { action, note, state: st, ...extra };
   };
   for (const [k, until] of Object.entries(st.benched)) if (until <= now) delete st.benched[k];
@@ -224,6 +242,7 @@ export function decideAutopilot(o: {
       if (m.hi < st.proof.lo) {
         st.benched[st.active] = now + AUTOPILOT.benchMs;
         notes.push(`Dropped "${st.active}": its ${mine.length} trades averaged ${pct(m.mean)}, below the ${pct(st.proof.lo)} worst case it had shown on unseen data. Benched for a day.`);
+        if (st.rule) named.push(logged(st.rule));
         benchedNow = true;
       }
     }
@@ -235,6 +254,7 @@ export function decideAutopilot(o: {
   if (st.active && st.proof && !benchedNow && fwd?.text === st.active && fwd.n >= AUTOPILOT.forwardMin && fwd.hi < st.proof.lo) {
     st.benched[st.active] = now + AUTOPILOT.benchMs;
     notes.push(`Dropped "${st.active}": on ${fwd.n} coins that qualified after it was proven it averaged ${pct(fwd.mean)}, below the ${pct(st.proof.lo)} worst case it had shown. Benched for a day.`);
+    if (st.rule) named.push(logged(st.rule));
     benchedNow = true;
   }
 
@@ -262,15 +282,18 @@ export function decideAutopilot(o: {
     }
   }
 
-  // your own rule, with a track record of its own trades, is replaced only by a rule proven to
-  // do clearly better than it has actually been doing (both counted at their worst case, per day)
+  // your own rule is replaced only by a rule proven to do clearly better than the best evidence
+  // about yours: its own trades, or else the newest recordings with the same bar (both counted at
+  // their worst case, per day). A pick still being measured is not replaced before that is known.
+  const own = st.active === null && !live ? ownEvidence(s, o.closed, now, o.measured) : null;
   if (best && !stands && st.active === null && !live) {
-    const own = trackRecord(s, o.closed, now);
+    if (o.measuring) return done("none");
     if (own && best.v < own.v * AUTOPILOT.better) {
       if (st.keptOwnOver !== best.r.text) {
         st.keptOwnOver = best.r.text;
+        named.push(logged(best.r));
         notes.push(
-          `Kept your own rule: its ${own.n} trades made ${pct(own.mean)} each (at least ${pct(own.lo)}), about ${own.perDay.toFixed(0)} a day — at your size at least ~${(own.v * s.positionSol).toFixed(2)} SOL a day, more than the best proven rule ("${best.r.text}", at least ~${(best.v * s.positionSol).toFixed(2)} SOL a day) would add.`,
+          `Kept your own rule: ${ownWords(own)} — at your size at least ~${(own.v * s.positionSol).toFixed(2)} SOL a day, more than the best proven rule ("${best.r.text}", at least ~${(best.v * s.positionSol).toFixed(2)} SOL a day) would add.`,
         );
       }
       return done("none");
@@ -278,7 +301,8 @@ export function decideAutopilot(o: {
   }
 
   if (best) {
-    if (st.active === null && !st.holding && !st.own) st.own = ruleOf(s);
+    const fromOwn = st.active === null && !st.holding;
+    if (fromOwn && !st.own) st.own = ruleOf(s);
     const was = stands ? st.active : null;
     Object.assign(st, {
       active: best.r.text,
@@ -290,8 +314,16 @@ export function decideAutopilot(o: {
       holdReason: "",
     });
     const sol = best.v * s.positionSol;
+    // what it replaced: your own rule, with what was known about it
+    const yours = !fromOwn || live
+      ? ""
+      : own
+        ? ` Your own rule (${ruleSummary(s)}): ${ownWords(own)} — at least ~${(own.v * s.positionSol).toFixed(2)} SOL a day.`
+        : ` Your own rule (${ruleSummary(s)}) has nothing to show yet: ${o.measured?.key === ruleKey(s) && o.measured.why ? `${o.measured.why}, and ` : ""}it has fewer than ${AUTOPILOT.trackMin} trades of its own.`;
+    named.push(logged(best.r));
+    if (fromOwn && !live) named.push({ text: `your own rule (${ruleSummary(s)})`, settings: ruleOf(s) });
     notes.push(
-      `Now trading: ${best.r.text}. On ${best.r.holdout.n} ${best.r.cond === "lab" ? "coins that came after the Lab invented it" : "trades the search never saw"} it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades and the coins after it.`,
+      `Now trading: ${best.r.text}. On ${best.r.holdout.n} ${best.r.cond === "lab" ? "coins that came after the Lab invented it" : "trades the search never saw"} it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades and the coins after it.${yours}`,
     );
     return done("switch", { rule: best.r, settings: best.r.settings });
   }
@@ -308,17 +340,85 @@ export function decideAutopilot(o: {
   }
   // paper: back to the user's own rule once the rule in use was dropped and nothing proven replaces it
   if (st.active && benchedNow) {
-    const own = st.own;
+    const saved = st.own;
     Object.assign(st, { active: null, proof: null, rule: null, own: null });
-    notes.push(own ? `Back to your own rule (${ruleSummary({ ...s, conds: [], ...own } as Settings)}): ${why}.` : `No proven rule: ${why}.`);
     // a rule saved before rules had conditions has none
-    return done("restore", own ? { settings: { conds: [], ...own } } : {});
+    const back = saved ? { conds: [], ...saved } : null;
+    notes.push(back ? `Back to your own rule (${ruleSummary({ ...s, ...back } as Settings)}): ${why}.` : `No proven rule: ${why}.`);
+    if (back) named.push({ text: `your own rule (${ruleSummary({ ...s, ...back } as Settings)})`, settings: back });
+    return done("restore", back ? { settings: back } : {});
   }
   return done("none");
 }
 
-/** What the dashboard shows about the autopilot: the rule in use, the ranking, and recent decisions. */
-export function autopilotView(o: { report: EdgeReport | null; settings: Settings; state: AutopilotState; now: number; extra?: EdgeFound[]; forward?: EdgeReport["incumbent"] }) {
+/**
+ * You picked the rule by hand with the autopilot on (`prev`: the settings before). A rule it has
+ * proven (listed now and not benched) is traded and judged like its own pick; any other becomes
+ * your own rule, which a proven rule replaces only when it does clearly better (decideAutopilot).
+ * The autopilot stays on either way.
+ */
+export function pickRule(o: { state: AutopilotState; settings: Settings; prev: Settings; report: EdgeReport | null; extra?: EdgeFound[]; now: number }): AutopilotState {
+  const s = o.settings;
+  const now = o.now;
+  const st: AutopilotState = { ...o.state, benched: { ...o.state.benched }, log: [...o.state.log], keptOwnOver: undefined, pickedAt: now };
+  const { trusted } = evidenceOf(o.report, now);
+  const proven = [...(trusted ? o.report!.survivors : []), ...(o.extra ?? [])].find((r) => !((st.benched[r.text] ?? 0) > now) && followsPreset(s, r.settings));
+  const note = (what: string, rules: LoggedRule[]) => {
+    st.log = [...st.log, { at: now, what, rules }].slice(-30);
+    return st;
+  };
+  if (proven) {
+    // the rule put back when no proven rule is left: yours from before, if it was yours
+    if (st.active === null && !st.own) st.own = ruleOf(o.prev);
+    Object.assign(st, {
+      active: proven.text,
+      since: now,
+      proof: { mean: proven.holdout.mean, lo: proven.holdout.lo, n: proven.holdout.n },
+      rule: proven,
+      proofTo: proven.cond === "lab" ? now : (o.report?.cutoff ?? o.report?.generatedAt ?? now),
+    });
+    return note(`You picked "${proven.text}", a rule proven on data the search never saw: the autopilot trades it and judges it like its own picks — on its own trades and on the coins after its proof.`, [logged(proven)]);
+  }
+  Object.assign(st, { active: null, proof: null, rule: null, own: null });
+  return note(
+    `You picked your own rule: ${ruleSummary(s)}. The autopilot stays on and keeps it unless a proven rule does clearly better (${Math.round((AUTOPILOT.better - 1) * 100)}% more a day at its worst case) — judged on its own trades once it has ${AUTOPILOT.trackMin}, until then on the newest recordings with the same bar as the proven rules.`,
+    [{ text: `your own rule (${ruleSummary(s)})`, settings: ruleOf(s) }],
+  );
+}
+
+/** Your own rule on the dashboard: being measured, what the autopilot weighs it by, or why there is nothing yet. */
+export type OwnView =
+  | { measuring: true }
+  | { from: "trades" | "recordings"; n: number; mean: number; lo: number; perDay: number; worstSolPerDay: number }
+  | { why: string };
+
+/** The rules an older decision names, read back from its words (decisions made before they kept their rules). */
+function rulesInWords(what: string, horizonMs: number): LoggedRule[] {
+  const out: LoggedRule[] = [];
+  const add = (text: string) => {
+    const r = edgeRuleFromText(text);
+    if (r && !out.some((x) => x.text === text)) out.push({ text, settings: settingsFor(r, horizonMs) });
+  };
+  for (const m of what.matchAll(/Dropped "([^"]+)"/g)) add(m[1]!);
+  for (const m of what.matchAll(/Now trading: (Buy .+?)\. On \d/g)) add(m[1]!);
+  for (const m of what.matchAll(/best proven rule \("([^"]+)"/g)) add(m[1]!);
+  return out;
+}
+
+/** What the dashboard shows about the autopilot: the rule in use, the ranking, your own rule's evidence, and recent decisions. */
+export function autopilotView(o: {
+  report: EdgeReport | null;
+  settings: Settings;
+  state: AutopilotState;
+  now: number;
+  extra?: EdgeFound[];
+  forward?: EdgeReport["incumbent"];
+  closed?: Position[];
+  measured?: OwnMeasure | null;
+  measuring?: boolean;
+  /** how long would-be trades are followed (a rule without a time limit is traded with this one) */
+  horizonMs?: number;
+}) {
   const s = o.settings;
   const report = o.report;
   const live = s.mode === "live";
@@ -326,6 +426,8 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
   const ranking = [...(report?.status === "ok" ? report.survivors : []), ...(o.extra ?? [])]
     .map((r) => ({
       text: r.text,
+      settings: r.settings,
+      inUse: followsPreset(s, r.settings),
       perTrade: r.holdout.mean,
       worstPerTrade: r.holdout.lo,
       unseenTrades: r.holdout.n,
@@ -339,6 +441,18 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
     .sort((a, b) => b.worstSolPerDay - a.worstSolPerDay);
   const inc = o.forward ?? report?.incumbent;
   const fwd = inc && inc.text === o.state.active ? inc : null;
+  // your own rule, while it is the one in use: what the autopilot weighs it by
+  const ev = o.state.active === null ? ownEvidence(s, o.closed ?? [], o.now, o.measured) : null;
+  const m = o.measured && o.measured.key === ruleKey(s) ? o.measured : null;
+  const own: OwnView | null =
+    o.state.active !== null
+      ? null
+      : o.measuring
+        ? { measuring: true as const }
+        : ev
+          ? { from: ev.from, n: ev.n, mean: ev.mean, lo: ev.lo, perDay: ev.perDay, worstSolPerDay: ev.v * s.positionSol }
+          : { why: m?.why ?? (m ? "its measure is out of date; the next search measures it again" : "it is measured at the next search (every 2 hours)") };
+  const horizonMs = o.horizonMs ?? 6 * HOUR;
   return {
     on: s.autopilot,
     live,
@@ -355,7 +469,12 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
     reportAt: report?.generatedAt ?? 0,
     trusted,
     ranking: ranking.slice(0, 8),
-    log: o.state.log.slice(-12).reverse(),
+    /** your own rule's evidence while it is in use (ownEvidence), or why there is none yet */
+    own,
+    log: o.state.log
+      .slice(-12)
+      .reverse()
+      .map((x) => ({ at: x.at, what: x.what, rules: (x.rules ?? rulesInWords(x.what, horizonMs)).map((r) => ({ ...r, inUse: followsPreset(s, r.settings) })) })),
   };
 }
 
