@@ -9,7 +9,9 @@ What the system knows, how it knows it, and what nobody knows yet. Numbers marke
 | Bonding-curve and PumpSwap quotes are exact | Proven | `test/curve.test.ts`: integer math matches the official SDKs on random states; fee tiers match `calculateFeeTier` |
 | Events are decoded correctly | Proven for published layouts | `test/decode.test.ts`: create, trade (current and older, shorter versions), complete, migration, pool creation, PumpSwap buy/sell; random garbage never throws |
 | Paper accounting is consistent | Proven | balance + open cost − proceeds = start + realized, within 10 lamports, under random trading |
-| The learning pipeline finds real edges and rejects fake ones | Proven on synthetic data | `node dist/research.mjs selftest`: planted edge AUC 0.93 → 0.98 after training, top decile +65% vs bottom half −16%; pure noise AUC 0.51 and the go-live check refuses |
+| The learning pipeline finds real edges and rejects fake ones | Proven on synthetic data | `node dist/research.mjs selftest` (the server's own learner, judged on coins it never trained on): planted edge AUC 0.79 → 0.89, top decile +100% vs bottom half −19%; pure noise AUC 0.49 and the go-live check refuses |
+| The learner finds combinations of signals, and does not mistake noise for them | Proven on synthetic data | `test/learn.test.ts`: an edge that lives in a combination (XOR) of two inputs, which no weighted sum can rank (AUC < 0.58), is learned by the trees (AUC > 0.75 on unseen coins); on pure noise the trees stay out, because they must beat the weighted sum by a one-sided 5% test counted per coin |
+| A new score replaces the current one only when it predicts unseen coins better | Proven | `test/learn.test.ts`: retraining on the same data waits for newer coins; the comparison uses only rows neither model has seen; a working model is not traded for one that ranks worse |
 | The server survives crashes and long runs | Proven | kill −9 and restart restores positions, settings and the scaled model; 12 simulated hours (3.9 M events) with zero errors |
 | The entry logic buys at the right moment | Fixed and tested | One entry per coin at its first qualifying crossing; see section 5 for the simulator comparison |
 | Score 75+ makes money on the real market | **Unknown** | Requires recorded live data. The server records from day one, and the go-live check stays red until the evidence is there |
@@ -116,15 +118,76 @@ Results that good were checked for a bug before being believed. The recorded 10-
 
 **The widened search on the simulator** (30 simulated hours, 6 launches per minute, predictability 0.4). Fixed-point entries now carry the same facts as score entries, so the search covers both: 141,722 would-be trades (70,030 score entries, 60,806 age snapshots, 10,283 curve-progress points, 628 post-graduation points), 65,472 rules scored in 70 seconds (families with too few trades are skipped), 20 re-checked on each family's own unseen hours, 20 held up, placebo 0 in 3 shuffled runs. Fixed points were among the best: *every coin 20 s after launch with 30+ buyers* (+167% per trade on 109 unseen trades) and *halfway to graduation within its first minute* (+129% on 211), alongside the score-95 rules. As before, this is the simulator's momentum, not a pump.fun finding: it shows the wider search runs end to end, keeps each family honest on its own unseen data, and makes every rule it finds directly tradable (`entryAt`).
 
-## 7. Method
+## 7. Smarter learning (*sim*)
 
-- **Outcome tracking.** Every coin that passes basic sanity is followed from fixed checkpoints (20 s, 45 s, 90 s, 3, 6 and 12 min on the curve; 25/50/75% curve progress; 1, 5, 15 and 60 min after graduation), at every signal, and at its first entry moment for each score level from 50 to 95, as if bought with the configured size and a landing delay. Each follow-up resolves on target, stop, dead coin or a 6-hour horizon, for the user's TP/SL and for a 5 × 4 grid of alternatives.
-- **Score scale.** `score = 50 + 12.5 · log2(odds / reference odds)`: 75 is 4× the odds of an average coin at that moment, and each +12.5 doubles them again. The shipped prior is rescaled to the live population during the first minutes; entries wait for that (`warming_up`).
-- **Learning.** A regularized logistic model per stage (curve, graduated) is refit every few hours on resolved checkpoints. A new model replaces the current one only if it wins on newer data it never saw (walk-forward), and is calibrated before use.
+What limited the old learner, and what replaced it (`src/core/learn.ts`, `boost.ts`, `insight.ts`):
+
+| Old | Why it hurt | Now |
+|---|---|---|
+| A weighted sum of the 36 inputs | Cannot learn combinations: heavy buying is good *unless* the dev already sold; bundles matter early, not late | The weighted sum **plus small decision trees** (depth 3) fitted to what it gets wrong, with early stopping. Trees are used only when they beat the sum on newer coins by more than luck |
+| Trained on age snapshots only | The bot buys at a different moment: the first time a coin reaches a score, usually on a burst of buying. Snapshots flatter that moment, and in the no-signal world the old model's probabilities at those moments were worse than the prior's | Also trains on those **buy moments** (the first crossing of each score level), one row per coin moment |
+| Label = "the user's own TP/SL hit first" | Changing TP/SL (a strategy switch) silently mixed different targets in the training data | The label comes from each outcome's exit grid: a trade at the model's target (+100% / −50%) ended in profit. It means the same thing whatever the settings were |
+| New vs. current compared on the newest quarter of rows | The current model had usually been trained on most of those rows already, so the comparison was not fair. With trees, a model that memorized them would never be replaced | Compared only on rows **neither** model has seen (after the current model's own training data), by a paired test counted per coin |
+| Newest outcomes used as they came in | Samples are written when every exit they are followed for has resolved, so among the newest moments quick crashes are in and slow winners are not yet | Only finished cohorts (older than the 6-hour follow-up), as the edge finder does |
+| Market cap, curve progress and SOL in the curve all used on the curve | They are one number seen three ways, so the fit gave two of them large opposite weights that cancel, and the "why this score" reasons showed both | Market cap only on the curve |
+| Trained scores on the raw odds scale | A calibrated model puts most coins far below 50 and 8–14% of coin moments above 75 (the prior: ~5%), so the user's minimum score suddenly let more coins through once the first model was trained. With only a few slots, the bot then fills them with whichever qualifying coins come first, so a *sharper* model made trades *worse* at the same minimum score | Trained scores are **anchored** like the prior's: the median coin moment scores 50 and the top 5% 75, at every retrain. The minimum score keeps selecting about the same share of coins, and a better ranking makes those coins better |
+| Blocked the server for seconds while learning (reading days of samples, fitting) | Stops and exits wait meanwhile | Everything runs in slices of about 15 ms; the longest pause measured during a learning run is ~0.1 s |
+
+**Result on coins neither learner saw** (three 24-hour simulated worlds, 8,700 launches each, 75% of the coins to learn from and the newest 25% to judge on; "buy moments" are the first time a coin reached a score, what the bot actually buys; top 10% = the tenth of buy moments each model rated highest, average net result at +100% / −50%):
+
+| World | Learner | Ranks winners above losers (AUC), snapshots · buy moments | Log-loss at buy moments | Top 10% · top 25% of buy moments |
+|---|---|---|---|---|
+| predictability 0.7 | prior | 0.835 · 0.758 | 0.585 | +68.9% · +44.1% |
+| | old | 0.892 · 0.860 | 0.438 | +96.4% · +68.4% |
+| | **new** (128 trees) | **0.923 · 0.871** | **0.386** | +95.9% · +69.2% |
+| predictability 0.35 | prior | 0.791 · 0.687 | 0.619 | +42.1% · +32.8% |
+| | old | 0.862 · 0.803 | 0.517 | +70.2% · +51.9% |
+| | **new** (132 trees) | **0.882 · 0.818** | **0.461** | **+74.9% · +54.4%** |
+| predictability 0 | prior | 0.669 · 0.619 | 0.638 | +45.9% · +28.6% |
+| | old | 0.786 · 0.666 | 0.659 | +58.1% · +33.4% |
+| | **new** (190 trees) | **0.840 · 0.755** | **0.523** | **+82.5% · +53.3%** |
+
+All buy moments together averaged +8.7% to +9.9% in these worlds. The gain is largest where the prior's assumptions are weakest (predictability 0: early order flow reveals nothing about a coin's hidden quality, but the simulator's momentum, rugs and bundles still leave patterns that combine). On shuffled outcomes the learner adopts nothing that ranks (AUC ≈ 0.50), and against a working model it does not adopt noise.
+
+**Trading, not just ranking.** Ranking better is only worth something if the bot makes more with it. Two tests, both at the user's default plan (buy when a coin first reaches 75 and holds, +100% / −50%, 0.1 SOL, 3 positions at a time, 4-hour limit, every cost and a 1.5 s delay):
+
+*A fresh market* (6 simulated hours no model had seen, models trained on an earlier simulated day):
+
+| World | Old learner, as it shipped | Old learner + anchored scale | New learner |
+|---|---|---|---|
+| predictability 0 | 54 trades, +36.4% each, **+1.97 SOL** | 75 trades, +42.9%, +3.22 SOL | 85 trades, +54.4%, **+4.62 SOL** (half the drawdown) |
+| predictability 0.35 | 47 trades, +34.1% each, **+1.60 SOL** | 76 trades, +56.0%, +4.25 SOL | 75 trades, +65.1%, **+4.88 SOL** |
+
+Counting every coin that first reached 75 on that market (not only the ones 3 slots could hold), in the no-signal world: old 544 coins at +33.9% each, old anchored 315 at +47.1%, new 444 at +54.0%.
+
+*Learning while trading* (the whole loop as the server runs it: 24 simulated hours, the bot trades with its current score, records outcomes and retrains every 6 hours; profit from hour 6, when the first model can be trained, to hour 24):
+
+| World | Seed | Old learner, as it shipped | Old learner + anchored scale | New learner |
+|---|---|---|---|---|
+| predictability 0 | 77 | +10.02 SOL | +7.39 SOL | +7.92 SOL |
+| | 78 | +7.40 SOL | +6.30 SOL | **+14.76 SOL** |
+| | 79 | +10.91 SOL | +10.90 SOL | **+16.26 SOL** |
+| | total | +28.3 SOL | +24.6 SOL | **+38.9 SOL** |
+| predictability 0.35 | 77 | +7.75 SOL | — | **+9.98 SOL** |
+| | 78 | +4.93 SOL | +14.63 SOL | +14.31 SOL |
+| | 79 | +5.92 SOL | +10.09 SOL | +9.10 SOL |
+| | total | +18.6 SOL | — | **+33.4 SOL** |
+
+Without learning (the prior, seed 77) the same hours made +0.01 SOL and +0.67 SOL. The new learner beat the old one in 5 of 6 runs. Where early flow says something (0.35), most of the gain is the anchored scale — the old learner with it does about as well; where it says nothing about a coin's hidden quality (0), the anchored scale alone does not help the old learner and the gain comes from what the new one learns. Single 6-hour stretches swing by ±1.5 SOL, which is why there are three seeds.
+
+The finding that made the anchored scale necessary: the first version of the new learner kept the raw odds scale, and at the default plan it made *less* than the old learner over the same 24 hours (seed 77: +7.3 vs +10.3 SOL at predictability 0, +4.5 vs +8.1 SOL at 0.35) while ranking better. A sharper model put twice as many coins above 75; with 3 slots the bot takes whichever qualifying coin comes first, so the extra, weaker ones crowded out the good ones. At a higher minimum score (90) the same model beat the old one (+6.14 vs +5.93 SOL, profit factor 6.65 vs 4.57). Anchoring the scale makes the user's minimum mean the same share of coins after every retrain.
+
+As everywhere in this document: these are properties of the simulator, which shows that the learner finds what is in the data and refuses what is not. How much it helps on pump.fun is measured by the server on its own outcomes — the Learn tab's **What the bot learned** shows, for coins the score has never seen, how often it ranks a winner above a loser and whether the win chances it gives match what happened.
+
+## 8. Method
+
+- **Outcome tracking.** Every coin that passes basic sanity is followed from fixed checkpoints (20 s, 45 s, 90 s, 3, 6 and 12 min on the curve; 25/50/75% curve progress; 1, 5, 15 and 60 min after graduation), at every signal, and at its first entry moment for each score level from 50 to 95, as if bought with the configured size and a landing delay. Each follow-up resolves on target, stop, dead coin or a 6-hour horizon, for the user's TP/SL and for an 8 × 6 grid of alternatives.
+- **Score scale.** A straight line in the model's log-odds, anchored on the population of coin moments: 50 is the typical moment and 75 the top ~5%. The shipped prior is rescaled to the live population during the first minutes (its weights get one temperature so scores spread ~16 points around 50); entries wait for that (`warming_up`). A trained model is anchored at each training: its calibrated log-odds at the median checkpoint scores 50 and at the 95th percentile 75. Trained models used to keep the raw odds scale (`50 + 12.5 · log2(odds / reference odds)`), on which a calibrated model puts most coins far below 50 and 8–14% of moments above 75 (the prior: ~5%), so the user's minimum score let more coins through the moment the first model was trained, and even more with a sharper model; see section 7.
+- **Learning.** Every few hours, per stage (curve, graduated), on finished outcomes: fixed checkpoints and first crossings of each score level, one row per coin moment (rows of one coin within 3 s are one moment), labelled from the exit grid for the model's target. Rows are split by coin in time order: the older 60% to fit, the next 15% to calibrate (Platt) and to stop the trees, the newest 25% to check. Recipe 1 is a logistic model shrunk toward the current weights (L2, recency half-life 3 days); recipe 2 adds gradient-boosted trees (depth 3, learning rate 0.08, quantile histograms, early stopping) on its logit. Recipe 2 is kept only if its log-loss beats recipe 1's by ≥ 1.65 standard errors, counted per coin. The winner replaces the current model only if, on checking rows the current model has not seen either (≥ 200 with ≥ 10 wins), its log-loss is lower by ≥ 0.001 and ≥ 1.5 standard errors per coin, and it does not rank worse (AUC −0.005). It is then refitted on every row before going live. The score's reference odds are the win rate of checkpoints (all coins, not just the surges). Between runs, the model is checked every 2 hours on finished outcomes of coins it has not seen; if its ranking falls clearly below what it showed when adopted (or to chance), it retrains early.
 - **Go-live check.** Passes only with ≥150 resolved signals at the user's exact settings **and** a 95% lower confidence bound on the average net return above +2% per trade.
 - **Auto-tune (optional, paper only).** Searches 10 thresholds × 20 exit pairs. A suggestion must clear a multiple-comparison-corrected bound (z = 3.5) and be positive separately in the older and the newer half of the data.
 
-## 8. Sources
+## 9. Sources
 
 - pump.fun fees: https://pump.fun/docs/fees
 - pump.fun program docs and IDLs: https://github.com/pump-fun/pump-public-docs

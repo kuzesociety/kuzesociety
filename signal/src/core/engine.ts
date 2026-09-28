@@ -13,7 +13,7 @@ import { LAMPORTS_PER_SOL } from "./curve.js";
 import { ammPostReserves } from "./decode.js";
 import { type RawFeatures, MarketPulse, extractFeatures, featureVector } from "./features.js";
 import { Funnel, type SignalRecord } from "./funnel.js";
-import { type ModelSpec, type ScoreResult, type StageKey, priorModel, scoreToken, validateModel } from "./model.js";
+import { type ModelSpec, type ScoreResult, type StageKey, priorModel, scalePrior, scoreToken, validateModel } from "./model.js";
 import { NarrativeIndex } from "./narratives.js";
 import { ENTRY_LEVELS, type EntryFacts, OutcomeTracker, type Sample } from "./outcomes.js";
 import {
@@ -30,7 +30,6 @@ import {
 import { DEFAULT_SETTINGS, type Settings, exitPlanFrom, sanitizeSettings } from "./settings.js";
 import { type TokenState, TokenState as Token } from "./token.js";
 import type { AmmSwap, MarketEvent, TradeEvent } from "./types.js";
-import { FEATURE_KEYS } from "./features.js";
 import { type Logger, Ring, clamp, newId, rng, silentLogger } from "./util.js";
 import { WalletBook } from "./wallets.js";
 
@@ -1223,40 +1222,7 @@ export class Engine {
       if (rows.length < minRows) continue;
       const base = this.priorBase.stages[stage];
       const cur = this.model.stages[stage];
-      const n = rows.length;
-      const blend = n / (n + 600);
-      const mean: Record<string, number> = {};
-      const std: Record<string, number> = {};
-      FEATURE_KEYS.forEach((k, j) => {
-        let m = 0;
-        for (const r of rows) m += r[j]!;
-        m /= n;
-        let v = 0;
-        for (const r of rows) v += (r[j]! - m) ** 2;
-        const sd = Math.sqrt(v / Math.max(1, n - 1));
-        const pm = base.mean[k] ?? 0;
-        const ps = base.std[k] ?? 1;
-        mean[k] = (1 - blend) * pm + blend * m;
-        // never let a rare feature's tiny spread blow its z-scores up
-        std[k] = Math.max((1 - blend) * ps + blend * sd, 0.5 * ps, 1e-6);
-      });
-      // spread of the linear predictor under the base weights
-      const lin: number[] = [];
-      for (const r of rows) {
-        let s2 = 0;
-        FEATURE_KEYS.forEach((k, j) => {
-          s2 += (base.weights[k] ?? 0) * clamp((r[j]! - mean[k]!) / std[k]!, -5, 5);
-        });
-        lin.push(s2);
-      }
-      const lm = lin.reduce((a, b) => a + b, 0) / lin.length;
-      const lsd = Math.sqrt(lin.reduce((a, b) => a + (b - lm) ** 2, 0) / Math.max(1, lin.length - 1));
-      const k = lsd > 1e-6 ? clamp(0.85 / lsd, 0.15, 3) : 1;
-      const weights: Record<string, number> = {};
-      for (const key of FEATURE_KEYS) weights[key] = (base.weights[key] ?? 0) * k;
-      // centre: the average scored coin lands at 50
-      const bias = base.bias - lm * k;
-      this.model.stages[stage] = { ...cur, mean, std, weights, bias, pRef: base.pRef };
+      this.model.stages[stage] = { ...cur, ...scalePrior(base, rows), pRef: base.pRef };
       changed = true;
     }
     if (changed) {

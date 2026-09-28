@@ -6,13 +6,12 @@ import { ENTRY_POINTS } from "../../core/settings";
 import { pct } from "../format";
 import { api, toast, useApp } from "../store";
 import { Empty, Tag } from "../ui";
+import { WhatItLearned } from "./learned";
 
 export function Learn() {
   const settings = useApp((s) => s.settings);
-  const health = useApp((s) => s.health);
   const [r, setR] = useState<LearnReport | null>(null);
   const [err, setErr] = useState("");
-  const [training, setTraining] = useState(false);
   const load = () =>
     api<LearnReport>("/api/learn?days=14")
       .then(setR)
@@ -49,6 +48,8 @@ export function Learn() {
           settings ≈ <b>{pct(r.breakEven)}</b> (fees, delay and stop slippage included).
         </p>
       </div>
+
+      <WhatItLearned />
 
       <EdgeFinder mode={settings?.mode ?? "paper"} />
 
@@ -195,75 +196,22 @@ export function Learn() {
         )}
       </div>
 
-      <div class="grid two" style="margin-top:12px">
-        <div class="card">
-          <h2>Your paper results</h2>
-          <dl class="kv">
-            <dt>Closed trades</dt>
-            <dd>{r.paper.trades}</dd>
-            <dt>Win rate</dt>
-            <dd>{pct(r.paper.winRate)}</dd>
-            <dt>Profit</dt>
-            <dd class={r.paper.pnlSol >= 0 ? "good" : "bad"}>{r.paper.pnlSol.toFixed(3)} SOL</dd>
-            <dt>Average trade</dt>
-            <dd>{Number.isFinite(r.paper.avgPct) ? `${r.paper.avgPct.toFixed(1)}%` : "—"}</dd>
-            <dt>Profit factor</dt>
-            <dd>{Number.isFinite(r.paper.profitFactor) ? r.paper.profitFactor.toFixed(2) : "—"}</dd>
-            <dt>Worst drawdown</dt>
-            <dd>{r.paper.maxDrawdownSol.toFixed(3)} SOL</dd>
-          </dl>
-        </div>
-        <div class="card">
-          <h2>Scoring model</h2>
-          <dl class="kv">
-            <dt>Version</dt>
-            <dd>{r.model.version}</dd>
-            <dt>Source</dt>
-            <dd>{r.model.source === "trained" ? "trained on this server's data" : "prior (market mechanics), self-scaled"}</dd>
-            {r.model.training && (
-              <>
-                <dt>Validation AUC</dt>
-                <dd>
-                  {r.model.training.valAuc?.toFixed(3)} (was {r.model.training.priorValAuc?.toFixed(3)})
-                </dd>
-                <dt>Trained on</dt>
-                <dd>{r.model.training.rows.toLocaleString()} outcomes</dd>
-              </>
-            )}
-            <dt>Last training</dt>
-            <dd>{health?.learner?.lastRun ? new Date(health.learner.lastRun).toLocaleString() : "not yet"}</dd>
-          </dl>
-          {(health?.learner?.reports?.length ?? 0) > 0 && (
-            <ul class="muted" style="font-size:12.5px;padding-left:18px">
-              {health!.learner.reports.map((x: any) => (
-                <li key={x.stage}>
-                  {x.stage}: {x.reason}
-                </li>
-              ))}
-            </ul>
-          )}
-          <button
-            class="btn sm"
-            disabled={training}
-            onClick={async () => {
-              setTraining(true);
-              try {
-                const res = await api<{ reports: any[] }>("/api/learn/run", {});
-                toast(res.reports.some((x) => x.adopted) ? "New model adopted" : "Current model kept");
-                void load();
-              } catch (e) {
-                toast(String((e as Error).message));
-              } finally {
-                setTraining(false);
-              }
-            }}
-          >
-            {training ? "Training…" : "Retrain now"}
-          </button>
-          <p class="faint" style="font-size:12px;margin-bottom:0">
-            The model retrains every few hours on outcomes recorded here and is swapped only when it beats the current one on newer data it did not train on.
-          </p>
-        </div>
+      <div class="card" style="margin-top:12px">
+        <h2>Your paper results</h2>
+        <dl class="kv">
+          <dt>Closed trades</dt>
+          <dd>{r.paper.trades}</dd>
+          <dt>Win rate</dt>
+          <dd>{pct(r.paper.winRate)}</dd>
+          <dt>Profit</dt>
+          <dd class={r.paper.pnlSol >= 0 ? "good" : "bad"}>{r.paper.pnlSol.toFixed(3)} SOL</dd>
+          <dt>Average trade</dt>
+          <dd>{Number.isFinite(r.paper.avgPct) ? `${r.paper.avgPct.toFixed(1)}%` : "—"}</dd>
+          <dt>Profit factor</dt>
+          <dd>{Number.isFinite(r.paper.profitFactor) ? r.paper.profitFactor.toFixed(2) : "—"}</dd>
+          <dt>Worst drawdown</dt>
+          <dd>{r.paper.maxDrawdownSol.toFixed(3)} SOL</dd>
+        </dl>
       </div>
     </div>
   );

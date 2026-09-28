@@ -296,9 +296,10 @@ export async function main() {
     log,
     everyHours: config.learnEveryHours,
     sampleDays: config.sampleDays,
-    onAdopt: (v) => telegram?.send(`🧠 New scoring model adopted: ${v}`),
+    onAdopt: (m) => telegram?.send(m),
     onTune: (m) => telegram?.send(m),
     onEdges: (m) => telegram?.send(m),
+    onDrift: (m) => telegram?.send(m),
   });
   learner.start();
 
@@ -317,6 +318,7 @@ export async function main() {
       about: () => ({ version, update: !!updater?.available, data: dataSource() }),
       strategies: () => strategyList(learner.lastEdges),
       edges: () => ({ report: learner.lastEdges, running: learner.edgesRunning }),
+      learning: () => server?.learning() ?? null,
       links: () => {
         const out: { label: string; url: string }[] = [];
         const lanIp = lanAddress();

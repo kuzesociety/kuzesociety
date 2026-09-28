@@ -194,6 +194,14 @@ describe("built server end-to-end", () => {
     const run = await (await api("/api/edges/run", { method: "POST", headers: { "content-type": "application/json", "x-signal": "1" }, body: "{}" })).json();
     expect(run.report.status).toBe("not_enough_data");
     expect((await (await api("/api/edges")).json()).report.status).toBe("not_enough_data");
+    // so does learning: nothing has finished yet, so the starting assumptions stay, and the run is in the history
+    const learned = await (await api("/api/learn/run", { method: "POST", headers: { "content-type": "application/json", "x-signal": "1" }, body: "{}" })).json();
+    expect(learned.reports.some((r: { adopted: boolean }) => r.adopted)).toBe(false);
+    const view = (await (await api("/api/learning")).json()).view;
+    expect(view.model.source).toBe("prior");
+    expect(view.model.recipe).toEqual({ curve: "prior", amm: "prior" });
+    expect(view.history.length).toBe(1);
+    expect(view.fresh.every((f: { verdict: string }) => f.verdict === "not_enough")).toBe(true);
   }, 60_000);
 
   it("sets up from the dashboard: keys are tested before saving, a wallet only from this computer", async () => {

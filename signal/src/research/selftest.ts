@@ -3,25 +3,26 @@
  * with real data.
  *
  *  Positive control — a simulated world where early behaviour DOES reveal a coin's
- *  future: the learner must find it (validation AUC well above 0.5, top-scored coins
- *  outperform) on data it never trained on.
+ *  future: the learner (the same one the server runs) must find it and adopt a model that
+ *  ranks coins well (AUC well above 0.5) and whose top-scored moments outperform, on coins
+ *  it never trained on.
  *
- *  Negative control — the same samples with outcomes shuffled (any pattern is now pure
- *  luck): the learner must find nothing (AUC ≈ 0.5) and the go-live gate must refuse.
+ *  Negative control — the same moments with outcomes shuffled (any pattern is now pure
+ *  luck): the learner must find nothing (AUC ≈ 0.5 on unseen coins) and the go-live gate
+ *  must refuse.
  */
 import { Engine } from "../core/engine.js";
-import { auc, evaluate, fitStage, type TrainRow } from "../core/learn.js";
-import { priorModel } from "../core/model.js";
-import type { Sample } from "../core/outcomes.js";
+import { evaluate, labelOf, trainAndSelect, trainingRows, type TrainRow } from "../core/learn.js";
+import { type ModelSpec, priorModel, scoreVector } from "../core/model.js";
+import { GRID, type Sample } from "../core/outcomes.js";
 import { buildReport } from "../core/report.js";
+import { DEFAULT_SETTINGS } from "../core/settings.js";
 import { rng } from "../core/util.js";
 import { MarketSim } from "../sim/market.js";
-import { linear, standardize } from "../core/model.js";
-import { DEFAULT_SETTINGS } from "../core/settings.js";
 
 export interface SelfTestResult {
   samples: number;
-  positive: { priorAuc: number; trainedAuc: number; topDecileRet: number; bottomHalfRet: number };
+  positive: { priorAuc: number; trainedAuc: number; recipe: string; trees: number; topDecileRet: number; bottomHalfRet: number };
   negative: { trainedAuc: number; gatePass: boolean; gateVerdict: string };
   passed: boolean;
   notes: string[];
@@ -50,8 +51,13 @@ export function collectSamples(hours: number, predictability: number, seed: numb
   return samples;
 }
 
-function rowsOf(samples: Sample[]): TrainRow[] {
-  return samples.filter((s) => s.kind === "checkpoint" && s.stage === "curve").map((s) => ({ ts: s.ts, stage: s.stage, x: s.x, y: s.y }));
+/** Coins in order of first appearance: the older share to learn from, the rest to test on. */
+function splitByCoin(samples: Sample[], share: number): { learn: Sample[]; test: Sample[] } {
+  const first = new Map<string, number>();
+  for (const s of samples) if (!first.has(s.mint) || s.ts < first.get(s.mint)!) first.set(s.mint, s.ts);
+  const coins = [...first.entries()].sort((a, b) => a[1] - b[1]).map((e) => e[0]);
+  const testCoins = new Set(coins.slice(Math.floor(coins.length * share)));
+  return { learn: samples.filter((s) => !testCoins.has(s.mint)), test: samples.filter((s) => testCoins.has(s.mint)) };
 }
 
 export async function pipelineSelfTest(opts: { hours?: number; seed?: number; log?: (m: string) => void } = {}): Promise<SelfTestResult> {
@@ -60,46 +66,58 @@ export async function pipelineSelfTest(opts: { hours?: number; seed?: number; lo
   const notes: string[] = [];
   log(`simulating ${hours}h of an "edge" world…`);
   const samples = collectSamples(hours, 0.9, opts.seed ?? 5).filter((s) => s.stage === "curve");
-  const cps = samples.filter((s) => s.kind === "checkpoint").sort((a, b) => a.ts - b.ts);
-  const cut = Math.floor(cps.length * 0.7);
-  const train = rowsOf(cps.slice(0, cut));
-  const test = cps.slice(cut);
-  const testRows = rowsOf(test);
-  const prior = priorModel().stages.curve;
-  const priorAuc = evaluate(prior, testRows).auc;
-  const trained = fitStage(prior, train);
-  const trainedAuc = evaluate(trained, testRows).auc;
-  const preds = test.map((s) => linear(trained, standardize(trained, s.x)));
-  const order = preds.map((p, i) => i).sort((a, b) => preds[b]! - preds[a]!);
-  const top = order.slice(0, Math.max(1, Math.floor(order.length / 10))).map((i) => test[i]!.ret);
-  const bottom = order.slice(Math.floor(order.length / 2)).map((i) => test[i]!.ret);
+  const prior: ModelSpec = { ...priorModel(0), scaledAt: 1 };
+  const target = prior.target;
+  const { learn, test } = splitByCoin(samples, 0.7);
+  const learnRows = trainingRows(learn, target);
+  const testRows = trainingRows(test, target);
+  const trained = trainAndSelect(prior, learnRows, { now: 1 });
+  const rep = trained.reports.find((r) => r.stage === "curve")!;
+  const priorAuc = evaluate(prior.stages.curve, testRows).auc;
+  const trainedAuc = evaluate(trained.model.stages.curve, testRows).auc;
+  // what the score's top picks earned: every moment of the test coins, at the model's target exit
+  const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
+  const moments = test.filter((s) => s.kind !== "signal" && labelOf(s, target) !== null);
+  const preds = moments.map((s) => scoreVector(trained.model, "curve", s.x).p);
+  const order = preds.map((_, i) => i).sort((a, b) => preds[b]! - preds[a]!);
   const avg = (x: number[]) => x.reduce((a, b) => a + b, 0) / Math.max(1, x.length);
-  log(`positive control: prior AUC ${priorAuc.toFixed(3)}, trained AUC ${trainedAuc.toFixed(3)} on unseen data`);
+  const retOf = (i: number) => moments[i]!.grid[gi]!;
+  const top = order.slice(0, Math.max(1, Math.floor(order.length / 10))).map(retOf);
+  const bottom = order.slice(Math.floor(order.length / 2)).map(retOf);
+  log(`positive control: ${rep.adopted ? "adopted" : "did NOT adopt"} ${rep.recipe === "trees" ? `weighted sum + ${rep.treeCount} trees` : "weighted sum"}; AUC on unseen coins ${priorAuc.toFixed(3)} (prior) → ${trainedAuc.toFixed(3)}`);
 
-  // negative control: shuffle outcomes across samples
+  // negative control: shuffle outcomes across moments — nothing real is left to learn
   const r = rng(99);
-  const shuffled = cps.map((s) => ({ ...s }));
-  const outcomes = shuffled.map((s) => ({ y: s.y, ret: s.ret, grid: s.grid }));
-  for (let i = outcomes.length - 1; i > 0; i--) {
+  const shuffle = (rows: TrainRow[]) => {
+    const ys = rows.map((x) => x.y);
+    for (let i = ys.length - 1; i > 0; i--) {
+      const j = Math.floor(r() * (i + 1));
+      [ys[i], ys[j]] = [ys[j]!, ys[i]!];
+    }
+    return rows.map((x, i) => ({ ...x, y: ys[i]! }));
+  };
+  const nLearn = shuffle(learnRows);
+  const nTest = shuffle(testRows);
+  const noise = trainAndSelect(prior, nLearn, { now: 2 });
+  const nAuc = evaluate(noise.model.stages.curve, nTest).auc;
+  // the go-live gate on the noise model's own signals: every moment re-scored, outcomes shuffled
+  const perm = moments.map((_, i) => i);
+  for (let i = perm.length - 1; i > 0; i--) {
     const j = Math.floor(r() * (i + 1));
-    [outcomes[i], outcomes[j]] = [outcomes[j]!, outcomes[i]!];
+    [perm[i], perm[j]] = [perm[j]!, perm[i]!];
   }
-  shuffled.forEach((s, i) => Object.assign(s, outcomes[i]));
-  const nTrain = rowsOf(shuffled.slice(0, cut));
-  const nTest = rowsOf(shuffled.slice(cut));
-  const nTrained = fitStage(prior, nTrain);
-  const nAuc = evaluate(nTrained, nTest).auc;
-  // re-score shuffled test samples with the shuffled-trained model and ask the gate
-  const rescored = shuffled.slice(cut).map((s) => ({ ...s, kind: "signal" as const, score: 50 + (linear(nTrained, standardize(nTrained, s.x)) - Math.log(nTrained.pRef / (1 - nTrained.pRef))) * 18.03 }));
+  const rescored = moments.map((s, i) => {
+    const o = moments[perm[i]!]!;
+    return { ...s, kind: "signal" as const, y: o.y, ret: o.ret, grid: o.grid, score: scoreVector(noise.model, "curve", s.x).score };
+  });
   const report = buildReport(rescored, { ...DEFAULT_SETTINGS, minScore: 60 }, priorModel(), [], Date.now());
-  log(`negative control: trained AUC ${nAuc.toFixed(3)}; gate: ${report.gate.verdict}`);
+  log(`negative control: AUC on unseen coins ${nAuc.toFixed(3)}; gate: ${report.gate.verdict}`);
 
-  const passed = trainedAuc > 0.62 && trainedAuc >= priorAuc - 0.02 && avg(top) > avg(bottom) && Math.abs(nAuc - 0.5) < 0.06 && !report.gate.pass;
+  const passed = rep.adopted && trainedAuc > 0.62 && trainedAuc >= priorAuc - 0.02 && avg(top) > avg(bottom) && Math.abs(nAuc - 0.5) < 0.06 && !report.gate.pass;
   if (!passed) notes.push("self-test did not meet all criteria — inspect the numbers above");
-  void auc;
   return {
     samples: samples.length,
-    positive: { priorAuc, trainedAuc, topDecileRet: avg(top), bottomHalfRet: avg(bottom) },
+    positive: { priorAuc, trainedAuc, recipe: rep.recipe ?? "none", trees: rep.treeCount ?? 0, topDecileRet: avg(top), bottomHalfRet: avg(bottom) },
     negative: { trainedAuc: nAuc, gatePass: report.gate.pass, gateVerdict: report.gate.verdict },
     passed,
     notes,

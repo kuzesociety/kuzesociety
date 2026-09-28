@@ -129,7 +129,7 @@ export function Bot() {
                 ) : (
                   "Collecting data on how often coins reach each score…"
                 )}{" "}
-                75 ≈ 4× the odds of an average coin; each +12.5 doubles the odds again.
+                50 is a typical coin moment and 75 the top 5% (the score keeps that meaning when it learns): higher means better odds.
               </>
             }
           >

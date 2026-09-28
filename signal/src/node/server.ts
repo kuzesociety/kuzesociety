@@ -12,6 +12,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "../core/engine.js";
 import { type ApiContext, accountSummary, handleApi } from "../core/api.js";
+import { type LearningView, learningViewAsync } from "../core/insight.js";
 import type { Logger } from "../core/util.js";
 import { type Config, describeConfig, isPublicRpc } from "./config.js";
 import type { Learner } from "./learner.js";
@@ -87,6 +88,7 @@ export class DashboardServer {
       logs: () => ctx.log.tail.toArray().slice(-200).reverse(),
       edges: () => (ctx.learner.lastEdges ? { ...ctx.learner.lastEdges, running: ctx.learner.edgesRunning } : null),
       edgesRun: () => ctx.learner.findEdges(),
+      learning: () => this.learning(),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;
         // the engine's onSettings hook already broadcasts the change to open dashboards
@@ -104,20 +106,53 @@ export class DashboardServer {
     this.server.headersTimeout = 70_000;
   }
 
-  private sampleCache: { days: number; at: number; data: ReturnType<DataStore["loadSamples"]> } | null = null;
+  private sampleCache: { days: number; at: number; data: Promise<ReturnType<DataStore["loadSamples"]>> } | null = null;
   private sampleCacheTimer: NodeJS.Timeout | null = null;
 
-  /** The Learn tab refreshes every minute; reading days of samples from disk each time is wasteful. */
+  /**
+   * The Learn tab refreshes every minute; reading days of samples from disk each time is wasteful.
+   * Reads pause often (trading goes on meanwhile), and requests that arrive during one share it.
+   */
   private cachedSamples(days: number) {
     const c = this.sampleCache;
     if (c && c.days === days && Date.now() - c.at < 5 * 60_000) return c.data;
-    const data = this.ctx.store.loadSamples(days);
+    const data = this.ctx.store.loadSamplesAsync(days);
     this.sampleCache = { days, at: Date.now(), data };
+    data.catch(() => {
+      if (this.sampleCache?.data === data) this.sampleCache = null;
+    });
     // let the memory go when nobody is looking at the Learn tab
     if (this.sampleCacheTimer) clearTimeout(this.sampleCacheTimer);
     this.sampleCacheTimer = setTimeout(() => (this.sampleCache = null), 6 * 60_000);
     this.sampleCacheTimer.unref?.();
     return data;
+  }
+
+  private learningCache: { at: number; key: string; view: Promise<LearningView> } | null = null;
+
+  /** What the scoring model learned (Learn tab, Telegram /learn); rebuilt at most every 30 s. */
+  learning(): Promise<LearningView> {
+    const e = this.ctx.engine();
+    const l = this.ctx.learner;
+    const key = `${e.model.version}|${l.lastRun}|${l.running}`;
+    const c = this.learningCache;
+    if (c && c.key === key && Date.now() - c.at < 30_000) return c.view;
+    const model = e.model;
+    // outcomes on disk (the Learn tab loads the same days): the newest describe recent coins, the
+    // finished ones feed the check on coins the model has not seen
+    const view = this.cachedSamples(14).then((samples) =>
+      learningViewAsync(model, {
+        recent: samples.length ? samples : e.samples.toArray(),
+        horizonMs: e.cfg.outcomeHorizonMs,
+        history: l.history.slice(-20),
+        status: { running: l.running, lastRun: l.lastRun, nextRun: l.nextRun, lastError: l.lastError, everyHours: this.ctx.config.learnEveryHours },
+      }),
+    );
+    this.learningCache = { at: Date.now(), key, view };
+    view.catch(() => {
+      if (this.learningCache?.view === view) this.learningCache = null;
+    });
+    return view;
   }
 
   listen(port: number, host: string): Promise<void> {

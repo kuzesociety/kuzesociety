@@ -33,7 +33,7 @@ import type { PersistedState } from "../core/engine.js";
 import type { ModelSpec } from "../core/model.js";
 import { validateModel } from "../core/model.js";
 import type { Sample } from "../core/outcomes.js";
-import type { Logger } from "../core/util.js";
+import { type Logger, runSteps, runStepsAsync } from "../core/util.js";
 
 const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 
@@ -48,8 +48,11 @@ const day = (ts: number) => new Date(ts).toISOString().slice(0, 10);
  */
 export const SAMPLE_LIMITS = { checkpoints: 40_000, structural: 20_000, entries: 25_000 };
 
-/** Calls `fn` for every non-empty line, reading 1 MB at a time (multi-byte safe). */
-export function forEachLine(path: string, fn: (line: string) => void) {
+/**
+ * Calls `fn` for every non-empty line, reading 1 MB at a time (multi-byte safe), and pauses
+ * after each megabyte (see runSteps) so a live bot is never frozen by a big file.
+ */
+export function* forEachLineSteps(path: string, fn: (line: string) => void): Generator<void> {
   const fd = openSync(path, "r");
   try {
     const buf = Buffer.allocUnsafe(1 << 20);
@@ -61,12 +64,18 @@ export function forEachLine(path: string, fn: (line: string) => void) {
       const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
       rest = lines.pop() ?? "";
       for (const l of lines) if (l) fn(l);
+      yield;
     }
     rest += dec.end();
     if (rest) fn(rest);
   } finally {
     closeSync(fd);
   }
+}
+
+/** The same in one go. */
+export function forEachLine(path: string, fn: (line: string) => void) {
+  runSteps(forEachLineSteps(path, fn));
 }
 const hour = (ts: number) => new Date(ts).toISOString().slice(0, 13);
 
@@ -172,6 +181,15 @@ export class DataStore {
    * so memory stays bounded however much has been recorded.
    */
   loadSamples(days: number, now = Date.now(), limits = SAMPLE_LIMITS): Sample[] {
+    return runSteps(this.loadSamplesSteps(days, now, limits));
+  }
+
+  /** The same, pausing every few milliseconds so trading goes on while days of samples are read. */
+  loadSamplesAsync(days: number, now = Date.now(), limits = SAMPLE_LIMITS): Promise<Sample[]> {
+    return runStepsAsync(this.loadSamplesSteps(days, now, limits));
+  }
+
+  private *loadSamplesSteps(days: number, now: number, limits: typeof SAMPLE_LIMITS): Generator<void, Sample[]> {
     const cutoff = day(now - days * 86_400_000);
     let files: string[] = [];
     try {
@@ -193,7 +211,7 @@ export class DataStore {
       if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;
       const got: Record<Bucket, Sample[]> = { cp: [], st: [], en: [] };
       try {
-        forEachLine(join(this.dir, "samples", f), (line) => {
+        yield* forEachLineSteps(join(this.dir, "samples", f), (line) => {
           const b = bucketOf(line);
           if (room[b] <= 0) return; // skip parsing what would be dropped
           let s: Sample;
@@ -261,6 +279,22 @@ export class DataStore {
     writeFileAtomic(join(this.dir, "models", "current.json"), JSON.stringify(m, null, 1));
     const safe = m.version.replace(/[^A-Za-z0-9_.-]/g, "_");
     writeFileAtomic(join(this.dir, "models", `${safe}.json`), JSON.stringify(m));
+    this.pruneModels();
+  }
+
+  /** Earlier models are kept for reference, the newest few only (with trees each is ~100 KB). */
+  private pruneModels(keep = 20) {
+    try {
+      const dir = join(this.dir, "models");
+      const old = readdirSync(dir)
+        .filter((f) => f.endsWith(".json") && f !== "current.json" && f !== "history.json")
+        .map((f) => ({ f, t: statSync(join(dir, f)).mtimeMs }))
+        .sort((a, b) => b.t - a.t)
+        .slice(keep);
+      for (const x of old) rmSync(join(dir, x.f), { force: true });
+    } catch (e) {
+      this.log.warn("could not prune old models", { err: String(e) });
+    }
   }
 
   loadModel(): ModelSpec | null {
@@ -271,6 +305,22 @@ export class DataStore {
       return validateModel(m) ? m : null;
     } catch {
       return null;
+    }
+  }
+
+  /** What each training run tried and decided (the dashboard's learning history). */
+  saveLearnHistory(runs: unknown[]) {
+    writeFileAtomic(join(this.dir, "models", "history.json"), JSON.stringify(runs));
+  }
+
+  loadLearnHistory(): unknown[] {
+    const p = join(this.dir, "models", "history.json");
+    if (!existsSync(p)) return [];
+    try {
+      const runs = JSON.parse(readFileSync(p, "utf8"));
+      return Array.isArray(runs) ? runs : [];
+    } catch {
+      return [];
     }
   }
 

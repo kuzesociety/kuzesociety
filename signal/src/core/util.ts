@@ -23,6 +23,27 @@ export function newId(prefix = ""): string {
   return prefix + Date.now().toString(36) + idCounter.toString(36) + Math.random().toString(36).slice(2, 6);
 }
 
+/** Runs a step generator (long work that pauses now and then) to completion in one go. */
+export function runSteps<T>(it: Generator<void, T>): T {
+  for (;;) {
+    const r = it.next();
+    if (r.done) return r.value;
+  }
+}
+
+/** Runs a step generator, handing control back every ~15 ms so a live bot keeps up with the market. */
+export async function runStepsAsync<T>(it: Generator<void, T>, sliceMs = 15): Promise<T> {
+  let t = Date.now();
+  for (;;) {
+    const r = it.next();
+    if (r.done) return r.value;
+    if (Date.now() - t > sliceMs) {
+      await new Promise((res) => setTimeout(res, 0));
+      t = Date.now();
+    }
+  }
+}
+
 /** Deterministic PRNG (mulberry32) for simulations and tests. */
 export function rng(seed: number): () => number {
   let s = seed >>> 0;

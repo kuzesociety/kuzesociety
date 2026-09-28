@@ -5,6 +5,7 @@
  */
 import type { EdgeReport } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
+import type { LearningView } from "../core/insight.js";
 import type { Position } from "../core/positions.js";
 import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
 import type { Logger } from "../core/util.js";
@@ -40,6 +41,8 @@ export class Telegram {
       links?: () => { label: string; url: string }[];
       /** the edge finder's latest answer, and whether it is running now */
       edges?: () => { report: EdgeReport | null; running: boolean };
+      /** what the scoring model learned */
+      learning?: () => Promise<LearningView | null> | LearningView | null;
     },
   ) {}
 
@@ -113,7 +116,7 @@ export class Telegram {
         }
         if (chat !== String(this.o.chatId)) continue;
         try {
-          this.send(this.command(text));
+          this.send(await this.reply(text));
         } catch (e) {
           this.send(`⚠️ ${esc(String(e))}`);
         }
@@ -149,6 +152,15 @@ export class Telegram {
       .join("\n");
   }
 
+  /** The reply to a chat message: commands that need a moment of work (reading outcomes) are awaited. */
+  async reply(text: string): Promise<string> {
+    if (text.split(/\s+/)[0]!.toLowerCase().replace(/@.*/, "") === "/learn") {
+      const v = await this.o.learning?.();
+      return v ? learningMessage(v) : "Learning is not available here.";
+    }
+    return this.command(text);
+  }
+
   /** Execute a chat command and return the reply (exported behaviour is tested). */
   command(text: string): string {
     const e = this.o.engine();
@@ -162,6 +174,7 @@ export class Telegram {
           "/status — bot, P&amp;L, market data, version",
           "/strategy — list the strategies · /strategy 2 — switch to one",
           "/edges — has the bot found an edge? (checked every 2 h)",
+          "/learn — what the score learned, and is it still working?",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -317,5 +330,41 @@ export function edgesMessage(r: EdgeReport | null, running: boolean, now = Date.
     if (near) lines.push(`Closest try: ${esc(near.text)} — ${signedPct(near.discovery.mean)} while searching, ${signedPct(near.holdout.mean)} on unseen data.`);
   }
   lines.push(`Luck check: on shuffled data the same search "finds" ${r.placebo.avgSurvivors.toFixed(1)} rules on average.`);
+  return lines.join("\n");
+}
+
+const agoText = (t: number, now: number) => {
+  const m = Math.max(0, Math.round((now - t) / 60_000));
+  return m < 120 ? `${m} min ago` : m < 2_880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1_440)} days ago`;
+};
+
+/** What the score learned and whether it still works, for the phone. */
+export function learningMessage(v: LearningView, now = Date.now()): string {
+  const recipeText = (r?: string, trees?: number) =>
+    r === "trees" ? `weighted sum + ${trees ?? 0} trees (learns combinations)` : r === "linear" ? "weighted sum, fitted to your data" : "starting assumptions";
+  const lines = [
+    `🧠 <b>What the score learned</b>`,
+    v.model.source === "trained" ? `Trained ${agoText(v.model.createdAt, now)} on this bot's own outcomes.` : "Still on the starting assumptions: it learns once enough outcomes have finished (the first try is 20 min after start).",
+    `Bonding curve: ${recipeText(v.model.recipe.curve, v.model.trees.curve)} · Graduated: ${recipeText(v.model.recipe.amm, v.model.trees.amm)}`,
+  ];
+  for (const f of v.fresh) {
+    if (f.verdict === "not_enough") continue;
+    const where = f.stage === "amm" ? "graduated" : "curve";
+    const mark = f.verdict === "working" ? "🟢" : f.verdict === "slipping" ? "🟠" : "🔴";
+    lines.push(`${mark} On ${f.n.toLocaleString("en-US")} ${where} coins it had not seen, it ranked winners above losers ${(f.auc * 100).toFixed(0)}% of the time (50% = a coin toss).`);
+  }
+  if (v.fresh.every((f) => f.verdict === "not_enough")) lines.push("⏳ Not enough finished outcomes of coins it has not seen yet to check it.");
+  const d = v.drivers.curve ?? v.drivers.amm;
+  if (d?.length) {
+    const arrow = (x: string) => (x === "up" ? "↑" : x === "down" ? "↓" : "↕");
+    lines.push(`Moves the score most: ${d
+      .slice(0, 5)
+      .map((x) => `${arrow(x.dir)} ${esc(x.label)}`)
+      .join(" · ")}`);
+  }
+  const last = v.history[v.history.length - 1];
+  if (last) lines.push(`Last learning run ${agoText(last.at, now)}: ${last.adopted ? "switched to a better score" : esc(last.stages.map((s) => s.reason).find(Boolean) ?? "kept the current score")}.`);
+  if (v.status.running) lines.push("Learning right now…");
+  else if (v.status.nextRun > now) lines.push(`Next run in ${Math.max(1, Math.round((v.status.nextRun - now) / 60_000))} min.`);
   return lines.join("\n");
 }

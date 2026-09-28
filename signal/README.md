@@ -52,9 +52,13 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 ## 3. How the score works
 
-- **Scale.** `score = 50 + 12.5 · log2(odds / odds of an average coin)`. 50 means an average scored coin; 75 means 4× the odds of hitting your target before your stop; each +12.5 doubles the odds again. It is a fixed scale, so "75+" means the same thing every day. How *often* coins reach it depends on the market.
+- **Scale.** The score ranks coins by their odds of hitting your target before your stop (higher is always better odds) on a fixed scale: **50 is a typical coin moment and 75 the top 5%** of moments. The starting model is scaled that way from the live market in its first minutes. A trained model is anchored the same way each time it learns, so a sharper model makes the bot pickier within the same share of coins, rather than letting more coins past your minimum score. How *often* coins reach 75 still moves with the market. Once trained, each coin also shows its win chance, P(win), in **Why this score**.
 - **Inputs (36 features).** Buyer inflow and acceleration, distinct buyers, buy/sell mix, whale share, dev holdings and dev selling, launch-block bundles, sniper supply, top-10 concentration, drawdown from peak, smart wallets (learned from the order flow), fresh-wallet share, socials, tweet links, narrative clusters (copycats versus the leader), serial launchers, market heat, liquidity, and time since graduation. **Why this score** on each coin shows the top reasons in points.
-- **Learning.** Every eligible coin is followed from fixed checkpoints, as if bought with your size and delay, until the target or the stop is hit. These resolved outcomes retrain the model every few hours (`LEARN_EVERY_HOURS`). A new model replaces the current one only if it wins on newer data it never saw (walk-forward).
+- **Learning.** Every eligible coin is followed as if bought with your size and delay, until the target or the stop is hit: from fixed checkpoints in its life, and from the moment it first reaches each score level, which is exactly when the bot buys. Every few hours (`LEARN_EVERY_HOURS`) the score is refitted on these finished outcomes in two ways:
+  - as a weighted sum of the inputs;
+  - as the weighted sum plus small decision trees, which learn combinations a sum cannot ("heavy buying, *but* the dev already sold").
+
+  The better recipe replaces the current score only if it predicts newer coins, which neither of them has seen, better by more than luck. If the score clearly stops working on new coins, it retrains early. **Learn → What the bot learned** shows what moves the score now (and how that differs from the starting assumptions), whether it still works on coins it has never seen, and every learning run. Telegram: `/learn`.
 - **First start.** The shipped prior is rescaled to the live market in the first few minutes. Entries wait for that. The funnel reports this as `warming_up`.
 
 ## 4. Bot settings (Bot tab or Telegram)
@@ -76,7 +80,7 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 **Why no trade?** The Bot tab shows, for the last hour, how many coins were scored, how many reached your score, what was bought, and exactly why the rest were blocked.
 
-Telegram commands: `/status /positions /pause /resume /strategy /edges /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
+Telegram commands: `/status /positions /pause /resume /strategy /edges /learn /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
 
 ## 5. Is it making money?
 
@@ -84,6 +88,7 @@ Background, costs, break-even tables and simulator findings: [`docs/RESEARCH.md`
 
 
 The **Learn** tab answers this with your own data:
+- **what the bot learned**: the score's recipe, the inputs that move it most (↑ raises, ↓ lowers, ↕ depends on the rest) against the starting assumptions, how well it ranks coins it has never seen (and whether the win chance it gives matches what happened), and the history of learning runs
 - outcome by score bucket (win rate and average net result with a 95% range)
 - a threshold table (coins per hour versus result)
 - a take-profit × stop-loss heat map for coins above your score
@@ -96,7 +101,7 @@ Exact replays on recorded data are available through the research CLI:
 node dist/research.mjs report   --data ./data --score 75 --tp 100 --sl 50
 node dist/research.mjs replay   --data ./data --score 75 --tp 100 --sl 50 --scoreonly
 node dist/research.mjs sweep    --data ./data --scores 65,75,85 --tps 50,100,200 --sls 30,50
-node dist/research.mjs train    --data ./data --adopt
+node dist/research.mjs train    --data ./data --adopt          # --notrees: the weighted sum alone
 node dist/research.mjs edges    --data ./data            # the edge finder on your recorded data
 node dist/research.mjs selftest            # proves the learning pipeline finds real edges and rejects fake ones
 ```
@@ -122,13 +127,13 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 67 tests: exact curve math vs the official SDK, decoders, engine, feeds, live signing, memory, end-to-end
+npm test          # 103 tests: exact curve math vs the official SDK, decoders, engine, learning, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
 
 Layout:
-- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning, positions, outcomes, funnel
+- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning (`learn.ts`, boosted trees in `boost.ts`, what it learned in `insight.ts`), positions, outcomes, funnel
 - `src/node`: server: feeds, websocket reconnects, storage, HTTP/SSE API, Telegram, live executor
 - `src/web`: dashboard (Preact, bundled into one HTML file)
 - `src/companion`: the demo page: the same dashboard and engine running on a simulated market in the browser, plus research and a setup wizard

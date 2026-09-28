@@ -9,7 +9,7 @@ import { buildReport } from "./report.js";
 
 export interface ApiContext {
   engine: () => Engine;
-  samples: (days: number) => Sample[];
+  samples: (days: number) => Sample[] | Promise<Sample[]>;
   health: () => Record<string, unknown>;
   learnRun: () => Promise<unknown[]>;
   live?: { status(): unknown; resume(): void; allowed(): boolean };
@@ -17,6 +17,8 @@ export interface ApiContext {
   /** last edge-finder report (null before the first run) */
   edges: () => unknown;
   edgesRun: () => Promise<unknown>;
+  /** what the scoring model learned (core/insight: LearningView) */
+  learning?: () => unknown | Promise<unknown>;
   onSettingsChanged?: () => void;
 }
 
@@ -60,7 +62,7 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ signals: e.funnel.recent.toArray().reverse(), hour: e.funnel.summary(e.clock, 1), day: e.funnel.summary(e.clock, 24) });
       case "/api/learn": {
         const days = Math.min(60, Math.max(1, Number(query.get("days") ?? 14)));
-        const stored = ctx.samples(days);
+        const stored = await ctx.samples(days);
         const samples = stored.length ? stored : e.samples.toArray();
         return ok(buildReport(samples, e.settings, e.model, e.closed.toArray(), Date.now()));
       }
@@ -79,6 +81,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ lines: ctx.logs() });
       case "/api/edges":
         return ok({ report: ctx.edges() ?? null });
+      case "/api/learning":
+        return ok({ view: (await ctx.learning?.()) ?? null });
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));

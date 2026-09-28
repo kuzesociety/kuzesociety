@@ -6,7 +6,8 @@
 import { type ApiContext, accountSummary, handleApi } from "../core/api";
 import { type EdgeReport, findEdgesAsync } from "../core/edges";
 import { Engine, type FeedHealth } from "../core/engine";
-import { trainAndSelect } from "../core/learn";
+import { type LearnRun, learnRunOf, learningViewAsync } from "../core/insight";
+import { trainAndSelectAsync, trainingRows } from "../core/learn";
 import { priorModel } from "../core/model";
 import type { Settings } from "../core/settings";
 import type { AmmSwap, MarketEvent } from "../core/types";
@@ -87,6 +88,7 @@ export function createLocalEngine(o: DemoOptions) {
   let lastAdvance = 0;
   let caughtUp = warmMs === 0;
   let learner = { lastRun: 0, running: false, lastError: "", reports: [] as unknown[] };
+  let history: LearnRun[] = [];
   let edges: EdgeReport | null = null;
 
   /** Releases simulated events up to `until`, spending at most `budgetMs` of main-thread time. */
@@ -169,15 +171,16 @@ export function createLocalEngine(o: DemoOptions) {
     samples: () => [],
     health,
     learnRun: async () => {
+      if (learner.running) return learner.reports;
       learner = { ...learner, running: true };
+      const started = Date.now();
       try {
-        const rows = engine.samples
-          .toArray()
-          .filter((s) => s.kind === "checkpoint")
-          .map((s) => ({ ts: s.ts, stage: s.stage, x: s.x, y: s.y }));
-        const { model, reports } = trainAndSelect(engine.model, rows, { now: Date.now() });
+        // the demo learns from every outcome resolved so far in this page
+        const rows = trainingRows(engine.samples.toArray(), engine.model.target);
+        const { model, reports } = await trainAndSelectAsync(engine.model, rows, { now: Date.now() });
         if (reports.some((r) => r.adopted)) engine.setModel(model);
         learner = { lastRun: Date.now(), running: false, lastError: "", reports };
+        history = [...history, learnRunOf(reports, { at: learner.lastRun, trigger: "manual", version: engine.model.version, rows: rows.length, ms: Date.now() - started })].slice(-20);
         return reports;
       } catch (e) {
         learner = { ...learner, running: false, lastError: String(e) };
@@ -187,6 +190,12 @@ export function createLocalEngine(o: DemoOptions) {
     logs: () => lines.toArray().slice(-200).reverse(),
     edges: () => edges,
     edgesRun: async () => (edges = await findEdgesAsync(engine.samples.toArray(), { placeboRuns: 3 })),
+    learning: () =>
+      learningViewAsync(engine.model, {
+        recent: engine.samples.toArray(),
+        history,
+        status: { running: learner.running, lastRun: learner.lastRun, nextRun: 0, lastError: learner.lastError, everyHours: 0 },
+      }),
   };
 
   const transport: Transport = {

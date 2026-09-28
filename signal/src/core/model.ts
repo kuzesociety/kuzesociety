@@ -1,21 +1,29 @@
 /**
  * Scoring model.
  *
- * A per-stage logistic model predicts P(win) — the chance a position opened now hits
- * the target (default +100% net) before the stop (default −50% net). The SCORE is a
- * fixed log-odds scale, like a credit score:
+ * A per-stage model predicts P(win) — the chance that a position opened now, sold at the
+ * target (default +100% net) or the stop (default −50% net), ends in profit. It is a
+ * weighted sum of the inputs (logistic), plus, once the data supports them, small boosted
+ * trees that learn combinations of inputs (boost.ts). The SCORE ranks coins on a fixed
+ * log-odds scale:
  *
- *     score = 50 + 12.5 · log2( odds(p) / odds(pRef) )
+ *     prior:    score = 50 + 12.5 · log2( odds(p) / odds(pRef) ), scaled so the average coin
+ *               moment scores 50 and about 5% of moments reach 75
+ *     trained:  the same kind of straight line in log-odds, anchored when the model is trained
+ *               so the median coin moment scores 50 and the top 5% of moments 75 (see
+ *               StageModel.scale)
  *
- * 50 = an average eligible token, +12.5 points = double the odds, 75 = 4× the odds,
- * 100 = 16× the odds. The scale does not drift with the market, so "75+" means the
- * same thing every day; how often tokens reach it does change with market heat.
+ * So "75" keeps meaning roughly "the top 5% of coin moments" when a sharper model replaces a
+ * duller one: the bot becomes pickier within the same share of coins, rather than letting
+ * more of them past the user's minimum. How often coins reach it still changes with market
+ * heat between trainings. p (the win chance) is shown next to the score.
  *
  * The shipped weights are a PRIOR built from pump.fun mechanics and known manipulation
  * patterns (bundles, dev dumps, serial launchers, wash volume). The engine re-fits them
  * on its own recorded outcomes (see learn.ts) and only swaps models when the new one
  * wins out-of-sample.
  */
+import { type TreeEnsemble, ensembleContrib, ensembleMargin, validEnsemble } from "./boost.js";
 import { FEATURE_DEFS, FEATURE_KEYS, featureVector, type RawFeatures } from "./features.js";
 import { clamp, logit, sigmoid } from "./util.js";
 
@@ -30,6 +38,48 @@ export interface StageModel {
   std: Record<string, number>;
   /** optional Platt calibration applied to the raw logit: p = σ(a + b·z) */
   calib?: { a: number; b: number };
+  /**
+   * optional boosted trees added to the linear logit (see boost.ts): they learn combinations
+   * of signals and thresholds that a weighted sum cannot
+   */
+  trees?: TreeEnsemble;
+  /** time of the newest row this stage was fitted on (only newer rows are unseen by it) */
+  trainedTo?: number;
+  /**
+   * Where a trained stage puts the score, in calibrated logits: the typical coin moment (the
+   * median) scores 50 and the top 5% of moments 75 — the spread the prior is scaled to. A score
+   * then says how a coin ranks, and a sharper model makes the bot pickier within the same share
+   * of coins instead of letting more of them past the user's minimum. Without it (the prior,
+   * models trained before), the odds scale below applies.
+   */
+  scale?: { at50: number; at75: number };
+}
+
+/** How a model was built, per stage: the shipped prior, a refitted weighted sum, or that plus trees. */
+export type Recipe = "prior" | "linear" | "trees";
+
+/** One input's part in the score, measured on recent coins. */
+export interface Driver {
+  key: string;
+  label: string;
+  /** how far this input moves the score from one coin to the next: average points from its average part */
+  points: number;
+  /** up: more of it raises the score · down: lowers it · mixed: depends on the other inputs */
+  dir: "up" | "down" | "mixed";
+  /** share of all inputs' movement, and the same share for the starting (prior) model on the same coins */
+  share: number;
+  priorShare?: number;
+}
+
+/** How the learner built each stage, kept with the model for the dashboard. */
+export interface ModelInsight {
+  recipe: Partial<Record<StageKey, Recipe>>;
+  /** trees per stage (0 = the weighted sum alone) */
+  trees: Partial<Record<StageKey, number>>;
+  /** rows each stage was trained on, and how many were the moments a bot would buy */
+  rows: Partial<Record<StageKey, { total: number; entries: number }>>;
+  /** when adopted: how often a winner outscored a loser among newer coins it had not seen */
+  auc?: Partial<Record<StageKey, number>>;
 }
 
 export interface ModelSpec {
@@ -51,6 +101,7 @@ export interface ModelSpec {
     priorValAuc?: number;
     priorValLogLoss?: number;
   };
+  insight?: ModelInsight;
 }
 
 const PRIOR_MEAN: Record<string, number> = {
@@ -100,6 +151,48 @@ export function priorModel(now = 0): ModelSpec {
   };
 }
 
+/**
+ * The prior fitted to the market it watches, without any outcomes: feature means and spreads
+ * from a population of feature vectors (blended with the shipped ones while few are in), and
+ * one temperature on all weights so scores spread ~16 points around 50 (≈5% of scored coins
+ * reach 75), centred so the average coin lands at 50. See Engine.normalizePrior.
+ */
+export function scalePrior(base: StageModel, rows: ArrayLike<number>[]): Pick<StageModel, "mean" | "std" | "weights" | "bias"> {
+  const n = rows.length;
+  const blend = n / (n + 600);
+  const mean: Record<string, number> = {};
+  const std: Record<string, number> = {};
+  FEATURE_KEYS.forEach((k, j) => {
+    let m = 0;
+    for (const r of rows) m += r[j]!;
+    m /= n;
+    let v = 0;
+    for (const r of rows) v += (r[j]! - m) ** 2;
+    const sd = Math.sqrt(v / Math.max(1, n - 1));
+    const pm = base.mean[k] ?? 0;
+    const ps = base.std[k] ?? 1;
+    mean[k] = (1 - blend) * pm + blend * m;
+    // never let a rare feature's tiny spread blow its z-scores up
+    std[k] = Math.max((1 - blend) * ps + blend * sd, 0.5 * ps, 1e-6);
+  });
+  // spread of the linear predictor under the base weights
+  const lin: number[] = [];
+  for (const r of rows) {
+    let s2 = 0;
+    FEATURE_KEYS.forEach((k, j) => {
+      s2 += (base.weights[k] ?? 0) * clamp((r[j]! - mean[k]!) / std[k]!, -5, 5);
+    });
+    lin.push(s2);
+  }
+  const lm = lin.reduce((a, b) => a + b, 0) / lin.length;
+  const lsd = Math.sqrt(lin.reduce((a, b) => a + (b - lm) ** 2, 0) / Math.max(1, lin.length - 1));
+  const k = lsd > 1e-6 ? clamp(0.85 / lsd, 0.15, 3) : 1;
+  const weights: Record<string, number> = {};
+  for (const key of FEATURE_KEYS) weights[key] = (base.weights[key] ?? 0) * k;
+  // centre: the average scored coin lands at 50
+  return { mean, std, weights, bias: base.bias - lm * k };
+}
+
 export interface Contribution {
   key: string;
   label: string;
@@ -121,7 +214,7 @@ export interface ScoreResult {
 
 const POINTS_PER_LOGIT = 12.5 / Math.LN2;
 
-export function standardize(stage: StageModel, x: number[]): number[] {
+export function standardize(stage: StageModel, x: ArrayLike<number>): number[] {
   const z = new Array<number>(x.length);
   for (let i = 0; i < x.length; i++) {
     const k = FEATURE_KEYS[i]!;
@@ -138,7 +231,50 @@ export function linear(stage: StageModel, z: number[]): number {
 }
 
 export function scoreFromLogit(stage: StageModel, zLogit: number): number {
+  const sc = stage.scale;
+  if (sc) return clamp(50 + (25 * (zLogit - sc.at50)) / (sc.at75 - sc.at50), 0, 100);
   return clamp(50 + (zLogit - logit(stage.pRef)) * POINTS_PER_LOGIT, 0, 100);
+}
+
+/** Score points per unit of calibrated logit. */
+export function pointsPerLogit(stage: StageModel): number {
+  return stage.scale ? 25 / (stage.scale.at75 - stage.scale.at50) : POINTS_PER_LOGIT;
+}
+
+/** Where each of an ensemble's feature keys sits in this build's feature vector. */
+const keyMaps = new WeakMap<TreeEnsemble, Int32Array>();
+export function treeMap(ens: TreeEnsemble): Int32Array {
+  let m = keyMaps.get(ens);
+  if (!m) {
+    m = Int32Array.from(ens.keys, (k) => FEATURE_KEYS.indexOf(k));
+    keyMaps.set(ens, m);
+  }
+  return m;
+}
+
+/** Uncalibrated logit of a feature vector: the weighted sum plus the trees. */
+export function rawLogit(stage: StageModel, x: ArrayLike<number>): number {
+  const lin = linear(stage, standardize(stage, x));
+  return stage.trees?.trees.length ? lin + ensembleMargin(stage.trees, x, treeMap(stage.trees)) : lin;
+}
+
+/** Calibrated logit of a feature vector (what the score and p come from). */
+export function stageLogit(stage: StageModel, x: ArrayLike<number>): number {
+  const raw = rawLogit(stage, x);
+  return stage.calib ? stage.calib.a + stage.calib.b * raw : raw;
+}
+
+/**
+ * Each input's share of the score for one feature vector, in points (positive helps): the
+ * weighted sum's terms plus the trees' splits credited to the feature they split on.
+ */
+export function contributionPoints(stage: StageModel, x: ArrayLike<number>, z = standardize(stage, x)): Float64Array {
+  const out = new Float64Array(FEATURE_KEYS.length);
+  for (let i = 0; i < out.length; i++) out[i] = (stage.weights[FEATURE_KEYS[i]!] ?? 0) * z[i]!;
+  if (stage.trees?.trees.length) ensembleContrib(stage.trees, x, out, treeMap(stage.trees));
+  const k = (stage.calib?.b ?? 1) * pointsPerLogit(stage);
+  for (let i = 0; i < out.length; i++) out[i] *= k;
+  return out;
 }
 
 export function scoreToken(model: ModelSpec, f: RawFeatures, explain = true): ScoreResult {
@@ -146,24 +282,31 @@ export function scoreToken(model: ModelSpec, f: RawFeatures, explain = true): Sc
   const stage = model.stages[stageKey];
   const x = featureVector(f);
   const z = standardize(stage, x);
-  const lin = linear(stage, z);
-  const pLogit = stage.calib ? stage.calib.a + stage.calib.b * lin : lin;
+  let raw = linear(stage, z);
+  if (stage.trees?.trees.length) raw += ensembleMargin(stage.trees, x, treeMap(stage.trees));
+  const pLogit = stage.calib ? stage.calib.a + stage.calib.b * raw : raw;
   const p = sigmoid(pLogit);
   const score = scoreFromLogit(stage, pLogit);
   let contributions: Contribution[] = [];
   if (explain) {
+    const pts = contributionPoints(stage, x, z);
     for (let i = 0; i < FEATURE_DEFS.length; i++) {
       const d = FEATURE_DEFS[i]!;
-      const w = stage.weights[d.key] ?? 0;
-      if (w === 0) continue;
-      const pts = w * z[i]! * POINTS_PER_LOGIT;
-      if (Math.abs(pts) < 0.5) continue;
-      contributions.push({ key: d.key, label: d.label, value: d.show(f), points: pts, note: pts > 0 ? d.good : d.bad });
+      const v = pts[i]!;
+      if (Math.abs(v) < 0.5) continue;
+      contributions.push({ key: d.key, label: d.label, value: d.show(f), points: v, note: v > 0 ? d.good : d.bad });
     }
     contributions.sort((a, b) => Math.abs(b.points) - Math.abs(a.points));
     contributions = contributions.slice(0, 10);
   }
   return { score, p, calibrated: !!stage.calib && model.source === "trained", stage: stageKey, contributions };
+}
+
+/** Score and probability of a stored feature vector (samples keep theirs), for checks on past coins. */
+export function scoreVector(model: ModelSpec, stage: StageKey, x: ArrayLike<number>): { score: number; p: number } {
+  const st = model.stages[stage];
+  const l = stageLogit(st, x);
+  return { score: scoreFromLogit(st, l), p: sigmoid(l) };
 }
 
 /**
@@ -189,6 +332,10 @@ export function validateModel(m: unknown): m is ModelSpec {
       if (!Number.isFinite(w) || Math.abs(w) > 20) return false;
       if (!Number.isFinite(st.mean[k] ?? 0) || !Number.isFinite(st.std[k] ?? 1)) return false;
     }
+    if (st.calib && !(Number.isFinite(st.calib.a) && Number.isFinite(st.calib.b))) return false;
+    if (st.scale && !(Number.isFinite(st.scale.at50) && Number.isFinite(st.scale.at75) && st.scale.at75 - st.scale.at50 > 1e-3)) return false;
+    // trees from a build with other inputs cannot be read: the model is refused (the prior takes over)
+    if (st.trees !== undefined && !validEnsemble(st.trees, FEATURE_KEYS)) return false;
   }
   return true;
 }

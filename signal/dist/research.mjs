@@ -279,6 +279,23 @@ function newId(prefix = "") {
   idCounter = (idCounter + 1) % 1e6;
   return prefix + Date.now().toString(36) + idCounter.toString(36) + Math.random().toString(36).slice(2, 6);
 }
+function runSteps(it) {
+  for (; ; ) {
+    const r = it.next();
+    if (r.done) return r.value;
+  }
+}
+async function runStepsAsync(it, sliceMs = 15) {
+  let t = Date.now();
+  for (; ; ) {
+    const r = it.next();
+    if (r.done) return r.value;
+    if (Date.now() - t > sliceMs) {
+      await new Promise((res) => setTimeout(res, 0));
+      t = Date.now();
+    }
+  }
+}
 function rng(seed) {
   let s = seed >>> 0;
   return () => {
@@ -1109,6 +1126,282 @@ function* steps(samples, opts) {
 import { mkdirSync as mkdirSync2, readFileSync as readFileSync2 } from "node:fs";
 import { join as join2 } from "node:path";
 
+// src/core/boost.ts
+var BOOST_DEFAULTS = {
+  rounds: 300,
+  lr: 0.08,
+  depth: 3,
+  lambda: 5,
+  minHess: 8,
+  minHessShare: 2e-3,
+  minGain: 0,
+  subsample: 0.8,
+  colsample: 0.8,
+  bins: 32,
+  patience: 25,
+  seed: 17
+};
+var sig = (z) => z >= 0 ? 1 / (1 + Math.exp(-z)) : Math.exp(z) / (1 + Math.exp(z));
+function logLossOf(m, y, w, n = m.length) {
+  let ll = 0;
+  let sw = 0;
+  for (let i = 0; i < n; i++) {
+    const p = Math.min(1 - 1e-9, Math.max(1e-9, sig(m[i])));
+    ll -= w[i] * (y[i] ? Math.log(p) : Math.log(1 - p));
+    sw += w[i];
+  }
+  return sw > 0 ? ll / sw : NaN;
+}
+function* makeCuts(X, n, d, bins, rand) {
+  const take = Math.min(n, 2e4);
+  const pick2 = new Int32Array(take);
+  for (let k = 0; k < take; k++) pick2[k] = n <= take ? k : Math.floor(rand() * n);
+  const cuts = [];
+  const vals = new Float64Array(take);
+  for (let j = 0; j < d; j++) {
+    for (let k = 0; k < take; k++) vals[k] = X[pick2[k] * d + j];
+    vals.sort();
+    const out = [];
+    for (let b = 1; b < bins; b++) {
+      const v = vals[Math.min(take - 1, Math.floor(b / bins * take))];
+      if (v < vals[take - 1] && (out.length === 0 || v > out[out.length - 1])) out.push(v);
+    }
+    cuts.push(Float64Array.from(out));
+    yield;
+  }
+  return cuts;
+}
+function binOf(cuts, x) {
+  let lo = 0;
+  let hi = cuts.length;
+  while (lo < hi) {
+    const mid = lo + hi >> 1;
+    if (cuts[mid] < x) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+function treeOut(t, x, map) {
+  let i = 0;
+  while (t.f[i] >= 0) i = Math.fround(x[map[t.f[i]]]) <= t.t[i] ? t.l[i] : t.r[i];
+  return t.v[i];
+}
+var identity = /* @__PURE__ */ new Map();
+function identityMap(d) {
+  let m = identity.get(d);
+  if (!m) {
+    m = Int32Array.from({ length: d }, (_, i) => i);
+    identity.set(d, m);
+  }
+  return m;
+}
+function ensembleMargin(ens, x, map = identityMap(ens.keys.length)) {
+  let s = 0;
+  for (const t of ens.trees) s += treeOut(t, x, map);
+  return s;
+}
+function ensembleContrib(ens, x, out, map = identityMap(ens.keys.length)) {
+  let bias = 0;
+  for (const t of ens.trees) {
+    let i = 0;
+    bias += t.v[0];
+    while (t.f[i] >= 0) {
+      const at = map[t.f[i]];
+      const next = Math.fround(x[at]) <= t.t[i] ? t.l[i] : t.r[i];
+      out[at] += t.v[next] - t.v[i];
+      i = next;
+    }
+  }
+  return bias;
+}
+function* boostSteps(train, valid, keys, params = {}) {
+  const p = { ...BOOST_DEFAULTS, ...params };
+  const { n, d, X, y, w } = train;
+  const rand = rng(p.seed);
+  const B = Math.max(2, Math.min(255, p.bins));
+  const cuts = yield* makeCuts(X, n, d, B, rand);
+  const nb = cuts.map((c) => c.length + 1);
+  const skip = new Set(p.skip ?? []);
+  const bins = new Uint8Array(n * d);
+  for (let i = 0; i < n; i++) {
+    for (let j = 0; j < d; j++) bins[i * d + j] = binOf(cuts[j], X[i * d + j]);
+    if ((i & 4095) === 4095) yield;
+  }
+  yield;
+  const m = Float64Array.from(train.base);
+  const g = new Float64Array(n);
+  const h = new Float64Array(n);
+  const vm = valid ? Float64Array.from(valid.base) : null;
+  const curve = [valid ? logLossOf(vm, valid.y, valid.w) : logLossOf(m, y, w)];
+  let best = curve[0];
+  let bestRounds = 0;
+  const trees = [];
+  const gains = [];
+  const hist = (rows, feats) => {
+    const hs = new Float64Array(d * B * 2);
+    for (let r = 0; r < rows.length; r++) {
+      const i = rows[r];
+      const gi = g[i];
+      const hi = h[i];
+      const o = i * d;
+      for (let k = 0; k < feats.length; k++) {
+        const j = feats[k];
+        const at = (j * B + bins[o + j]) * 2;
+        hs[at] += gi;
+        hs[at + 1] += hi;
+      }
+    }
+    return hs;
+  };
+  for (let round = 0; round < p.rounds; round++) {
+    let Htot = 0;
+    for (let i = 0; i < n; i++) {
+      const q = sig(m[i]);
+      g[i] = w[i] * (q - y[i]);
+      h[i] = w[i] * Math.max(q * (1 - q), 1e-6);
+      Htot += h[i];
+    }
+    const minH = Math.max(p.minHess, p.minHessShare * Htot);
+    const rowList = [];
+    for (let i = 0; i < n; i++) if (p.subsample >= 1 || rand() < p.subsample) rowList.push(i);
+    const featList = [];
+    for (let j = 0; j < d; j++) if (nb[j] > 1 && !skip.has(j) && (p.colsample >= 1 || rand() < p.colsample)) featList.push(j);
+    if (featList.length === 0 || rowList.length < 2) break;
+    const feats = Int32Array.from(featList);
+    const tree = { f: [], t: [], l: [], r: [], v: [] };
+    const splitBin = [];
+    const gain = new Array(keys.length).fill(0);
+    const leafOf = (G, H) => -G / (H + p.lambda) * p.lr;
+    const newNode = (G, H) => {
+      tree.f.push(-1);
+      tree.t.push(0);
+      tree.l.push(-1);
+      tree.r.push(-1);
+      tree.v.push(leafOf(G, H));
+      splitBin.push(-1);
+      return tree.f.length - 1;
+    };
+    const rootRows = Int32Array.from(rowList);
+    let G0 = 0;
+    let H0 = 0;
+    for (const i of rootRows) {
+      G0 += g[i];
+      H0 += h[i];
+    }
+    const open = [{ id: newNode(G0, H0), rows: rootRows, hs: hist(rootRows, feats), G: G0, H: H0, depth: 0 }];
+    while (open.length) {
+      const node = open.pop();
+      if (node.depth >= p.depth || node.H < 2 * minH) continue;
+      const parentScore = node.G * node.G / (node.H + p.lambda);
+      let bestGain = p.minGain;
+      let bj = -1;
+      let bb = -1;
+      for (let k = 0; k < feats.length; k++) {
+        const j = feats[k];
+        let GL2 = 0;
+        let HL2 = 0;
+        for (let b = 0; b < nb[j] - 1; b++) {
+          const at = (j * B + b) * 2;
+          GL2 += node.hs[at];
+          HL2 += node.hs[at + 1];
+          const HR = node.H - HL2;
+          if (HL2 < minH) continue;
+          if (HR < minH) break;
+          const GR = node.G - GL2;
+          const gn = GL2 * GL2 / (HL2 + p.lambda) + GR * GR / (HR + p.lambda) - parentScore;
+          if (gn > bestGain) {
+            bestGain = gn;
+            bj = j;
+            bb = b;
+          }
+        }
+      }
+      if (bj < 0) continue;
+      const left = [];
+      const right = [];
+      for (const i of node.rows) (bins[i * d + bj] <= bb ? left : right).push(i);
+      const L = Int32Array.from(left);
+      const R = Int32Array.from(right);
+      const small = L.length <= R.length ? L : R;
+      const hsSmall = hist(small, feats);
+      const hsLarge = new Float64Array(node.hs.length);
+      for (let q = 0; q < hsLarge.length; q++) hsLarge[q] = node.hs[q] - hsSmall[q];
+      const hsL = small === L ? hsSmall : hsLarge;
+      const hsR = small === L ? hsLarge : hsSmall;
+      let GL = 0;
+      let HL = 0;
+      for (const i of L) {
+        GL += g[i];
+        HL += h[i];
+      }
+      const li = newNode(GL, HL);
+      const ri = newNode(node.G - GL, node.H - HL);
+      tree.f[node.id] = bj;
+      tree.t[node.id] = cuts[bj][bb];
+      tree.l[node.id] = li;
+      tree.r[node.id] = ri;
+      splitBin[node.id] = bb;
+      gain[bj] += bestGain;
+      open.push({ id: li, rows: L, hs: hsL, G: GL, H: HL, depth: node.depth + 1 });
+      open.push({ id: ri, rows: R, hs: hsR, G: node.G - GL, H: node.H - HL, depth: node.depth + 1 });
+    }
+    if (tree.f[0] < 0) break;
+    for (let i = 0; i < n; i++) {
+      let k = 0;
+      while (tree.f[k] >= 0) k = bins[i * d + tree.f[k]] <= splitBin[k] ? tree.l[k] : tree.r[k];
+      m[i] += tree.v[k];
+    }
+    trees.push(tree);
+    gains.push(gain);
+    let score;
+    if (valid && vm) {
+      const vx = valid.X;
+      for (let i = 0; i < valid.n; i++) {
+        let k = 0;
+        while (tree.f[k] >= 0) k = vx[i * d + tree.f[k]] <= tree.t[k] ? tree.l[k] : tree.r[k];
+        vm[i] += tree.v[k];
+      }
+      score = logLossOf(vm, valid.y, valid.w);
+    } else score = logLossOf(m, y, w);
+    curve.push(score);
+    if (!valid) bestRounds = trees.length;
+    else if (score < best - 1e-7) {
+      best = score;
+      bestRounds = trees.length;
+    } else if (trees.length - bestRounds >= p.patience) break;
+    yield;
+  }
+  const kept = trees.slice(0, bestRounds).map((t) => ({
+    f: t.f,
+    t: t.t.map((v) => Math.fround(v)),
+    l: t.l,
+    r: t.r,
+    v: t.v.map((v) => Math.round(v * 1e6) / 1e6)
+  }));
+  const gainByKey = {};
+  for (let r = 0; r < bestRounds; r++) gains[r].forEach((gv, j) => gv > 0 && (gainByKey[keys[j]] = (gainByKey[keys[j]] ?? 0) + gv));
+  return { ens: { keys: [...keys], trees: kept, gain: gainByKey }, curve, rounds: bestRounds };
+}
+function validEnsemble(ens, featureKeys) {
+  if (!ens || typeof ens !== "object") return false;
+  const e = ens;
+  if (!Array.isArray(e.keys) || !Array.isArray(e.trees) || e.trees.length > 5e3) return false;
+  if (!e.keys.every((k) => typeof k === "string" && featureKeys.includes(k))) return false;
+  for (const t of e.trees) {
+    if (!t || !Array.isArray(t.f)) return false;
+    const n = t.f.length;
+    if (n < 1 || n > 1023 || t.t?.length !== n || t.l?.length !== n || t.r?.length !== n || t.v?.length !== n) return false;
+    for (let i = 0; i < n; i++) {
+      const f2 = t.f[i];
+      if (!Number.isInteger(f2) || f2 >= e.keys.length || !Number.isFinite(t.v[i]) || Math.abs(t.v[i]) > 20) return false;
+      if (f2 >= 0) {
+        if (!Number.isFinite(t.t[i]) || !(t.l[i] > i && t.l[i] < n) || !(t.r[i] > i && t.r[i] < n)) return false;
+      }
+    }
+  }
+  return true;
+}
+
 // src/core/features.ts
 var MarketPulse = class {
   buys = new DecayRate(5 * 6e4);
@@ -1417,6 +1710,38 @@ function priorModel(now = 0) {
     stages: { curve: mk(CURVE_W, 0.12), amm: { ...mk(AMM_W, 0.15), mean: { ...PRIOR_MEAN, liquidity: 4.6, sinceMig: 6, age: 7 } } }
   };
 }
+function scalePrior(base, rows) {
+  const n = rows.length;
+  const blend = n / (n + 600);
+  const mean2 = {};
+  const std = {};
+  FEATURE_KEYS.forEach((k2, j) => {
+    let m = 0;
+    for (const r of rows) m += r[j];
+    m /= n;
+    let v = 0;
+    for (const r of rows) v += (r[j] - m) ** 2;
+    const sd = Math.sqrt(v / Math.max(1, n - 1));
+    const pm = base.mean[k2] ?? 0;
+    const ps = base.std[k2] ?? 1;
+    mean2[k2] = (1 - blend) * pm + blend * m;
+    std[k2] = Math.max((1 - blend) * ps + blend * sd, 0.5 * ps, 1e-6);
+  });
+  const lin = [];
+  for (const r of rows) {
+    let s22 = 0;
+    FEATURE_KEYS.forEach((k2, j) => {
+      s22 += (base.weights[k2] ?? 0) * clamp((r[j] - mean2[k2]) / std[k2], -5, 5);
+    });
+    lin.push(s22);
+  }
+  const lm = lin.reduce((a, b) => a + b, 0) / lin.length;
+  const lsd = Math.sqrt(lin.reduce((a, b) => a + (b - lm) ** 2, 0) / Math.max(1, lin.length - 1));
+  const k = lsd > 1e-6 ? clamp(0.85 / lsd, 0.15, 3) : 1;
+  const weights = {};
+  for (const key of FEATURE_KEYS) weights[key] = (base.weights[key] ?? 0) * k;
+  return { mean: mean2, std, weights, bias: base.bias - lm * k };
+}
 var POINTS_PER_LOGIT = 12.5 / Math.LN2;
 function standardize(stage, x) {
   const z = new Array(x.length);
@@ -1433,31 +1758,66 @@ function linear(stage, z) {
   return s;
 }
 function scoreFromLogit(stage, zLogit) {
+  const sc = stage.scale;
+  if (sc) return clamp(50 + 25 * (zLogit - sc.at50) / (sc.at75 - sc.at50), 0, 100);
   return clamp(50 + (zLogit - logit(stage.pRef)) * POINTS_PER_LOGIT, 0, 100);
+}
+function pointsPerLogit(stage) {
+  return stage.scale ? 25 / (stage.scale.at75 - stage.scale.at50) : POINTS_PER_LOGIT;
+}
+var keyMaps = /* @__PURE__ */ new WeakMap();
+function treeMap(ens) {
+  let m = keyMaps.get(ens);
+  if (!m) {
+    m = Int32Array.from(ens.keys, (k) => FEATURE_KEYS.indexOf(k));
+    keyMaps.set(ens, m);
+  }
+  return m;
+}
+function rawLogit(stage, x) {
+  const lin = linear(stage, standardize(stage, x));
+  return stage.trees?.trees.length ? lin + ensembleMargin(stage.trees, x, treeMap(stage.trees)) : lin;
+}
+function stageLogit(stage, x) {
+  const raw = rawLogit(stage, x);
+  return stage.calib ? stage.calib.a + stage.calib.b * raw : raw;
+}
+function contributionPoints(stage, x, z = standardize(stage, x)) {
+  const out = new Float64Array(FEATURE_KEYS.length);
+  for (let i = 0; i < out.length; i++) out[i] = (stage.weights[FEATURE_KEYS[i]] ?? 0) * z[i];
+  if (stage.trees?.trees.length) ensembleContrib(stage.trees, x, out, treeMap(stage.trees));
+  const k = (stage.calib?.b ?? 1) * pointsPerLogit(stage);
+  for (let i = 0; i < out.length; i++) out[i] *= k;
+  return out;
 }
 function scoreToken(model, f2, explain = true) {
   const stageKey = f2.stage;
   const stage = model.stages[stageKey];
   const x = featureVector(f2);
   const z = standardize(stage, x);
-  const lin = linear(stage, z);
-  const pLogit = stage.calib ? stage.calib.a + stage.calib.b * lin : lin;
+  let raw = linear(stage, z);
+  if (stage.trees?.trees.length) raw += ensembleMargin(stage.trees, x, treeMap(stage.trees));
+  const pLogit = stage.calib ? stage.calib.a + stage.calib.b * raw : raw;
   const p = sigmoid(pLogit);
   const score = scoreFromLogit(stage, pLogit);
   let contributions = [];
   if (explain) {
+    const pts = contributionPoints(stage, x, z);
     for (let i = 0; i < FEATURE_DEFS.length; i++) {
       const d = FEATURE_DEFS[i];
-      const w = stage.weights[d.key] ?? 0;
-      if (w === 0) continue;
-      const pts = w * z[i] * POINTS_PER_LOGIT;
-      if (Math.abs(pts) < 0.5) continue;
-      contributions.push({ key: d.key, label: d.label, value: d.show(f2), points: pts, note: pts > 0 ? d.good : d.bad });
+      const v = pts[i];
+      if (Math.abs(v) < 0.5) continue;
+      contributions.push({ key: d.key, label: d.label, value: d.show(f2), points: v, note: v > 0 ? d.good : d.bad });
     }
     contributions.sort((a, b) => Math.abs(b.points) - Math.abs(a.points));
     contributions = contributions.slice(0, 10);
   }
   return { score, p, calibrated: !!stage.calib && model.source === "trained", stage: stageKey, contributions };
+}
+function scoreVector(model, stage, x) {
+  const st = model.stages[stage];
+  const l = stageLogit(st, x);
+  return { score: scoreFromLogit(st, l), p: sigmoid(l) };
 }
 function breakEvenP(tpPct, slPct, slSlippage = 0.1) {
   const win = tpPct / 100;
@@ -1476,13 +1836,47 @@ function validateModel(m) {
       if (!Number.isFinite(w) || Math.abs(w) > 20) return false;
       if (!Number.isFinite(st.mean[k] ?? 0) || !Number.isFinite(st.std[k] ?? 1)) return false;
     }
+    if (st.calib && !(Number.isFinite(st.calib.a) && Number.isFinite(st.calib.b))) return false;
+    if (st.scale && !(Number.isFinite(st.scale.at50) && Number.isFinite(st.scale.at75) && st.scale.at75 - st.scale.at50 > 1e-3)) return false;
+    if (st.trees !== void 0 && !validEnsemble(st.trees, FEATURE_KEYS)) return false;
   }
   return true;
 }
 
 // src/core/learn.ts
+var SAME_MOMENT_MS = 3e3;
+function labelOf(s, target) {
+  const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
+  if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
+    const r = s.grid[gi];
+    return Number.isFinite(r) ? r > 0 ? 1 : 0 : null;
+  }
+  if (s.tp === target.tpPct && s.sl === target.slPct && Number.isFinite(s.ret)) return s.ret > 0 ? 1 : 0;
+  return null;
+}
+function trainingRows(samples, target, opts = {}) {
+  const d = FEATURE_KEYS.length;
+  let cutoff = Infinity;
+  if (opts.horizonMs && opts.horizonMs > 0) {
+    let last = 0;
+    for (const s of samples) if (s.resolvedAt > last) last = s.resolvedAt;
+    cutoff = last - opts.horizonMs;
+  }
+  const list = samples.filter((s) => (s.kind === "checkpoint" || s.kind === "entry") && s.x?.length === d && s.ts <= cutoff).sort((a, b) => a.ts - b.ts);
+  const lastKept = /* @__PURE__ */ new Map();
+  const out = [];
+  for (const s of list) {
+    const y = labelOf(s, target);
+    if (y === null) continue;
+    const prev = lastKept.get(s.mint);
+    if (prev !== void 0 && s.ts - prev < SAME_MOMENT_MS) continue;
+    lastKept.set(s.mint, s.ts);
+    out.push({ ts: s.ts, stage: s.stage, x: s.x, y, mint: s.mint, kind: s.kind === "entry" ? "entry" : "checkpoint" });
+  }
+  return out;
+}
 function auc(scores, labels) {
-  const idx = scores.map((s, i2) => i2).sort((a, b) => scores[a] - scores[b]);
+  const idx = Array.from({ length: scores.length }, (_, i2) => i2).sort((a, b) => scores[a] - scores[b]);
   let rankSum = 0;
   let nPos = 0;
   let i = 0;
@@ -1490,70 +1884,101 @@ function auc(scores, labels) {
     let j = i;
     while (j + 1 < idx.length && scores[idx[j + 1]] === scores[idx[i]]) j++;
     const avgRank = (i + j) / 2 + 1;
-    for (let k = i; k <= j; k++) if (labels[idx[k]] === 1) {
-      rankSum += avgRank;
-      nPos++;
-    }
+    for (let k = i; k <= j; k++)
+      if (labels[idx[k]] === 1) {
+        rankSum += avgRank;
+        nPos++;
+      }
     i = j + 1;
   }
   const nNeg = labels.length - nPos;
   if (nPos === 0 || nNeg === 0) return NaN;
   return (rankSum - nPos * (nPos + 1) / 2) / (nPos * nNeg);
 }
-function evaluate(stage, rows) {
-  const ps = [];
-  const ys = [];
+function* evaluateSteps(stage, rows) {
+  return (yield* scoreRowsSteps(stage, rows)).metrics;
+}
+function* scoreRowsSteps(stage, rows) {
+  const n = rows.length;
+  const ps = new Float64Array(n);
+  const ys = new Uint8Array(n);
+  const losses = new Float64Array(n);
   let ll = 0;
   let br = 0;
   let pos = 0;
-  for (const r of rows) {
-    const lin = linear(stage, standardize(stage, r.x));
-    const p = clamp(sigmoid(stage.calib ? stage.calib.a + stage.calib.b * lin : lin), 1e-6, 1 - 1e-6);
-    ps.push(p);
-    ys.push(r.y);
-    ll += -(r.y * Math.log(p) + (1 - r.y) * Math.log(1 - p));
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    const p = clamp(sigmoid(stageLogit(stage, r.x)), 1e-6, 1 - 1e-6);
+    ps[i] = p;
+    ys[i] = r.y;
+    losses[i] = -(r.y * Math.log(p) + (1 - r.y) * Math.log(1 - p));
+    ll += losses[i];
     br += (p - r.y) ** 2;
     pos += r.y;
+    if ((i & 2047) === 2047) yield;
   }
-  const n = rows.length;
-  return { n, positives: pos, auc: auc(ps, ys), logLoss: n ? ll / n : NaN, brier: n ? br / n : NaN, baseRate: n ? pos / n : NaN };
+  return { metrics: { n, positives: pos, auc: auc(ps, ys), logLoss: n ? ll / n : NaN, brier: n ? br / n : NaN, baseRate: n ? pos / n : NaN }, losses };
 }
-function choleskySolve(A, b) {
-  const n = b.length;
-  const L = Array.from({ length: n }, () => new Array(n).fill(0));
+function evaluate(stage, rows) {
+  return runSteps(evaluateSteps(stage, rows));
+}
+function lossGainZ(a, b, rows) {
+  const n = rows.length;
+  if (!n) return { gain: NaN, z: 0 };
+  const byCoin = /* @__PURE__ */ new Map();
+  let total = 0;
+  for (let i = 0; i < n; i++) {
+    const d = a[i] - b[i];
+    total += d;
+    const key = rows[i].mint ?? `row:${i}`;
+    const c = byCoin.get(key);
+    if (c) {
+      c.d += d;
+      c.n++;
+    } else byCoin.set(key, { d, n: 1 });
+  }
+  const gain = total / n;
+  let v = 0;
+  for (const c of byCoin.values()) v += (c.d - gain * c.n) ** 2;
+  const k = byCoin.size;
+  const se = k > 1 ? Math.sqrt(v * (k / (k - 1))) / n : Infinity;
+  return { gain, z: se > 0 ? gain / se : gain > 0 ? Infinity : 0 };
+}
+function choleskyFlat(A, b, n) {
+  const L = new Float64Array(n * n);
   for (let i = 0; i < n; i++) {
     for (let j = 0; j <= i; j++) {
-      let s = A[i][j];
-      for (let k = 0; k < j; k++) s -= L[i][k] * L[j][k];
+      let s = A[i * n + j];
+      for (let k = 0; k < j; k++) s -= L[i * n + k] * L[j * n + k];
       if (i === j) {
         if (s <= 1e-12) return null;
-        L[i][i] = Math.sqrt(s);
-      } else L[i][j] = s / L[j][j];
+        L[i * n + i] = Math.sqrt(s);
+      } else L[i * n + j] = s / L[j * n + j];
     }
   }
-  const y = new Array(n).fill(0);
+  const y = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     let s = b[i];
-    for (let k = 0; k < i; k++) s -= L[i][k] * y[k];
-    y[i] = s / L[i][i];
+    for (let k = 0; k < i; k++) s -= L[i * n + k] * y[k];
+    y[i] = s / L[i * n + i];
   }
-  const x = new Array(n).fill(0);
+  const x = new Float64Array(n);
   for (let i = n - 1; i >= 0; i--) {
     let s = y[i];
-    for (let k = i + 1; k < n; k++) s -= L[k][i] * x[k];
-    x[i] = s / L[i][i];
+    for (let k = i + 1; k < n; k++) s -= L[k * n + i] * x[k];
+    x[i] = s / L[i * n + i];
   }
   return x;
 }
-function fitLogistic(Z, y, w, prior, lambda, maxIter = 30) {
-  const d = prior.length;
-  let beta = prior.slice();
+function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
+  const d = k + 1;
+  let beta = Float64Array.from(prior);
   const objective = (b) => {
     let f2 = 0;
-    for (let i = 0; i < Z.length; i++) {
+    for (let i = 0; i < n; i++) {
       let s = b[0];
-      const z = Z[i];
-      for (let j = 1; j < d; j++) s += b[j] * z[j - 1];
+      const o = i * k;
+      for (let j = 0; j < k; j++) s += b[j + 1] * Z[o + j];
       const p = clamp(sigmoid(s), 1e-9, 1 - 1e-9);
       f2 -= w[i] * (y[i] * Math.log(p) + (1 - y[i]) * Math.log(1 - p));
     }
@@ -1563,34 +1988,39 @@ function fitLogistic(Z, y, w, prior, lambda, maxIter = 30) {
   };
   let fPrev = objective(beta);
   let converged = false;
+  const g = new Float64Array(d);
+  const H = new Float64Array(d * d);
   for (let iter = 0; iter < maxIter; iter++) {
-    const g = new Array(d).fill(0);
-    const H = Array.from({ length: d }, () => new Array(d).fill(0));
-    for (let i = 0; i < Z.length; i++) {
-      const z = Z[i];
+    g.fill(0);
+    H.fill(0);
+    for (let i = 0; i < n; i++) {
+      const o = i * k;
       let s = beta[0];
-      for (let j = 1; j < d; j++) s += beta[j] * z[j - 1];
+      for (let j = 0; j < k; j++) s += beta[j + 1] * Z[o + j];
       const p = sigmoid(s);
       const r = w[i] * (p - y[i]);
       const v = w[i] * Math.max(p * (1 - p), 1e-9);
       g[0] += r;
-      H[0][0] += v;
-      for (let j = 1; j < d; j++) {
-        const zj = z[j - 1];
-        g[j] += r * zj;
-        H[0][j] += v * zj;
-        for (let k = 1; k <= j; k++) H[j][k] += v * zj * z[k - 1];
+      H[0] += v;
+      for (let j = 0; j < k; j++) {
+        const zj = Z[o + j];
+        g[j + 1] += r * zj;
+        H[j + 1] += v * zj;
+        const vz = v * zj;
+        const row = (j + 1) * d + 1;
+        for (let m = 0; m <= j; m++) H[row + m] += vz * Z[o + m];
       }
+      if ((i & 4095) === 4095) yield;
     }
     for (let j = 1; j < d; j++) {
       g[j] += lambda * (beta[j] - prior[j]);
-      H[j][j] += lambda;
-      H[j][0] = H[0][j];
-      for (let k = 1; k < j; k++) H[k][j] = H[j][k];
+      H[j * d + j] += lambda;
+      H[j * d] = H[j];
+      for (let m = 1; m < j; m++) H[m * d + j] = H[j * d + m];
     }
     g[0] += 1e-4 * (beta[0] - prior[0]);
-    H[0][0] += 1e-4;
-    const step = choleskySolve(H, g);
+    H[0] += 1e-4;
+    const step = choleskyFlat(H, g, d);
     if (!step) break;
     let t = 1;
     let next = beta;
@@ -1601,79 +2031,81 @@ function fitLogistic(Z, y, w, prior, lambda, maxIter = 30) {
       if (fNext <= fPrev + 1e-12) break;
       t /= 2;
     }
-    const moved = Math.max(...step.map((s) => Math.abs(s * t)));
+    let moved = 0;
+    for (let j = 0; j < d; j++) moved = Math.max(moved, Math.abs(step[j] * t));
     beta = next;
     const improvement = fPrev - fNext;
     fPrev = fNext;
+    yield;
     if (moved < 1e-7 || improvement < 1e-9) {
       converged = true;
       break;
     }
   }
-  return { beta, converged };
+  return { beta: Array.from(beta), converged };
 }
-function weightedMeanStd(rows, j) {
-  let sw = 0;
-  let m = 0;
-  for (const r of rows) {
-    const w = r.w ?? 1;
-    sw += w;
-    m += w * r.x[j];
-  }
-  m /= sw || 1;
-  let v = 0;
-  for (const r of rows) v += (r.w ?? 1) * (r.x[j] - m) ** 2;
-  v /= sw || 1;
-  return { mean: m, std: Math.sqrt(v) };
-}
-function fitStage(base, rows, opts = {}) {
+var REDUNDANT = { curve: ["progress", "liquidity", "sinceMig"], amm: ["progress"] };
+function* fitStageSteps(base, rows, weights, opts = {}) {
   const lambda = opts.lambda ?? 8;
   const half = opts.standardizeHalfRows ?? 400;
   const n = rows.length;
+  const d = FEATURE_KEYS.length;
   const blend = n / (n + half);
+  let sw = 0;
+  for (let i = 0; i < n; i++) sw += weights[i];
   const mean2 = {};
   const std = {};
-  FEATURE_KEYS.forEach((k, j) => {
-    const s = weightedMeanStd(rows, j);
+  for (let j = 0; j < d; j++) {
+    const k = FEATURE_KEYS[j];
+    let m = 0;
+    for (let i = 0; i < n; i++) m += weights[i] * rows[i].x[j];
+    m /= sw || 1;
+    let v = 0;
+    for (let i = 0; i < n; i++) v += weights[i] * (rows[i].x[j] - m) ** 2;
+    v /= sw || 1;
     const pm = base.mean[k] ?? 0;
     const ps = base.std[k] ?? 1;
-    mean2[k] = (1 - blend) * pm + blend * s.mean;
-    const sd = (1 - blend) * ps + blend * s.std;
+    mean2[k] = (1 - blend) * pm + blend * m;
+    const sd = (1 - blend) * ps + blend * Math.sqrt(v);
     std[k] = sd > 1e-6 ? sd : ps;
-  });
-  const stage = { ...base, mean: mean2, std, calib: void 0 };
-  const prior = [base.bias];
-  FEATURE_KEYS.forEach((k) => {
-    const w = base.weights[k] ?? 0;
-    prior.push(w * ((std[k] ?? 1) / (base.std[k] ?? 1)));
-  });
-  let pos = 0;
-  let sw = 0;
-  for (const r of rows) {
-    pos += (r.w ?? 1) * r.y;
-    sw += r.w ?? 1;
+    if ((j & 3) === 3) yield;
   }
+  const shape = { pRef: base.pRef, bias: 0, weights: {}, mean: mean2, std };
+  const zero = new Set(opts.zero ?? []);
+  const prior = [base.bias];
+  FEATURE_KEYS.forEach((k) => prior.push(zero.has(k) ? 0 : (base.weights[k] ?? 0) * ((std[k] ?? 1) / (base.std[k] ?? 1))));
+  let pos = 0;
+  for (let i = 0; i < n; i++) pos += weights[i] * rows[i].y;
   const baseRate = clamp(sw > 0 ? pos / sw : base.pRef, 5e-3, 0.95);
   prior[0] = logit(baseRate);
-  const Z = rows.map((r) => standardize(stage, r.x));
-  const { beta } = fitLogistic(
-    Z,
-    rows.map((r) => r.y),
-    rows.map((r) => r.w ?? 1),
-    prior,
-    lambda
-  );
-  const weights = {};
-  FEATURE_KEYS.forEach((k, j) => {
-    weights[k] = clamp(beta[j + 1], -10, 10);
-  });
-  return { pRef: baseRate, bias: beta[0], weights, mean: mean2, std };
+  const Z = new Float64Array(n * d);
+  const y = new Uint8Array(n);
+  const zeroAt = FEATURE_KEYS.flatMap((k, j) => zero.has(k) ? [j] : []);
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    Z.set(standardize(shape, r.x), i * d);
+    for (const j of zeroAt) Z[i * d + j] = 0;
+    y[i] = r.y;
+    if ((i & 4095) === 4095) yield;
+  }
+  yield;
+  const { beta } = yield* newtonSteps(Z, n, d, y, weights, prior, lambda);
+  const out = {};
+  FEATURE_KEYS.forEach((k, j) => out[k] = clamp(beta[j + 1], -10, 10));
+  return { pRef: baseRate, bias: beta[0], weights: out, mean: mean2, std };
 }
-function calibrate(stage, rows) {
+function* calibrateSteps(stage, rows) {
   if (rows.length < 50) return stage;
-  const lin = rows.map((r) => [linear(stage, standardize(stage, r.x))]);
-  const { beta } = fitLogistic(
-    lin,
+  const plain = { ...stage, calib: void 0 };
+  const z = new Float64Array(rows.length);
+  for (let i = 0; i < rows.length; i++) {
+    z[i] = rawLogit(plain, rows[i].x);
+    if ((i & 2047) === 2047) yield;
+  }
+  const { beta } = yield* newtonSteps(
+    z,
+    rows.length,
+    1,
     rows.map((r) => r.y),
     rows.map((r) => r.w ?? 1),
     [0, 1],
@@ -1682,51 +2114,220 @@ function calibrate(stage, rows) {
   if (!(beta[1] > 0.05)) return stage;
   return { ...stage, calib: { a: beta[0], b: beta[1] } };
 }
-function trainAndSelect(current, rows, opts = {}) {
-  const minRows = opts.minRows ?? 300;
-  const minPos = opts.minPositives ?? 25;
+var TRAIN_DEFAULTS = {
+  minRows: 300,
+  minPositives: 25,
+  halfLifeDays: 3,
+  trees: true,
+  treesMinRows: 2e3,
+  minFreshRows: 200,
+  minFreshPositives: 10,
+  treesZ: 1.65,
+  replaceZ: 1.5,
+  replaceMinGain: 1e-3
+};
+var EMPTY = { n: 0, positives: 0, auc: NaN, logLoss: NaN, brier: NaN, baseRate: NaN };
+function* boostDataSteps(rows, w, lin) {
+  const n = rows.length;
+  const d = FEATURE_KEYS.length;
+  const X = new Float32Array(n * d);
+  const y = new Uint8Array(n);
+  const wf = new Float32Array(n);
+  const base = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = rows[i];
+    for (let j = 0; j < d; j++) X[i * d + j] = r.x[j];
+    y[i] = r.y;
+    wf[i] = w[i];
+    base[i] = linear(lin, standardize(lin, r.x));
+    if ((i & 4095) === 4095) yield;
+  }
+  return { n, d, X, y, w: wf, base };
+}
+function* scaleSteps(stage, rows) {
+  const pop = rows.filter((r) => r.kind !== "entry");
+  const use = pop.length >= 100 ? pop : rows;
+  const L = new Float64Array(use.length);
+  for (let i = 0; i < use.length; i++) {
+    L[i] = stageLogit(stage, use[i].x);
+    if ((i & 2047) === 2047) yield;
+  }
+  L.sort();
+  const q = (f2) => L[Math.min(L.length - 1, Math.round(f2 * (L.length - 1)))];
+  const at50 = q(0.5);
+  const at75 = q(0.95);
+  return use.length >= 50 && at75 - at50 > 0.05 ? { at50, at75 } : void 0;
+}
+function populationRate(rows, w) {
+  let pos = 0;
+  let sw = 0;
+  rows.forEach((r, i) => {
+    if (r.kind === "entry") return;
+    pos += w[i] * r.y;
+    sw += w[i];
+  });
+  let count = 0;
+  for (const r of rows) if (r.kind !== "entry") count++;
+  return count >= 100 && sw > 0 ? clamp(pos / sw, 5e-3, 0.95) : null;
+}
+function* stageSteps(stageKey, cur, seenTo, input, o) {
+  const n = input.length;
+  const coinIds = /* @__PURE__ */ new Map();
+  const coin = new Int32Array(n);
+  input.forEach((r, i) => {
+    const k = r.mint ?? `row:${i}`;
+    let id = coinIds.get(k);
+    if (id === void 0) coinIds.set(k, id = coinIds.size);
+    coin[i] = id;
+  });
+  const first = new Float64Array(coinIds.size).fill(Infinity);
+  input.forEach((r, i) => {
+    if (r.ts < first[coin[i]]) first[coin[i]] = r.ts;
+  });
+  yield;
+  const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => first[coin[a]] - first[coin[b]] || coin[a] - coin[b] || input[a].ts - input[b].ts);
+  yield;
+  const sr = order.map((i) => input[i]);
+  const keys = order.map((i) => coin[i]);
+  const cutAt = (frac, hi) => {
+    let c = Math.floor(hi * frac);
+    while (c > 0 && c < hi && keys[c] === keys[c - 1]) c++;
+    return c;
+  };
+  const cut = cutAt(0.75, n);
+  const train = sr.slice(0, cut);
+  const val = sr.slice(cut);
+  const cutA = cutAt(0.8, cut);
+  const partA = sr.slice(0, cutA);
+  const partB = sr.slice(cutA, cut);
+  const pos = sr.reduce((s, r) => s + r.y, 0);
+  const entries = sr.filter((r) => r.kind === "entry").length;
+  const rows = { total: n, entries };
+  const base = { stage: stageKey, trainRows: train.length, valRows: val.length, entryRows: entries };
+  if (n < o.minRows || pos < o.minPositives || val.length < 50 || partB.length < 30) {
+    return {
+      rows,
+      report: {
+        ...base,
+        adopted: false,
+        reason: `need \u2265${o.minRows} resolved moments with \u2265${o.minPositives} wins (have ${n}/${pos})`,
+        freshRows: 0,
+        current: val.length ? yield* evaluateSteps(cur, val) : EMPTY,
+        candidate: EMPTY
+      }
+    };
+  }
+  const halfMs = o.halfLifeDays > 0 ? o.halfLifeDays * 864e5 : 0;
+  const weigh = (list) => {
+    let tMax = -Infinity;
+    for (const r of list) if (r.ts > tMax) tMax = r.ts;
+    return list.map((r) => (r.w ?? 1) * (halfMs ? Math.pow(0.5, (tMax - r.ts) / halfMs) : 1));
+  };
+  const fit = { ...o, zero: REDUNDANT[stageKey] };
+  const boost = { ...o.boost, skip: REDUNDANT[stageKey].map((k) => FEATURE_KEYS.indexOf(k)) };
+  const wA = weigh(partA);
+  const lin = yield* fitStageSteps(cur, partA, wA, fit);
+  const L = o.calibrate === false ? lin : yield* calibrateSteps(lin, partB);
+  const sL = yield* scoreRowsSteps(L, val);
+  const mL = sL.metrics;
+  let H = null;
+  let mH = null;
+  let treesZ = 0;
+  let treeCount = 0;
+  if (o.trees && partA.length >= o.treesMinRows && partB.reduce((s, r) => s + r.y, 0) >= 10) {
+    const dataA = yield* boostDataSteps(partA, wA, lin);
+    const dataB = yield* boostDataSteps(partB, new Float32Array(partB.length).fill(1), lin);
+    const res = yield* boostSteps(dataA, dataB, FEATURE_KEYS, boost);
+    if (res.ens.trees.length) {
+      const withTrees = { ...lin, trees: res.ens };
+      H = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
+      const sH = yield* scoreRowsSteps(H, val);
+      mH = sH.metrics;
+      treesZ = lossGainZ(sL.losses, sH.losses, val).z;
+      treeCount = res.ens.trees.length;
+    }
+  }
+  const treesWin = !!(H && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
+  const cand = treesWin ? H : L;
+  const recipe = treesWin ? "trees" : "linear";
+  const fresh = val.filter((r) => r.ts > seenTo);
+  const freshPos = fresh.reduce((s, r) => s + r.y, 0);
+  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H ? treesZ : void 0 };
+  if (fresh.length < o.minFreshRows || freshPos < o.minFreshPositives) {
+    return {
+      rows,
+      report: {
+        ...common,
+        adopted: false,
+        reason: `waiting for newer coins that neither model has seen (${fresh.length}/${o.minFreshRows} moments, ${freshPos}/${o.minFreshPositives} wins)`,
+        current: yield* evaluateSteps(cur, fresh),
+        candidate: yield* evaluateSteps(cand, fresh)
+      }
+    };
+  }
+  const sCur = yield* scoreRowsSteps(cur, fresh);
+  const sCand = yield* scoreRowsSteps(cand, fresh);
+  const mCur = sCur.metrics;
+  const mCand = sCand.metrics;
+  const gain = lossGainZ(sCur.losses, sCand.losses, fresh);
+  const better = Number.isFinite(mCand.logLoss) && gain.gain > o.replaceMinGain && gain.z >= o.replaceZ && (!Number.isFinite(mCur.auc) || !Number.isFinite(mCand.auc) || mCand.auc >= mCur.auc - 5e-3);
+  const what = treesWin ? `weighted sum + ${treeCount} trees` : "weighted sum";
+  const report = {
+    ...common,
+    replaceZ: gain.z,
+    adopted: better,
+    reason: better ? `the new model (${what}) predicted ${fresh.length.toLocaleString("en-US")} newer moments better than the current one; neither had seen them` : `the current model still predicts newer moments (${fresh.length.toLocaleString("en-US")}) at least as well`,
+    current: mCur,
+    candidate: mCand
+  };
+  if (!better) return { rows, report };
+  const wAll = weigh(sr);
+  const linAll = yield* fitStageSteps(cur, sr, wAll, fit);
+  let deploy = linAll;
+  if (treesWin) {
+    const res = yield* boostSteps(yield* boostDataSteps(sr, wAll, linAll), null, FEATURE_KEYS, { ...boost, rounds: treeCount });
+    if (res.ens.trees.length) deploy = { ...deploy, trees: res.ens };
+  }
+  if (cand.calib) deploy = { ...deploy, calib: cand.calib };
+  deploy.pRef = populationRate(sr, wAll) ?? deploy.pRef;
+  deploy.scale = yield* scaleSteps(deploy, sr);
+  deploy.trainedTo = sr.reduce((m, r) => Math.max(m, r.ts), 0);
+  return { rows, report, deploy };
+}
+function* trainSteps(current, rows, opts = {}) {
+  const o = { ...TRAIN_DEFAULTS, ...opts };
   const reports = [];
   let next = JSON.parse(JSON.stringify(current));
+  const insight = {
+    recipe: { ...current.insight?.recipe ?? {} },
+    trees: { ...current.insight?.trees ?? {} },
+    rows: { ...current.insight?.rows ?? {} },
+    auc: { ...current.insight?.auc ?? {} }
+  };
   let adoptedAny = false;
   for (const stageKey of ["curve", "amm"]) {
-    const sr = rows.filter((r) => r.stage === stageKey).sort((a, b) => a.ts - b.ts);
-    const cut = Math.floor(sr.length * 0.75);
-    const train = sr.slice(0, cut);
-    const val = sr.slice(cut);
     const cur = current.stages[stageKey];
-    const empty = { n: 0, positives: 0, auc: NaN, logLoss: NaN, brier: NaN, baseRate: NaN };
-    const pos = sr.reduce((s, r) => s + r.y, 0);
-    if (sr.length < minRows || pos < minPos || val.length < 50) {
-      reports.push({ adopted: false, reason: `need \u2265${minRows} resolved samples with \u2265${minPos} wins (have ${sr.length}/${pos})`, stage: stageKey, trainRows: train.length, valRows: val.length, current: val.length ? evaluate(cur, val) : empty, candidate: empty });
-      continue;
-    }
-    let cand = fitStage(cur, train, opts);
-    if (opts.calibrate !== false) {
-      const calCut = Math.floor(train.length * 0.8);
-      const fitPart = fitStage(cur, train.slice(0, calCut), opts);
-      const cal = calibrate(fitPart, train.slice(calCut));
-      if (cal.calib) cand = { ...cand, calib: cal.calib };
-    }
-    const mCur = evaluate(cur, val);
-    const mCand = evaluate(cand, val);
-    const better = Number.isFinite(mCand.logLoss) && (!Number.isFinite(mCur.logLoss) || mCand.logLoss < mCur.logLoss - 1e-3) && (!Number.isFinite(mCur.auc) || !Number.isFinite(mCand.auc) || mCand.auc >= mCur.auc - 5e-3);
-    if (better) {
-      const full = fitStage(cur, sr, opts);
-      next.stages[stageKey] = cand.calib ? { ...full, calib: cand.calib } : full;
+    const seenTo = cur.trainedTo ?? (current.source === "trained" ? current.training?.to ?? -Infinity : -Infinity);
+    const res = yield* stageSteps(
+      stageKey,
+      cur,
+      seenTo,
+      rows.filter((r) => r.stage === stageKey),
+      o
+    );
+    reports.push(res.report);
+    if (res.deploy) {
+      next.stages[stageKey] = res.deploy;
+      insight.recipe[stageKey] = res.report.recipe;
+      insight.trees[stageKey] = res.deploy.trees?.trees.length ?? 0;
+      insight.rows[stageKey] = res.rows;
+      insight.auc[stageKey] = res.report.candidate.auc;
       adoptedAny = true;
     }
-    reports.push({
-      adopted: better,
-      reason: better ? "challenger beat the current model on unseen (newer) data" : "current model still better on unseen data",
-      stage: stageKey,
-      trainRows: train.length,
-      valRows: val.length,
-      current: mCur,
-      candidate: mCand
-    });
   }
   if (adoptedAny) {
-    const now = opts.now ?? Date.now();
+    const now = o.now ?? Date.now();
+    const won = reports.find((r) => r.adopted);
     next = {
       ...next,
       version: `trained-${new Date(now).toISOString().slice(0, 16)}`,
@@ -1737,195 +2338,18 @@ function trainAndSelect(current, rows, opts = {}) {
         positives: rows.reduce((s, r) => s + r.y, 0),
         from: rows.reduce((m, r) => Math.min(m, r.ts), Infinity),
         to: rows.reduce((m, r) => Math.max(m, r.ts), 0),
-        valAuc: reports.find((r) => r.adopted)?.candidate.auc,
-        valLogLoss: reports.find((r) => r.adopted)?.candidate.logLoss,
-        priorValAuc: reports.find((r) => r.adopted)?.current.auc,
-        priorValLogLoss: reports.find((r) => r.adopted)?.current.logLoss
-      }
+        valAuc: won?.candidate.auc,
+        valLogLoss: won?.candidate.logLoss,
+        priorValAuc: won?.current.auc,
+        priorValLogLoss: won?.current.logLoss
+      },
+      insight
     };
   }
   return { model: next, reports };
 }
-
-// src/core/report.ts
-function nearestGrid(tp, sl) {
-  let best = 0;
-  let bestD = Infinity;
-  GRID.forEach((g, i) => {
-    const d = Math.abs(Math.log(g.tp / tp)) + Math.abs(g.sl - sl) / 25;
-    if (d < bestD) {
-      bestD = d;
-      best = i;
-    }
-  });
-  return best;
-}
-function gridOf(s) {
-  return s.grid?.length === GRID.length ? s.grid : void 0;
-}
-function sampleReturn(s, tp, sl) {
-  if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
-  const g = gridOf(s);
-  const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
-  if (g && gi >= 0 && Number.isFinite(g[gi])) return { ret: g[gi], exact: true };
-  return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
-}
-function statsOf(rets) {
-  const wins2 = rets.filter((r) => r > 0).length;
-  const w = wilson(wins2, rets.length);
-  const m = meanCI(rets);
-  return { n: rets.length, winRate: rets.length ? wins2 / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
-}
-function paperStats(closed) {
-  const done = closed.filter((p) => p.status === "closed" && Number.isFinite(p.pnl));
-  const wins2 = done.filter((p) => (p.pnl ?? 0) > 0);
-  const gross = wins2.reduce((s, p) => s + (p.pnl ?? 0), 0);
-  const loss = -done.filter((p) => (p.pnl ?? 0) <= 0).reduce((s, p) => s + (p.pnl ?? 0), 0);
-  let peak = 0;
-  let eq = 0;
-  let mdd = 0;
-  for (const p of [...done].sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))) {
-    eq += p.pnl ?? 0;
-    peak = Math.max(peak, eq);
-    mdd = Math.max(mdd, peak - eq);
-  }
-  return {
-    trades: done.length,
-    wins: wins2.length,
-    winRate: done.length ? wins2.length / done.length : NaN,
-    pnlSol: (gross - loss) / 1e9,
-    avgPct: done.length ? done.reduce((s, p) => s + (p.pnlPct ?? 0), 0) / done.length : NaN,
-    profitFactor: loss > 0 ? gross / loss : gross > 0 ? Infinity : NaN,
-    maxDrawdownSol: mdd / 1e9
-  };
-}
-function buildReport(samples, settings, model, closed, now) {
-  const tp = settings.tpPct;
-  const sl = settings.slPct;
-  const checkpoints = samples.filter((s) => s.kind === "checkpoint");
-  const signals = samples.filter((s) => s.kind === "signal");
-  const exactCombo = samples.length === 0 || sampleReturn(samples[0], tp, sl).exact;
-  const retOf = (s) => sampleReturn(s, tp, sl).ret;
-  const t0 = samples.reduce((m, s) => Math.min(m, s.ts), Infinity);
-  const t1 = samples.reduce((m, s) => Math.max(m, s.ts), 0);
-  const spanHours = samples.length ? Math.max(1 / 60, (t1 - t0) / 36e5) : 0;
-  const buckets = [];
-  for (let lo = 0; lo < 100; lo += 10) {
-    const hi = lo + 10;
-    const rows = checkpoints.filter((s) => s.score >= lo && (s.score < hi || hi === 100 && s.score <= 100));
-    const st = statsOf(rows.map(retOf));
-    const mm = rows.map((s) => s.maxMult).sort((a, b) => a - b);
-    buckets.push({ lo, hi, n: st.n, winRate: st.winRate, winLo: st.winLo, winHi: st.winHi, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, medMaxMult: quantile(mm, 0.5) });
-  }
-  const sigAbove = signals.filter((s) => s.score >= settings.minScore);
-  const signalStats = statsOf(sigAbove.map(retOf));
-  const entries = samples.filter((s) => s.kind === "entry");
-  const thresholdSource = entries.length >= 200 ? "entries" : "checkpoints";
-  const atLevel = (min) => thresholdSource === "entries" ? entries.filter((s) => s.tag === `x${min}`) : checkpoints.filter((s) => s.score >= min);
-  const thresholds = [];
-  for (let min = 50; min <= 95; min += 5) {
-    const rows = atLevel(min);
-    const st = statsOf(rows.map(retOf));
-    const tokens = new Set(rows.map((s) => s.mint)).size;
-    thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
-  }
-  const level = [...ENTRY_LEVELS].reverse().find((l) => l <= settings.minScore) ?? ENTRY_LEVELS[0];
-  const levelEntries = entries.filter((s) => s.tag === `x${level}`);
-  let gridSource;
-  let pool;
-  if (sigAbove.length >= 50) {
-    gridSource = "signals";
-    pool = sigAbove;
-  } else if (levelEntries.length >= 50) {
-    gridSource = "entries";
-    pool = levelEntries;
-  } else {
-    gridSource = "checkpoints";
-    pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
-  }
-  const grid = GRID.map((g, i) => {
-    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x) => Number.isFinite(x));
-    const st = statsOf(rets);
-    return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
-  });
-  const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
-  const best = credible.length ? credible.reduce((a, b) => b.retLo > a.retLo ? b : a) : null;
-  const minN = 150;
-  let gate;
-  if (signalStats.n < minN) {
-    gate = {
-      pass: false,
-      verdict: "Not enough evidence yet",
-      detail: `${signalStats.n}/${minN} resolved signals at score \u2265 ${settings.minScore} with TP ${tp}% / SL ${sl}%. Keep paper trading.`
-    };
-  } else if (!(signalStats.retLo > 0.02)) {
-    gate = {
-      pass: false,
-      verdict: signalStats.avgRet > 0 ? "Positive but not proven" : "Losing at these settings",
-      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%) after fees, delay and slippage. The low end must clear +2% before risking real money.`
-    };
-  } else {
-    gate = {
-      pass: true,
-      verdict: "Evidence supports these settings",
-      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade over ${signalStats.n} signals; 95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%. Past results in this market can still stop working \u2014 start small.`
-    };
-  }
-  let suggestion = null;
-  const zBound = (xs, z) => {
-    const m = meanCI(xs);
-    return Number.isFinite(m.lo) ? m.mean - (m.mean - m.lo) / 1.96 * z : -Infinity;
-  };
-  const cur = pool.map(retOf);
-  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
-  const mid = t0 + (t1 - t0) / 2;
-  for (let min = 50; min <= 95; min += 5) {
-    const rows = atLevel(min);
-    if (rows.length < 150) continue;
-    GRID.forEach((g, i) => {
-      const val = (s) => gridOf(s)?.[i];
-      const all = rows.map(val).filter((x) => Number.isFinite(x));
-      if (all.length < 150) return;
-      const lo = zBound(all, 3.5);
-      if (!(lo > 0) || lo <= bestLo + 5e-3) return;
-      const older = rows.filter((s) => s.ts < mid).map(val).filter((x) => Number.isFinite(x));
-      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x) => Number.isFinite(x));
-      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
-      const m = meanCI(all);
-      bestLo = lo;
-      suggestion = {
-        minScore: min,
-        tpPct: g.tp,
-        slPct: g.sl,
-        avgRet: m.mean,
-        retLo: lo,
-        n: all.length,
-        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
-      };
-    });
-  }
-  return {
-    generatedAt: now,
-    suggestion,
-    samples: samples.length,
-    checkpoints: checkpoints.length,
-    signals: signals.length,
-    entries: entries.length,
-    spanHours,
-    settings: { tpPct: tp, slPct: sl, minScore: settings.minScore },
-    combo: { tp, sl, exact: exactCombo },
-    breakEven: breakEvenP(tp, sl),
-    buckets,
-    signalStats,
-    thresholds,
-    thresholdSource,
-    grid,
-    gridSource,
-    best,
-    gate,
-    paper: paperStats(closed),
-    model: { version: model.version, source: model.source, training: model.training ?? null }
-  };
+function trainAndSelect(current, rows, opts = {}) {
+  return runSteps(trainSteps(current, rows, opts));
 }
 
 // src/core/codec.ts
@@ -1959,773 +2383,6 @@ function base58Encode(bytes) {
   return out;
 }
 var utf8 = new TextDecoder("utf-8", { fatal: false });
-
-// src/sim/market.ts
-var DEFAULT_SIM = {
-  seed: 42,
-  startTs: Date.UTC(2026, 8, 1, 14, 0, 0),
-  durationMs: 60 * 6e4,
-  launchesPerMin: 6,
-  predictability: 0.7,
-  smartWallets: 40,
-  retailWallets: 4e3,
-  stepMs: 250
-};
-var WORDS = [
-  "pepe",
-  "doge",
-  "cat",
-  "frog",
-  "moon",
-  "chad",
-  "wojak",
-  "bonk",
-  "milady",
-  "jeet",
-  "sigma",
-  "based",
-  "goat",
-  "pnut",
-  "hawk",
-  "tuah",
-  "jean",
-  "phil",
-  "dance",
-  "grok",
-  "neiro",
-  "shib",
-  "floki",
-  "kitty",
-  "bull",
-  "bear",
-  "pump",
-  "wif",
-  "hat",
-  "gigachad",
-  "wagmi",
-  "fartcoin",
-  "ai",
-  "agent",
-  "trump",
-  "elon",
-  "zerebro",
-  "luna",
-  "banana",
-  "monkey",
-  "ape",
-  "penguin",
-  "pengu",
-  "turbo",
-  "brett",
-  "andy",
-  "landwolf",
-  "mog",
-  "popcat",
-  "michi",
-  "mew",
-  "slerf",
-  "ponke",
-  "giga",
-  "spx",
-  "ansem",
-  "orca",
-  "fish",
-  "whale",
-  "dragon",
-  "tiger",
-  "panda",
-  "duck",
-  "chicken",
-  "hamster",
-  "capybara",
-  "otter"
-];
-function pick(r, xs) {
-  return xs[Math.floor(r() * xs.length)];
-}
-function lognormal(r, mu, sigma) {
-  const u = Math.max(1e-12, r());
-  const v = r();
-  const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
-  return Math.exp(mu + sigma * z);
-}
-function poisson(r, lambda) {
-  if (lambda <= 0) return 0;
-  if (lambda < 30) {
-    const L = Math.exp(-lambda);
-    let k = 0;
-    let p = 1;
-    do {
-      k++;
-      p *= r();
-    } while (p > L);
-    return k - 1;
-  }
-  const u = Math.max(1e-12, r());
-  const v = r();
-  return Math.max(0, Math.round(lambda + Math.sqrt(lambda) * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)));
-}
-var MarketSim = class {
-  opts;
-  r;
-  launchedCount = 0;
-  active = [];
-  retail = [];
-  smart = [];
-  devs = [];
-  recentNames = [];
-  now;
-  slot0 = 3e8;
-  truth = /* @__PURE__ */ new Map();
-  constructor(opts = {}) {
-    this.opts = { ...DEFAULT_SIM, ...opts };
-    this.r = rng(this.opts.seed);
-    this.now = this.opts.startTs;
-    for (let i = 0; i < this.opts.retailWallets; i++) this.retail.push(this.key());
-    for (let i = 0; i < this.opts.smartWallets; i++) this.smart.push(this.key());
-    for (let i = 0; i < 300; i++) this.devs.push(this.key());
-  }
-  key() {
-    const b = new Uint8Array(32);
-    for (let i = 0; i < 32; i++) b[i] = Math.floor(this.r() * 256);
-    b[0] = 1 + b[0] % 250;
-    return base58Encode(b);
-  }
-  slot(ts) {
-    return this.slot0 + Math.floor((ts - this.opts.startTs) / 400);
-  }
-  /** Generate the full event stream in time order. */
-  *run() {
-    const end = this.opts.startTs + this.opts.durationMs;
-    const step = this.opts.stepMs;
-    const launchP = this.opts.launchesPerMin * step / 6e4;
-    for (let ts = this.opts.startTs; ts < end; ts += step) {
-      this.now = ts;
-      const batch = [];
-      let n = poisson(this.r, launchP);
-      while (n-- > 0) this.launch(ts + Math.floor(this.r() * step), batch);
-      for (const t of this.active) if (!t.dead) this.stepToken(t, ts, step, batch);
-      if (this.active.length > 400 || ts % 1e4 < step) {
-        for (const t of this.active) if (t.dead) t.bags.clear();
-        this.active = this.active.filter((t) => !t.dead);
-      }
-      batch.sort((a, b) => a.ts - b.ts);
-      for (const ev of batch) yield ev;
-    }
-  }
-  newName(ts) {
-    this.recentNames = this.recentNames.filter((x) => ts - x.ts < 15 * 6e4);
-    if (this.recentNames.length > 0 && this.r() < 0.22) {
-      const c = pick(this.r, this.recentNames);
-      return { name: c.name + (this.r() < 0.5 ? "" : " " + pick(this.r, ["2.0", "CTO", "official", "sol"])), symbol: c.symbol };
-    }
-    const w1 = pick(this.r, WORDS);
-    const w2 = this.r() < 0.5 ? pick(this.r, WORDS) : "";
-    const name = (w1[0].toUpperCase() + w1.slice(1) + (w2 ? " " + w2 : "")).slice(0, 30);
-    const symbol = (w1 + (w2 ? w2.slice(0, 3) : "")).toUpperCase().slice(0, 10);
-    return { name, symbol };
-  }
-  launch(ts, out) {
-    const r = this.r;
-    const { name, symbol } = this.newName(ts);
-    const q = Math.min(40, lognormal(r, -2.4, 1.45));
-    const pr = this.opts.predictability;
-    const noise = Math.min(40, lognormal(r, -2.4, 1.45));
-    const qEarly = pr * q + (1 - pr) * noise;
-    const serial = r() < 0.25;
-    const creator = serial ? this.devs[Math.floor(r() * 20)] : pick(r, this.devs);
-    const devType = r() < (serial ? 0.7 : 0.35) ? "rug" : r() < 0.5 ? "slow" : "honest";
-    const t = {
-      mint: this.key(),
-      name,
-      symbol,
-      creator,
-      bondingCurve: this.key(),
-      createdAt: ts,
-      q,
-      qEarly,
-      devType,
-      devSellAt: ts + (devType === "rug" ? 2e4 + r() * 3e5 : 6e5 + r() * 36e5),
-      curve: newCurve(),
-      stage: "curve",
-      bags: /* @__PURE__ */ new Map(),
-      excitation: 0,
-      peakMcap: 28,
-      dead: false,
-      smartChecked: false,
-      lastTradeAt: ts
-    };
-    this.launchedCount++;
-    this.active.push(t);
-    this.recentNames.push({ ts, name, symbol });
-    this.truth.set(t.mint, { mint: t.mint, q, qEarly, devType, graduated: false, peakMcapSol: 28 });
-    const slot = this.slot(ts);
-    out.push({
-      k: "create",
-      ts,
-      slot,
-      sig: this.key(),
-      src: "sim",
-      chainTs: Math.floor(ts / 1e3),
-      mint: t.mint,
-      name,
-      symbol,
-      uri: `https://ipfs.io/ipfs/sim${t.mint.slice(0, 10)}`,
-      creator,
-      user: creator,
-      vSol: CURVE.initialVirtualSol,
-      vTok: CURVE.initialVirtualTok,
-      realTok: CURVE.initialRealTok,
-      supply: CURVE.supply
-    });
-    const devSol = r() < 0.15 ? 0 : Math.min(4, lognormal(r, -0.7, 0.8));
-    if (devSol > 0.01) this.buy(t, creator, devSol, ts, slot, "dev", out);
-    if (r() < (devType === "rug" ? 0.55 : 0.2)) {
-      const n = 2 + Math.floor(r() * 8);
-      for (let i = 0; i < n; i++) this.buy(t, this.key(), 0.3 + r() * 2, ts, slot, "bundle", out);
-    }
-    const socialP = Math.min(0.9, 0.2 + 0.25 * qEarly);
-    out.push({
-      k: "meta",
-      ts: ts + 800 + Math.floor(r() * 1500),
-      mint: t.mint,
-      src: "sim",
-      twitter: r() < socialP ? r() < 0.4 ? `https://x.com/${symbol.toLowerCase()}/status/${18e17 + Math.floor(r() * 1e15)}` : `https://x.com/${symbol.toLowerCase()}` : void 0,
-      telegram: r() < socialP * 0.6 ? `https://t.me/${symbol.toLowerCase()}` : void 0,
-      website: r() < socialP * 0.4 ? `https://${symbol.toLowerCase()}.fun` : void 0,
-      description: `${name} to the moon`
-    });
-  }
-  mcap(t) {
-    if (t.stage === "amm" && t.poolState) return t.poolState.quote * t.poolState.supply / t.poolState.base / LAMPORTS_PER_SOL;
-    return curveMcapSol(t.curve);
-  }
-  priceOf(t) {
-    if (t.stage === "amm" && t.poolState) return t.poolState.quote / t.poolState.base;
-    return t.curve.vSol / t.curve.vTok;
-  }
-  stepToken(t, ts, step, out) {
-    const r = this.r;
-    const age = (ts - t.createdAt) / 1e3;
-    const dt = step / 1e3;
-    const qPhase = age < 90 ? t.qEarly : t.q;
-    const life = 60 + 900 * Math.min(1, t.q / 4);
-    let attention = qPhase * Math.exp(-age / life);
-    if (t.stage === "amm") attention *= 0.6;
-    t.excitation *= Math.pow(0.5, dt / 20);
-    const buyRate = 0.9 * attention + t.excitation;
-    const nBuys = Math.min(40, poisson(r, buyRate * dt));
-    const slot = this.slot(ts);
-    if (age < 1.2 && r() < 0.35) this.buy(t, this.key(), 0.2 + r() * 1.5, ts + Math.floor(r() * step), slot + 1, "sniper", out);
-    for (let i = 0; i < nBuys; i++) {
-      const size = Math.min(25, lognormal(r, -1.6, 1));
-      this.buy(t, pick(r, this.retail), size, ts + Math.floor(r() * step), slot, "retail", out);
-      t.excitation += 0.02;
-    }
-    if (!t.smartChecked && age > 8 && age < 60) {
-      t.smartChecked = true;
-      const pr = this.opts.predictability;
-      const informed = Math.min(0.95, 0.03 + pr * 0.35 * Math.max(0, Math.log(t.q + 1)));
-      const p = pr > 0 ? informed : 0.06;
-      const k = poisson(r, p * 3);
-      for (let i = 0; i < k; i++) this.buy(t, pick(r, this.smart), 0.5 + r() * 2.5, ts + Math.floor(r() * step), slot, "smart", out);
-    }
-    if (Math.floor(ts / 1e3) !== Math.floor((ts - step) / 1e3)) {
-      const price = this.priceOf(t);
-      const m = this.mcap(t);
-      if (m > t.peakMcap) t.peakMcap = m;
-      const dd = 1 - m / t.peakMcap;
-      for (const [wallet, bag] of t.bags) {
-        if (bag.tokens <= 0) continue;
-        const mult = bag.costSol > 0 ? price * bag.tokens * 0.975 / (bag.costSol * LAMPORTS_PER_SOL) : 1;
-        let hazard = 1 / 900;
-        if (bag.kind === "sniper") hazard = mult > bag.target || age > 90 ? 0.3 : 1 / 120;
-        else if (bag.kind === "bundle") hazard = mult > 1.4 || age > 120 ? 0.25 : 1 / 200;
-        else if (bag.kind === "smart") hazard = mult > bag.target ? 0.2 : dd > 0.45 ? 0.08 : 1 / 1200;
-        else if (bag.kind === "dev") {
-          if (t.devType === "rug" && ts >= t.devSellAt) hazard = 1;
-          else if (t.devType === "slow" && mult > 1.5) hazard = 1 / 60;
-          else hazard = ts >= t.devSellAt ? 0.05 : 0;
-        } else {
-          hazard *= 1 + 2.5 * Math.max(0, mult - 1) + 6 * dd * dd;
-          if (mult > bag.target) hazard += 0.05;
-        }
-        if (r() < 1 - Math.exp(-hazard)) {
-          const frac = bag.kind === "dev" || bag.kind === "bundle" || r() < 0.6 ? 1 : 0.3 + r() * 0.5;
-          this.sell(t, wallet, Math.floor(bag.tokens * frac), ts + Math.floor(r() * step), slot, out);
-        }
-      }
-    }
-    const idle = ts - t.lastTradeAt;
-    if (buyRate < 0.01 && idle > 18e4 || idle > 18e5 || age > 6 * 3600) t.dead = true;
-  }
-  valueOf(t, tokens) {
-    if (t.stage === "amm" && t.poolState) return poolSellQuote(t.poolState, tokens).solOut / LAMPORTS_PER_SOL;
-    return curveSellQuote(t.curve, tokens).solOut / LAMPORTS_PER_SOL;
-  }
-  buy(t, wallet, sol, ts, slot, kind, out) {
-    const lamports = Math.floor(sol * LAMPORTS_PER_SOL);
-    if (t.stage === "curve") {
-      const q = curveBuyQuote(t.curve, lamports);
-      if (q.tokensOut <= 0) return;
-      t.curve = q.after;
-      this.addBag(t, wallet, q.tokensOut, q.solSpent / LAMPORTS_PER_SOL, ts, kind);
-      out.push({
-        k: "trade",
-        ts,
-        slot,
-        sig: this.key(),
-        src: "sim",
-        chainTs: Math.floor(ts / 1e3),
-        mint: t.mint,
-        buy: true,
-        sol: q.solToCurve,
-        tok: q.tokensOut,
-        user: wallet,
-        venue: "curve",
-        vSol: t.curve.vSol,
-        vTok: t.curve.vTok,
-        realSol: t.curve.vSol - CURVE.initialVirtualSol,
-        realTok: t.curve.realTok,
-        supply: t.curve.supply,
-        fee: q.feeLamports
-      });
-      t.lastTradeAt = ts;
-      if (t.curve.realTok <= 0) this.graduate(t, ts, slot, out);
-    } else if (t.poolState) {
-      if (ts < (t.poolOpenAt ?? 0)) ts = t.poolOpenAt;
-      const pre = { ...t.poolState };
-      const q = poolBuyQuote(t.poolState, lamports);
-      if (q.tokensOut <= 0) return;
-      t.poolState = { ...t.poolState, base: q.after.vTok, quote: q.after.vSol };
-      this.addBag(t, wallet, q.tokensOut, q.solSpent / LAMPORTS_PER_SOL, ts, kind);
-      out.push({
-        k: "ammSwap",
-        ts,
-        slot,
-        sig: this.key(),
-        src: "sim",
-        chainTs: Math.floor(ts / 1e3),
-        pool: t.pool,
-        buy: true,
-        base: q.tokensOut,
-        quoteDelta: q.solToCurve,
-        fee: q.feeLamports,
-        user: wallet,
-        poolBase: pre.base,
-        poolQuote: pre.quote,
-        virtualQuote: 0,
-        supply: t.poolState.supply
-      });
-      t.lastTradeAt = ts;
-    }
-    const m = this.mcap(t);
-    const tr = this.truth.get(t.mint);
-    if (m > tr.peakMcapSol) tr.peakMcapSol = m;
-  }
-  addBag(t, wallet, tokens, costSol, ts, kind) {
-    const b = t.bags.get(wallet);
-    const r = this.r;
-    const target = kind === "sniper" ? 1.5 + r() * 2 : kind === "smart" ? 2 + r() * 4 : kind === "retail" ? 1.5 + lognormal(r, 0, 0.8) : 99;
-    if (b) {
-      b.tokens += tokens;
-      b.costSol += costSol;
-    } else t.bags.set(wallet, { tokens, costSol, boughtAt: ts, kind, target });
-  }
-  sell(t, wallet, tokens, ts, slot, out) {
-    const bag = t.bags.get(wallet);
-    if (!bag || tokens <= 0) return;
-    tokens = Math.min(tokens, bag.tokens);
-    if (t.stage === "curve") {
-      const q = curveSellQuote(t.curve, tokens);
-      if (q.solFromCurve <= 0) return;
-      t.curve = q.after;
-      bag.costSol *= 1 - tokens / bag.tokens;
-      bag.tokens -= tokens;
-      out.push({
-        k: "trade",
-        ts,
-        slot,
-        sig: this.key(),
-        src: "sim",
-        chainTs: Math.floor(ts / 1e3),
-        mint: t.mint,
-        buy: false,
-        sol: q.solFromCurve,
-        tok: tokens,
-        user: wallet,
-        venue: "curve",
-        vSol: t.curve.vSol,
-        vTok: t.curve.vTok,
-        realSol: t.curve.vSol - CURVE.initialVirtualSol,
-        realTok: t.curve.realTok,
-        supply: t.curve.supply,
-        fee: q.feeLamports
-      });
-    } else if (t.poolState) {
-      if (ts < (t.poolOpenAt ?? 0)) ts = t.poolOpenAt;
-      const pre = { ...t.poolState };
-      const q = poolSellQuote(t.poolState, tokens);
-      if (q.solOut <= 0) return;
-      t.poolState = { ...t.poolState, base: q.after.vTok, quote: q.after.vSol };
-      bag.costSol *= 1 - tokens / bag.tokens;
-      bag.tokens -= tokens;
-      out.push({
-        k: "ammSwap",
-        ts,
-        slot,
-        sig: this.key(),
-        src: "sim",
-        chainTs: Math.floor(ts / 1e3),
-        pool: t.pool,
-        buy: false,
-        base: tokens,
-        quoteDelta: q.solFromCurve,
-        fee: q.feeLamports,
-        user: wallet,
-        poolBase: pre.base,
-        poolQuote: pre.quote,
-        virtualQuote: 0,
-        supply: t.poolState.supply
-      });
-    }
-    if (bag.tokens <= 0) t.bags.delete(wallet);
-    t.lastTradeAt = ts;
-  }
-  graduate(t, ts, slot, out) {
-    t.stage = "amm";
-    t.pool = this.key();
-    const realSol = t.curve.vSol - CURVE.initialVirtualSol;
-    const quote = Math.max(1, realSol - 15000001);
-    const base = CURVE.supply - CURVE.initialRealTok;
-    t.poolState = { base, quote, supply: CURVE.supply, hasCreator: true };
-    const tr = this.truth.get(t.mint);
-    tr.graduated = true;
-    t.excitation += 0.6;
-    out.push({ k: "complete", ts: ts + 1, slot, sig: this.key(), src: "sim", mint: t.mint });
-    out.push({ k: "migrate", ts: ts + 2, slot, sig: this.key(), src: "sim", mint: t.mint, pool: t.pool, solAmount: quote, mintAmount: base });
-    out.push({ k: "pool", ts: ts + 2, slot, sig: this.key(), src: "sim", pool: t.pool, mint: t.mint, quoteIsSol: true, base, quote, coinCreator: t.creator });
-    t.poolOpenAt = ts + 3;
-  }
-  get launched() {
-    return this.launchedCount;
-  }
-};
-
-// src/node/store.ts
-import {
-  closeSync,
-  createWriteStream,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  readSync,
-  readdirSync,
-  renameSync,
-  rmSync,
-  statSync,
-  writeSync
-} from "node:fs";
-import { join } from "node:path";
-import { createGzip, gunzipSync, gzipSync } from "node:zlib";
-import { createInterface } from "node:readline";
-import { createReadStream } from "node:fs";
-import { createGunzip } from "node:zlib";
-import { StringDecoder } from "node:string_decoder";
-var day = (ts) => new Date(ts).toISOString().slice(0, 10);
-var SAMPLE_LIMITS = { checkpoints: 4e4, structural: 2e4, entries: 25e3 };
-function forEachLine(path, fn) {
-  const fd = openSync(path, "r");
-  try {
-    const buf = Buffer.allocUnsafe(1 << 20);
-    const dec = new StringDecoder("utf8");
-    let rest = "";
-    for (; ; ) {
-      const n = readSync(fd, buf, 0, buf.length, null);
-      if (n <= 0) break;
-      const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
-      rest = lines.pop() ?? "";
-      for (const l of lines) if (l) fn(l);
-    }
-    rest += dec.end();
-    if (rest) fn(rest);
-  } finally {
-    closeSync(fd);
-  }
-}
-var hour = (ts) => new Date(ts).toISOString().slice(0, 13);
-function writeFileAtomic(path, data) {
-  const tmp = `${path}.tmp-${process.pid}`;
-  const fd = openSync(tmp, "w");
-  try {
-    writeSync(fd, typeof data === "string" ? Buffer.from(data) : data);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  for (let attempt = 1; ; attempt++) {
-    try {
-      renameSync(tmp, path);
-      return;
-    } catch (e) {
-      const code = e.code;
-      if (attempt >= 6 || !(code === "EPERM" || code === "EBUSY" || code === "EACCES")) throw e;
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * attempt);
-    }
-  }
-}
-var DataStore = class {
-  constructor(dir, log) {
-    this.log = log;
-    this.dir = dir;
-    for (const sub of ["", "journal", "samples", "record", "models", "reports"]) mkdirSync(join(dir, sub), { recursive: true });
-    this.flushTimer = setInterval(() => this.flush(), 1e3);
-    this.flushTimer.unref?.();
-  }
-  dir;
-  recStream = null;
-  recorded = 0;
-  journalLines = [];
-  sampleLines = [];
-  flushTimer = null;
-  // ---- state -------------------------------------------------------------------
-  saveState(s) {
-    writeFileAtomic(join(this.dir, "state.json"), JSON.stringify(s));
-  }
-  loadState() {
-    for (const name of ["state.json", "state.json.bak"]) {
-      const p = join(this.dir, name);
-      if (!existsSync(p)) continue;
-      try {
-        const s = JSON.parse(readFileSync(p, "utf8"));
-        if (s && s.v === 1) return s;
-      } catch (e) {
-        this.log.error(`could not read ${name}`, { err: String(e) });
-      }
-    }
-    return null;
-  }
-  /** Daily backup copy so a corrupted disk write can never lose everything. */
-  backupState() {
-    const p = join(this.dir, "state.json");
-    if (existsSync(p)) {
-      try {
-        writeFileAtomic(join(this.dir, "state.json.bak"), readFileSync(p));
-      } catch (e) {
-        this.log.warn("state backup failed", { err: String(e) });
-      }
-    }
-  }
-  // ---- journal & samples (buffered, flushed every second) ------------------------
-  journal(entry) {
-    this.journalLines.push(JSON.stringify(entry));
-  }
-  sample(s) {
-    this.sampleLines.push(JSON.stringify(s));
-  }
-  flush() {
-    const now = Date.now();
-    try {
-      if (this.journalLines.length) {
-        const lines = this.journalLines.splice(0);
-        appendLines(join(this.dir, "journal", `${day(now)}.jsonl`), lines);
-      }
-      if (this.sampleLines.length) {
-        const lines = this.sampleLines.splice(0);
-        appendLines(join(this.dir, "samples", `${day(now)}.jsonl`), lines);
-      }
-    } catch (e) {
-      this.log.error("journal/sample flush failed", { err: String(e) });
-    }
-  }
-  /**
-   * Labelled samples from the last `days`, oldest first. Files are read newest first and
-   * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
-   * so memory stays bounded however much has been recorded.
-   */
-  loadSamples(days, now = Date.now(), limits = SAMPLE_LIMITS) {
-    const cutoff = day(now - days * 864e5);
-    let files = [];
-    try {
-      files = readdirSync(join(this.dir, "samples")).filter((f2) => f2.endsWith(".jsonl") && f2.slice(0, 10) >= cutoff).sort().reverse();
-    } catch {
-      return [];
-    }
-    const perFile = [];
-    const cap = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
-    const used = { cp: 0, st: 0, en: 0 };
-    const bucketOf = (line) => !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
-    for (const f2 of files) {
-      const room = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
-      if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;
-      const got = { cp: [], st: [], en: [] };
-      try {
-        forEachLine(join(this.dir, "samples", f2), (line) => {
-          const b = bucketOf(line);
-          if (room[b] <= 0) return;
-          let s;
-          try {
-            s = JSON.parse(line);
-          } catch {
-            return;
-          }
-          if (!Array.isArray(s.x) || s.y !== 0 && s.y !== 1) return;
-          const into = got[b];
-          into.push(s);
-          if (into.length >= room[b] * 2) into.splice(0, into.length - room[b]);
-        });
-      } catch (e) {
-        this.log.warn("could not read samples", { file: f2, err: String(e) });
-        continue;
-      }
-      for (const b of ["cp", "st", "en"]) {
-        if (got[b].length > room[b]) got[b].splice(0, got[b].length - Math.max(0, room[b]));
-        used[b] += got[b].length;
-      }
-      perFile.push(got.cp.concat(got.st, got.en));
-    }
-    return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
-  }
-  // ---- market recorder (gzip, hourly files) ----------------------------------------
-  record(ev, ts) {
-    const key = hour(ts);
-    if (!this.recStream || this.recStream.key !== key) {
-      this.closeRecorder();
-      const gz = createGzip({ level: 6 });
-      const file = createWriteStream(join(this.dir, "record", `${key}.jsonl.gz`), { flags: "a" });
-      file.on("error", (e) => this.log.error("recorder write failed", { err: String(e) }));
-      gz.pipe(file);
-      this.recStream = { key, gz, file };
-    }
-    this.recStream.gz.write(JSON.stringify(ev) + "\n");
-    this.recorded++;
-  }
-  closeRecorder() {
-    if (this.recStream) {
-      this.recStream.gz.end();
-      this.recStream = null;
-    }
-  }
-  recordFiles() {
-    try {
-      return readdirSync(join(this.dir, "record")).filter((f2) => f2.endsWith(".jsonl.gz")).sort().map((f2) => join(this.dir, "record", f2));
-    } catch {
-      return [];
-    }
-  }
-  // ---- models ----------------------------------------------------------------------
-  saveModel(m) {
-    writeFileAtomic(join(this.dir, "models", "current.json"), JSON.stringify(m, null, 1));
-    const safe = m.version.replace(/[^A-Za-z0-9_.-]/g, "_");
-    writeFileAtomic(join(this.dir, "models", `${safe}.json`), JSON.stringify(m));
-  }
-  loadModel() {
-    const p = join(this.dir, "models", "current.json");
-    if (!existsSync(p)) return null;
-    try {
-      const m = JSON.parse(readFileSync(p, "utf8"));
-      return validateModel(m) ? m : null;
-    } catch {
-      return null;
-    }
-  }
-  // ---- edge finder -----------------------------------------------------------------
-  saveEdges(report) {
-    writeFileAtomic(join(this.dir, "edges.json"), JSON.stringify(report));
-  }
-  loadEdges() {
-    const p = join(this.dir, "edges.json");
-    if (!existsSync(p)) return null;
-    try {
-      return JSON.parse(readFileSync(p, "utf8"));
-    } catch {
-      return null;
-    }
-  }
-  // ---- wallets ---------------------------------------------------------------------
-  saveWallets(snap) {
-    writeFileAtomic(join(this.dir, "wallets.json.gz"), gzipSync(JSON.stringify(snap)));
-  }
-  loadWallets() {
-    const p = join(this.dir, "wallets.json.gz");
-    if (!existsSync(p)) return null;
-    try {
-      return JSON.parse(gunzipSync(readFileSync(p)).toString("utf8"));
-    } catch {
-      return null;
-    }
-  }
-  // ---- misc --------------------------------------------------------------------------
-  readSecret() {
-    const p = join(this.dir, "secret.json");
-    if (!existsSync(p)) return null;
-    try {
-      return JSON.parse(readFileSync(p, "utf8")).token ?? null;
-    } catch {
-      return null;
-    }
-  }
-  writeSecret(token) {
-    writeFileAtomic(join(this.dir, "secret.json"), JSON.stringify({ token }));
-  }
-  /** Delete recordings/samples/journals past their retention. */
-  cleanup(recordDays, sampleDays, now = Date.now()) {
-    const prune = (sub, days) => {
-      const cutoff = day(now - days * 864e5);
-      try {
-        for (const f2 of readdirSync(join(this.dir, sub))) if (f2.slice(0, 10) < cutoff) rmSync(join(this.dir, sub, f2), { force: true });
-      } catch {
-      }
-    };
-    prune("record", recordDays);
-    prune("samples", sampleDays);
-    prune("journal", Math.max(sampleDays, 30));
-  }
-  diskUsageMb() {
-    let total = 0;
-    const walk = (d) => {
-      try {
-        for (const f2 of readdirSync(d)) {
-          const p = join(d, f2);
-          const st = statSync(p);
-          if (st.isDirectory()) walk(p);
-          else total += st.size;
-        }
-      } catch {
-      }
-    };
-    walk(this.dir);
-    return Math.round(total / 1e6);
-  }
-  close() {
-    if (this.flushTimer) clearInterval(this.flushTimer);
-    this.flush();
-    this.closeRecorder();
-  }
-};
-function appendLines(path, lines) {
-  const fd = openSync(path, "a");
-  try {
-    writeSync(fd, lines.join("\n") + "\n");
-  } finally {
-    closeSync(fd);
-  }
-}
-async function* readRecording(path) {
-  const rl = createInterface({ input: createReadStream(path).pipe(createGunzip()), crlfDelay: Infinity });
-  try {
-    for await (const line of rl) {
-      if (!line) continue;
-      try {
-        yield JSON.parse(line);
-      } catch {
-      }
-    }
-  } catch {
-  }
-}
 
 // src/core/decode.ts
 function ammPostReserves(s, reservesArePreTrade = true) {
@@ -4482,37 +4139,7 @@ var Engine = class {
       if (rows.length < minRows) continue;
       const base = this.priorBase.stages[stage];
       const cur = this.model.stages[stage];
-      const n = rows.length;
-      const blend = n / (n + 600);
-      const mean2 = {};
-      const std = {};
-      FEATURE_KEYS.forEach((k2, j) => {
-        let m = 0;
-        for (const r of rows) m += r[j];
-        m /= n;
-        let v = 0;
-        for (const r of rows) v += (r[j] - m) ** 2;
-        const sd = Math.sqrt(v / Math.max(1, n - 1));
-        const pm = base.mean[k2] ?? 0;
-        const ps = base.std[k2] ?? 1;
-        mean2[k2] = (1 - blend) * pm + blend * m;
-        std[k2] = Math.max((1 - blend) * ps + blend * sd, 0.5 * ps, 1e-6);
-      });
-      const lin = [];
-      for (const r of rows) {
-        let s22 = 0;
-        FEATURE_KEYS.forEach((k2, j) => {
-          s22 += (base.weights[k2] ?? 0) * clamp((r[j] - mean2[k2]) / std[k2], -5, 5);
-        });
-        lin.push(s22);
-      }
-      const lm = lin.reduce((a, b) => a + b, 0) / lin.length;
-      const lsd = Math.sqrt(lin.reduce((a, b) => a + (b - lm) ** 2, 0) / Math.max(1, lin.length - 1));
-      const k = lsd > 1e-6 ? clamp(0.85 / lsd, 0.15, 3) : 1;
-      const weights = {};
-      for (const key of FEATURE_KEYS) weights[key] = (base.weights[key] ?? 0) * k;
-      const bias = base.bias - lm * k;
-      this.model.stages[stage] = { ...cur, mean: mean2, std, weights, bias, pRef: base.pRef };
+      this.model.stages[stage] = { ...cur, ...scalePrior(base, rows), pRef: base.pRef };
       changed = true;
     }
     if (changed) {
@@ -4896,6 +4523,987 @@ var Engine = class {
   }
 };
 
+// src/core/report.ts
+function nearestGrid(tp, sl) {
+  let best = 0;
+  let bestD = Infinity;
+  GRID.forEach((g, i) => {
+    const d = Math.abs(Math.log(g.tp / tp)) + Math.abs(g.sl - sl) / 25;
+    if (d < bestD) {
+      bestD = d;
+      best = i;
+    }
+  });
+  return best;
+}
+function gridOf(s) {
+  return s.grid?.length === GRID.length ? s.grid : void 0;
+}
+function sampleReturn(s, tp, sl) {
+  if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
+  const g = gridOf(s);
+  const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
+  if (g && gi >= 0 && Number.isFinite(g[gi])) return { ret: g[gi], exact: true };
+  return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
+}
+function statsOf(rets) {
+  const wins2 = rets.filter((r) => r > 0).length;
+  const w = wilson(wins2, rets.length);
+  const m = meanCI(rets);
+  return { n: rets.length, winRate: rets.length ? wins2 / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
+}
+function paperStats(closed) {
+  const done = closed.filter((p) => p.status === "closed" && Number.isFinite(p.pnl));
+  const wins2 = done.filter((p) => (p.pnl ?? 0) > 0);
+  const gross = wins2.reduce((s, p) => s + (p.pnl ?? 0), 0);
+  const loss = -done.filter((p) => (p.pnl ?? 0) <= 0).reduce((s, p) => s + (p.pnl ?? 0), 0);
+  let peak = 0;
+  let eq = 0;
+  let mdd = 0;
+  for (const p of [...done].sort((a, b) => (a.closedAt ?? 0) - (b.closedAt ?? 0))) {
+    eq += p.pnl ?? 0;
+    peak = Math.max(peak, eq);
+    mdd = Math.max(mdd, peak - eq);
+  }
+  return {
+    trades: done.length,
+    wins: wins2.length,
+    winRate: done.length ? wins2.length / done.length : NaN,
+    pnlSol: (gross - loss) / 1e9,
+    avgPct: done.length ? done.reduce((s, p) => s + (p.pnlPct ?? 0), 0) / done.length : NaN,
+    profitFactor: loss > 0 ? gross / loss : gross > 0 ? Infinity : NaN,
+    maxDrawdownSol: mdd / 1e9
+  };
+}
+function buildReport(samples, settings, model, closed, now) {
+  const tp = settings.tpPct;
+  const sl = settings.slPct;
+  const checkpoints = samples.filter((s) => s.kind === "checkpoint");
+  const signals = samples.filter((s) => s.kind === "signal");
+  const exactCombo = samples.length === 0 || sampleReturn(samples[0], tp, sl).exact;
+  const retOf = (s) => sampleReturn(s, tp, sl).ret;
+  const t0 = samples.reduce((m, s) => Math.min(m, s.ts), Infinity);
+  const t1 = samples.reduce((m, s) => Math.max(m, s.ts), 0);
+  const spanHours = samples.length ? Math.max(1 / 60, (t1 - t0) / 36e5) : 0;
+  const buckets = [];
+  for (let lo = 0; lo < 100; lo += 10) {
+    const hi = lo + 10;
+    const rows = checkpoints.filter((s) => s.score >= lo && (s.score < hi || hi === 100 && s.score <= 100));
+    const st = statsOf(rows.map(retOf));
+    const mm = rows.map((s) => s.maxMult).sort((a, b) => a - b);
+    buckets.push({ lo, hi, n: st.n, winRate: st.winRate, winLo: st.winLo, winHi: st.winHi, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, medMaxMult: quantile(mm, 0.5) });
+  }
+  const sigAbove = signals.filter((s) => s.score >= settings.minScore);
+  const signalStats = statsOf(sigAbove.map(retOf));
+  const entries = samples.filter((s) => s.kind === "entry");
+  const thresholdSource = entries.length >= 200 ? "entries" : "checkpoints";
+  const atLevel = (min) => thresholdSource === "entries" ? entries.filter((s) => s.tag === `x${min}`) : checkpoints.filter((s) => s.score >= min);
+  const thresholds = [];
+  for (let min = 50; min <= 95; min += 5) {
+    const rows = atLevel(min);
+    const st = statsOf(rows.map(retOf));
+    const tokens = new Set(rows.map((s) => s.mint)).size;
+    thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
+  }
+  const level = [...ENTRY_LEVELS].reverse().find((l) => l <= settings.minScore) ?? ENTRY_LEVELS[0];
+  const levelEntries = entries.filter((s) => s.tag === `x${level}`);
+  let gridSource;
+  let pool;
+  if (sigAbove.length >= 50) {
+    gridSource = "signals";
+    pool = sigAbove;
+  } else if (levelEntries.length >= 50) {
+    gridSource = "entries";
+    pool = levelEntries;
+  } else {
+    gridSource = "checkpoints";
+    pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
+  }
+  const grid = GRID.map((g, i) => {
+    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x) => Number.isFinite(x));
+    const st = statsOf(rets);
+    return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
+  });
+  const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
+  const best = credible.length ? credible.reduce((a, b) => b.retLo > a.retLo ? b : a) : null;
+  const minN = 150;
+  let gate;
+  if (signalStats.n < minN) {
+    gate = {
+      pass: false,
+      verdict: "Not enough evidence yet",
+      detail: `${signalStats.n}/${minN} resolved signals at score \u2265 ${settings.minScore} with TP ${tp}% / SL ${sl}%. Keep paper trading.`
+    };
+  } else if (!(signalStats.retLo > 0.02)) {
+    gate = {
+      pass: false,
+      verdict: signalStats.avgRet > 0 ? "Positive but not proven" : "Losing at these settings",
+      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%) after fees, delay and slippage. The low end must clear +2% before risking real money.`
+    };
+  } else {
+    gate = {
+      pass: true,
+      verdict: "Evidence supports these settings",
+      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade over ${signalStats.n} signals; 95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%. Past results in this market can still stop working \u2014 start small.`
+    };
+  }
+  let suggestion = null;
+  const zBound = (xs, z) => {
+    const m = meanCI(xs);
+    return Number.isFinite(m.lo) ? m.mean - (m.mean - m.lo) / 1.96 * z : -Infinity;
+  };
+  const cur = pool.map(retOf);
+  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
+  const mid = t0 + (t1 - t0) / 2;
+  for (let min = 50; min <= 95; min += 5) {
+    const rows = atLevel(min);
+    if (rows.length < 150) continue;
+    GRID.forEach((g, i) => {
+      const val = (s) => gridOf(s)?.[i];
+      const all = rows.map(val).filter((x) => Number.isFinite(x));
+      if (all.length < 150) return;
+      const lo = zBound(all, 3.5);
+      if (!(lo > 0) || lo <= bestLo + 5e-3) return;
+      const older = rows.filter((s) => s.ts < mid).map(val).filter((x) => Number.isFinite(x));
+      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x) => Number.isFinite(x));
+      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
+      const m = meanCI(all);
+      bestLo = lo;
+      suggestion = {
+        minScore: min,
+        tpPct: g.tp,
+        slPct: g.sl,
+        avgRet: m.mean,
+        retLo: lo,
+        n: all.length,
+        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
+      };
+    });
+  }
+  return {
+    generatedAt: now,
+    suggestion,
+    samples: samples.length,
+    checkpoints: checkpoints.length,
+    signals: signals.length,
+    entries: entries.length,
+    spanHours,
+    settings: { tpPct: tp, slPct: sl, minScore: settings.minScore },
+    combo: { tp, sl, exact: exactCombo },
+    breakEven: breakEvenP(tp, sl),
+    buckets,
+    signalStats,
+    thresholds,
+    thresholdSource,
+    grid,
+    gridSource,
+    best,
+    gate,
+    paper: paperStats(closed),
+    model: { version: model.version, source: model.source, training: model.training ?? null }
+  };
+}
+
+// src/sim/market.ts
+var DEFAULT_SIM = {
+  seed: 42,
+  startTs: Date.UTC(2026, 8, 1, 14, 0, 0),
+  durationMs: 60 * 6e4,
+  launchesPerMin: 6,
+  predictability: 0.7,
+  smartWallets: 40,
+  retailWallets: 4e3,
+  stepMs: 250
+};
+var WORDS = [
+  "pepe",
+  "doge",
+  "cat",
+  "frog",
+  "moon",
+  "chad",
+  "wojak",
+  "bonk",
+  "milady",
+  "jeet",
+  "sigma",
+  "based",
+  "goat",
+  "pnut",
+  "hawk",
+  "tuah",
+  "jean",
+  "phil",
+  "dance",
+  "grok",
+  "neiro",
+  "shib",
+  "floki",
+  "kitty",
+  "bull",
+  "bear",
+  "pump",
+  "wif",
+  "hat",
+  "gigachad",
+  "wagmi",
+  "fartcoin",
+  "ai",
+  "agent",
+  "trump",
+  "elon",
+  "zerebro",
+  "luna",
+  "banana",
+  "monkey",
+  "ape",
+  "penguin",
+  "pengu",
+  "turbo",
+  "brett",
+  "andy",
+  "landwolf",
+  "mog",
+  "popcat",
+  "michi",
+  "mew",
+  "slerf",
+  "ponke",
+  "giga",
+  "spx",
+  "ansem",
+  "orca",
+  "fish",
+  "whale",
+  "dragon",
+  "tiger",
+  "panda",
+  "duck",
+  "chicken",
+  "hamster",
+  "capybara",
+  "otter"
+];
+function pick(r, xs) {
+  return xs[Math.floor(r() * xs.length)];
+}
+function lognormal(r, mu, sigma) {
+  const u = Math.max(1e-12, r());
+  const v = r();
+  const z = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  return Math.exp(mu + sigma * z);
+}
+function poisson(r, lambda) {
+  if (lambda <= 0) return 0;
+  if (lambda < 30) {
+    const L = Math.exp(-lambda);
+    let k = 0;
+    let p = 1;
+    do {
+      k++;
+      p *= r();
+    } while (p > L);
+    return k - 1;
+  }
+  const u = Math.max(1e-12, r());
+  const v = r();
+  return Math.max(0, Math.round(lambda + Math.sqrt(lambda) * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v)));
+}
+var MarketSim = class {
+  opts;
+  r;
+  launchedCount = 0;
+  active = [];
+  retail = [];
+  smart = [];
+  devs = [];
+  recentNames = [];
+  now;
+  slot0 = 3e8;
+  truth = /* @__PURE__ */ new Map();
+  constructor(opts = {}) {
+    this.opts = { ...DEFAULT_SIM, ...opts };
+    this.r = rng(this.opts.seed);
+    this.now = this.opts.startTs;
+    for (let i = 0; i < this.opts.retailWallets; i++) this.retail.push(this.key());
+    for (let i = 0; i < this.opts.smartWallets; i++) this.smart.push(this.key());
+    for (let i = 0; i < 300; i++) this.devs.push(this.key());
+  }
+  key() {
+    const b = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) b[i] = Math.floor(this.r() * 256);
+    b[0] = 1 + b[0] % 250;
+    return base58Encode(b);
+  }
+  slot(ts) {
+    return this.slot0 + Math.floor((ts - this.opts.startTs) / 400);
+  }
+  /** Generate the full event stream in time order. */
+  *run() {
+    const end = this.opts.startTs + this.opts.durationMs;
+    const step = this.opts.stepMs;
+    const launchP = this.opts.launchesPerMin * step / 6e4;
+    for (let ts = this.opts.startTs; ts < end; ts += step) {
+      this.now = ts;
+      const batch = [];
+      let n = poisson(this.r, launchP);
+      while (n-- > 0) this.launch(ts + Math.floor(this.r() * step), batch);
+      for (const t of this.active) if (!t.dead) this.stepToken(t, ts, step, batch);
+      if (this.active.length > 400 || ts % 1e4 < step) {
+        for (const t of this.active) if (t.dead) t.bags.clear();
+        this.active = this.active.filter((t) => !t.dead);
+      }
+      batch.sort((a, b) => a.ts - b.ts);
+      for (const ev of batch) yield ev;
+    }
+  }
+  newName(ts) {
+    this.recentNames = this.recentNames.filter((x) => ts - x.ts < 15 * 6e4);
+    if (this.recentNames.length > 0 && this.r() < 0.22) {
+      const c = pick(this.r, this.recentNames);
+      return { name: c.name + (this.r() < 0.5 ? "" : " " + pick(this.r, ["2.0", "CTO", "official", "sol"])), symbol: c.symbol };
+    }
+    const w1 = pick(this.r, WORDS);
+    const w2 = this.r() < 0.5 ? pick(this.r, WORDS) : "";
+    const name = (w1[0].toUpperCase() + w1.slice(1) + (w2 ? " " + w2 : "")).slice(0, 30);
+    const symbol = (w1 + (w2 ? w2.slice(0, 3) : "")).toUpperCase().slice(0, 10);
+    return { name, symbol };
+  }
+  launch(ts, out) {
+    const r = this.r;
+    const { name, symbol } = this.newName(ts);
+    const q = Math.min(40, lognormal(r, -2.4, 1.45));
+    const pr = this.opts.predictability;
+    const noise = Math.min(40, lognormal(r, -2.4, 1.45));
+    const qEarly = pr * q + (1 - pr) * noise;
+    const serial = r() < 0.25;
+    const creator = serial ? this.devs[Math.floor(r() * 20)] : pick(r, this.devs);
+    const devType = r() < (serial ? 0.7 : 0.35) ? "rug" : r() < 0.5 ? "slow" : "honest";
+    const t = {
+      mint: this.key(),
+      name,
+      symbol,
+      creator,
+      bondingCurve: this.key(),
+      createdAt: ts,
+      q,
+      qEarly,
+      devType,
+      devSellAt: ts + (devType === "rug" ? 2e4 + r() * 3e5 : 6e5 + r() * 36e5),
+      curve: newCurve(),
+      stage: "curve",
+      bags: /* @__PURE__ */ new Map(),
+      excitation: 0,
+      peakMcap: 28,
+      dead: false,
+      smartChecked: false,
+      lastTradeAt: ts
+    };
+    this.launchedCount++;
+    this.active.push(t);
+    this.recentNames.push({ ts, name, symbol });
+    this.truth.set(t.mint, { mint: t.mint, q, qEarly, devType, graduated: false, peakMcapSol: 28 });
+    const slot = this.slot(ts);
+    out.push({
+      k: "create",
+      ts,
+      slot,
+      sig: this.key(),
+      src: "sim",
+      chainTs: Math.floor(ts / 1e3),
+      mint: t.mint,
+      name,
+      symbol,
+      uri: `https://ipfs.io/ipfs/sim${t.mint.slice(0, 10)}`,
+      creator,
+      user: creator,
+      vSol: CURVE.initialVirtualSol,
+      vTok: CURVE.initialVirtualTok,
+      realTok: CURVE.initialRealTok,
+      supply: CURVE.supply
+    });
+    const devSol = r() < 0.15 ? 0 : Math.min(4, lognormal(r, -0.7, 0.8));
+    if (devSol > 0.01) this.buy(t, creator, devSol, ts, slot, "dev", out);
+    if (r() < (devType === "rug" ? 0.55 : 0.2)) {
+      const n = 2 + Math.floor(r() * 8);
+      for (let i = 0; i < n; i++) this.buy(t, this.key(), 0.3 + r() * 2, ts, slot, "bundle", out);
+    }
+    const socialP = Math.min(0.9, 0.2 + 0.25 * qEarly);
+    out.push({
+      k: "meta",
+      ts: ts + 800 + Math.floor(r() * 1500),
+      mint: t.mint,
+      src: "sim",
+      twitter: r() < socialP ? r() < 0.4 ? `https://x.com/${symbol.toLowerCase()}/status/${18e17 + Math.floor(r() * 1e15)}` : `https://x.com/${symbol.toLowerCase()}` : void 0,
+      telegram: r() < socialP * 0.6 ? `https://t.me/${symbol.toLowerCase()}` : void 0,
+      website: r() < socialP * 0.4 ? `https://${symbol.toLowerCase()}.fun` : void 0,
+      description: `${name} to the moon`
+    });
+  }
+  mcap(t) {
+    if (t.stage === "amm" && t.poolState) return t.poolState.quote * t.poolState.supply / t.poolState.base / LAMPORTS_PER_SOL;
+    return curveMcapSol(t.curve);
+  }
+  priceOf(t) {
+    if (t.stage === "amm" && t.poolState) return t.poolState.quote / t.poolState.base;
+    return t.curve.vSol / t.curve.vTok;
+  }
+  stepToken(t, ts, step, out) {
+    const r = this.r;
+    const age = (ts - t.createdAt) / 1e3;
+    const dt = step / 1e3;
+    const qPhase = age < 90 ? t.qEarly : t.q;
+    const life = 60 + 900 * Math.min(1, t.q / 4);
+    let attention = qPhase * Math.exp(-age / life);
+    if (t.stage === "amm") attention *= 0.6;
+    t.excitation *= Math.pow(0.5, dt / 20);
+    const buyRate = 0.9 * attention + t.excitation;
+    const nBuys = Math.min(40, poisson(r, buyRate * dt));
+    const slot = this.slot(ts);
+    if (age < 1.2 && r() < 0.35) this.buy(t, this.key(), 0.2 + r() * 1.5, ts + Math.floor(r() * step), slot + 1, "sniper", out);
+    for (let i = 0; i < nBuys; i++) {
+      const size = Math.min(25, lognormal(r, -1.6, 1));
+      this.buy(t, pick(r, this.retail), size, ts + Math.floor(r() * step), slot, "retail", out);
+      t.excitation += 0.02;
+    }
+    if (!t.smartChecked && age > 8 && age < 60) {
+      t.smartChecked = true;
+      const pr = this.opts.predictability;
+      const informed = Math.min(0.95, 0.03 + pr * 0.35 * Math.max(0, Math.log(t.q + 1)));
+      const p = pr > 0 ? informed : 0.06;
+      const k = poisson(r, p * 3);
+      for (let i = 0; i < k; i++) this.buy(t, pick(r, this.smart), 0.5 + r() * 2.5, ts + Math.floor(r() * step), slot, "smart", out);
+    }
+    if (Math.floor(ts / 1e3) !== Math.floor((ts - step) / 1e3)) {
+      const price = this.priceOf(t);
+      const m = this.mcap(t);
+      if (m > t.peakMcap) t.peakMcap = m;
+      const dd = 1 - m / t.peakMcap;
+      for (const [wallet, bag] of t.bags) {
+        if (bag.tokens <= 0) continue;
+        const mult = bag.costSol > 0 ? price * bag.tokens * 0.975 / (bag.costSol * LAMPORTS_PER_SOL) : 1;
+        let hazard = 1 / 900;
+        if (bag.kind === "sniper") hazard = mult > bag.target || age > 90 ? 0.3 : 1 / 120;
+        else if (bag.kind === "bundle") hazard = mult > 1.4 || age > 120 ? 0.25 : 1 / 200;
+        else if (bag.kind === "smart") hazard = mult > bag.target ? 0.2 : dd > 0.45 ? 0.08 : 1 / 1200;
+        else if (bag.kind === "dev") {
+          if (t.devType === "rug" && ts >= t.devSellAt) hazard = 1;
+          else if (t.devType === "slow" && mult > 1.5) hazard = 1 / 60;
+          else hazard = ts >= t.devSellAt ? 0.05 : 0;
+        } else {
+          hazard *= 1 + 2.5 * Math.max(0, mult - 1) + 6 * dd * dd;
+          if (mult > bag.target) hazard += 0.05;
+        }
+        if (r() < 1 - Math.exp(-hazard)) {
+          const frac = bag.kind === "dev" || bag.kind === "bundle" || r() < 0.6 ? 1 : 0.3 + r() * 0.5;
+          this.sell(t, wallet, Math.floor(bag.tokens * frac), ts + Math.floor(r() * step), slot, out);
+        }
+      }
+    }
+    const idle = ts - t.lastTradeAt;
+    if (buyRate < 0.01 && idle > 18e4 || idle > 18e5 || age > 6 * 3600) t.dead = true;
+  }
+  valueOf(t, tokens) {
+    if (t.stage === "amm" && t.poolState) return poolSellQuote(t.poolState, tokens).solOut / LAMPORTS_PER_SOL;
+    return curveSellQuote(t.curve, tokens).solOut / LAMPORTS_PER_SOL;
+  }
+  buy(t, wallet, sol, ts, slot, kind, out) {
+    const lamports = Math.floor(sol * LAMPORTS_PER_SOL);
+    if (t.stage === "curve") {
+      const q = curveBuyQuote(t.curve, lamports);
+      if (q.tokensOut <= 0) return;
+      t.curve = q.after;
+      this.addBag(t, wallet, q.tokensOut, q.solSpent / LAMPORTS_PER_SOL, ts, kind);
+      out.push({
+        k: "trade",
+        ts,
+        slot,
+        sig: this.key(),
+        src: "sim",
+        chainTs: Math.floor(ts / 1e3),
+        mint: t.mint,
+        buy: true,
+        sol: q.solToCurve,
+        tok: q.tokensOut,
+        user: wallet,
+        venue: "curve",
+        vSol: t.curve.vSol,
+        vTok: t.curve.vTok,
+        realSol: t.curve.vSol - CURVE.initialVirtualSol,
+        realTok: t.curve.realTok,
+        supply: t.curve.supply,
+        fee: q.feeLamports
+      });
+      t.lastTradeAt = ts;
+      if (t.curve.realTok <= 0) this.graduate(t, ts, slot, out);
+    } else if (t.poolState) {
+      if (ts < (t.poolOpenAt ?? 0)) ts = t.poolOpenAt;
+      const pre = { ...t.poolState };
+      const q = poolBuyQuote(t.poolState, lamports);
+      if (q.tokensOut <= 0) return;
+      t.poolState = { ...t.poolState, base: q.after.vTok, quote: q.after.vSol };
+      this.addBag(t, wallet, q.tokensOut, q.solSpent / LAMPORTS_PER_SOL, ts, kind);
+      out.push({
+        k: "ammSwap",
+        ts,
+        slot,
+        sig: this.key(),
+        src: "sim",
+        chainTs: Math.floor(ts / 1e3),
+        pool: t.pool,
+        buy: true,
+        base: q.tokensOut,
+        quoteDelta: q.solToCurve,
+        fee: q.feeLamports,
+        user: wallet,
+        poolBase: pre.base,
+        poolQuote: pre.quote,
+        virtualQuote: 0,
+        supply: t.poolState.supply
+      });
+      t.lastTradeAt = ts;
+    }
+    const m = this.mcap(t);
+    const tr = this.truth.get(t.mint);
+    if (m > tr.peakMcapSol) tr.peakMcapSol = m;
+  }
+  addBag(t, wallet, tokens, costSol, ts, kind) {
+    const b = t.bags.get(wallet);
+    const r = this.r;
+    const target = kind === "sniper" ? 1.5 + r() * 2 : kind === "smart" ? 2 + r() * 4 : kind === "retail" ? 1.5 + lognormal(r, 0, 0.8) : 99;
+    if (b) {
+      b.tokens += tokens;
+      b.costSol += costSol;
+    } else t.bags.set(wallet, { tokens, costSol, boughtAt: ts, kind, target });
+  }
+  sell(t, wallet, tokens, ts, slot, out) {
+    const bag = t.bags.get(wallet);
+    if (!bag || tokens <= 0) return;
+    tokens = Math.min(tokens, bag.tokens);
+    if (t.stage === "curve") {
+      const q = curveSellQuote(t.curve, tokens);
+      if (q.solFromCurve <= 0) return;
+      t.curve = q.after;
+      bag.costSol *= 1 - tokens / bag.tokens;
+      bag.tokens -= tokens;
+      out.push({
+        k: "trade",
+        ts,
+        slot,
+        sig: this.key(),
+        src: "sim",
+        chainTs: Math.floor(ts / 1e3),
+        mint: t.mint,
+        buy: false,
+        sol: q.solFromCurve,
+        tok: tokens,
+        user: wallet,
+        venue: "curve",
+        vSol: t.curve.vSol,
+        vTok: t.curve.vTok,
+        realSol: t.curve.vSol - CURVE.initialVirtualSol,
+        realTok: t.curve.realTok,
+        supply: t.curve.supply,
+        fee: q.feeLamports
+      });
+    } else if (t.poolState) {
+      if (ts < (t.poolOpenAt ?? 0)) ts = t.poolOpenAt;
+      const pre = { ...t.poolState };
+      const q = poolSellQuote(t.poolState, tokens);
+      if (q.solOut <= 0) return;
+      t.poolState = { ...t.poolState, base: q.after.vTok, quote: q.after.vSol };
+      bag.costSol *= 1 - tokens / bag.tokens;
+      bag.tokens -= tokens;
+      out.push({
+        k: "ammSwap",
+        ts,
+        slot,
+        sig: this.key(),
+        src: "sim",
+        chainTs: Math.floor(ts / 1e3),
+        pool: t.pool,
+        buy: false,
+        base: tokens,
+        quoteDelta: q.solFromCurve,
+        fee: q.feeLamports,
+        user: wallet,
+        poolBase: pre.base,
+        poolQuote: pre.quote,
+        virtualQuote: 0,
+        supply: t.poolState.supply
+      });
+    }
+    if (bag.tokens <= 0) t.bags.delete(wallet);
+    t.lastTradeAt = ts;
+  }
+  graduate(t, ts, slot, out) {
+    t.stage = "amm";
+    t.pool = this.key();
+    const realSol = t.curve.vSol - CURVE.initialVirtualSol;
+    const quote = Math.max(1, realSol - 15000001);
+    const base = CURVE.supply - CURVE.initialRealTok;
+    t.poolState = { base, quote, supply: CURVE.supply, hasCreator: true };
+    const tr = this.truth.get(t.mint);
+    tr.graduated = true;
+    t.excitation += 0.6;
+    out.push({ k: "complete", ts: ts + 1, slot, sig: this.key(), src: "sim", mint: t.mint });
+    out.push({ k: "migrate", ts: ts + 2, slot, sig: this.key(), src: "sim", mint: t.mint, pool: t.pool, solAmount: quote, mintAmount: base });
+    out.push({ k: "pool", ts: ts + 2, slot, sig: this.key(), src: "sim", pool: t.pool, mint: t.mint, quoteIsSol: true, base, quote, coinCreator: t.creator });
+    t.poolOpenAt = ts + 3;
+  }
+  get launched() {
+    return this.launchedCount;
+  }
+};
+
+// src/node/store.ts
+import {
+  closeSync,
+  createWriteStream,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeSync
+} from "node:fs";
+import { join } from "node:path";
+import { createGzip, gunzipSync, gzipSync } from "node:zlib";
+import { createInterface } from "node:readline";
+import { createReadStream } from "node:fs";
+import { createGunzip } from "node:zlib";
+import { StringDecoder } from "node:string_decoder";
+var day = (ts) => new Date(ts).toISOString().slice(0, 10);
+var SAMPLE_LIMITS = { checkpoints: 4e4, structural: 2e4, entries: 25e3 };
+function* forEachLineSteps(path, fn) {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.allocUnsafe(1 << 20);
+    const dec = new StringDecoder("utf8");
+    let rest = "";
+    for (; ; ) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      const lines = (rest + dec.write(buf.subarray(0, n))).split("\n");
+      rest = lines.pop() ?? "";
+      for (const l of lines) if (l) fn(l);
+      yield;
+    }
+    rest += dec.end();
+    if (rest) fn(rest);
+  } finally {
+    closeSync(fd);
+  }
+}
+var hour = (ts) => new Date(ts).toISOString().slice(0, 13);
+function writeFileAtomic(path, data) {
+  const tmp = `${path}.tmp-${process.pid}`;
+  const fd = openSync(tmp, "w");
+  try {
+    writeSync(fd, typeof data === "string" ? Buffer.from(data) : data);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  for (let attempt = 1; ; attempt++) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (e) {
+      const code = e.code;
+      if (attempt >= 6 || !(code === "EPERM" || code === "EBUSY" || code === "EACCES")) throw e;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 15 * attempt);
+    }
+  }
+}
+var DataStore = class {
+  constructor(dir, log) {
+    this.log = log;
+    this.dir = dir;
+    for (const sub of ["", "journal", "samples", "record", "models", "reports"]) mkdirSync(join(dir, sub), { recursive: true });
+    this.flushTimer = setInterval(() => this.flush(), 1e3);
+    this.flushTimer.unref?.();
+  }
+  dir;
+  recStream = null;
+  recorded = 0;
+  journalLines = [];
+  sampleLines = [];
+  flushTimer = null;
+  // ---- state -------------------------------------------------------------------
+  saveState(s) {
+    writeFileAtomic(join(this.dir, "state.json"), JSON.stringify(s));
+  }
+  loadState() {
+    for (const name of ["state.json", "state.json.bak"]) {
+      const p = join(this.dir, name);
+      if (!existsSync(p)) continue;
+      try {
+        const s = JSON.parse(readFileSync(p, "utf8"));
+        if (s && s.v === 1) return s;
+      } catch (e) {
+        this.log.error(`could not read ${name}`, { err: String(e) });
+      }
+    }
+    return null;
+  }
+  /** Daily backup copy so a corrupted disk write can never lose everything. */
+  backupState() {
+    const p = join(this.dir, "state.json");
+    if (existsSync(p)) {
+      try {
+        writeFileAtomic(join(this.dir, "state.json.bak"), readFileSync(p));
+      } catch (e) {
+        this.log.warn("state backup failed", { err: String(e) });
+      }
+    }
+  }
+  // ---- journal & samples (buffered, flushed every second) ------------------------
+  journal(entry) {
+    this.journalLines.push(JSON.stringify(entry));
+  }
+  sample(s) {
+    this.sampleLines.push(JSON.stringify(s));
+  }
+  flush() {
+    const now = Date.now();
+    try {
+      if (this.journalLines.length) {
+        const lines = this.journalLines.splice(0);
+        appendLines(join(this.dir, "journal", `${day(now)}.jsonl`), lines);
+      }
+      if (this.sampleLines.length) {
+        const lines = this.sampleLines.splice(0);
+        appendLines(join(this.dir, "samples", `${day(now)}.jsonl`), lines);
+      }
+    } catch (e) {
+      this.log.error("journal/sample flush failed", { err: String(e) });
+    }
+  }
+  /**
+   * Labelled samples from the last `days`, oldest first. Files are read newest first and
+   * line by line, keeping at most `limits` checkpoints and entries (signal + entry kinds),
+   * so memory stays bounded however much has been recorded.
+   */
+  loadSamples(days, now = Date.now(), limits = SAMPLE_LIMITS) {
+    return runSteps(this.loadSamplesSteps(days, now, limits));
+  }
+  /** The same, pausing every few milliseconds so trading goes on while days of samples are read. */
+  loadSamplesAsync(days, now = Date.now(), limits = SAMPLE_LIMITS) {
+    return runStepsAsync(this.loadSamplesSteps(days, now, limits));
+  }
+  *loadSamplesSteps(days, now, limits) {
+    const cutoff = day(now - days * 864e5);
+    let files = [];
+    try {
+      files = readdirSync(join(this.dir, "samples")).filter((f2) => f2.endsWith(".jsonl") && f2.slice(0, 10) >= cutoff).sort().reverse();
+    } catch {
+      return [];
+    }
+    const perFile = [];
+    const cap = { cp: limits.checkpoints, st: limits.structural, en: limits.entries };
+    const used = { cp: 0, st: 0, en: 0 };
+    const bucketOf = (line) => !line.includes('"kind":"checkpoint"') ? "en" : line.includes('"tag":"prog') || line.includes('"tag":"mig') ? "st" : "cp";
+    for (const f2 of files) {
+      const room = { cp: cap.cp - used.cp, st: cap.st - used.st, en: cap.en - used.en };
+      if (room.cp <= 0 && room.st <= 0 && room.en <= 0) break;
+      const got = { cp: [], st: [], en: [] };
+      try {
+        yield* forEachLineSteps(join(this.dir, "samples", f2), (line) => {
+          const b = bucketOf(line);
+          if (room[b] <= 0) return;
+          let s;
+          try {
+            s = JSON.parse(line);
+          } catch {
+            return;
+          }
+          if (!Array.isArray(s.x) || s.y !== 0 && s.y !== 1) return;
+          const into = got[b];
+          into.push(s);
+          if (into.length >= room[b] * 2) into.splice(0, into.length - room[b]);
+        });
+      } catch (e) {
+        this.log.warn("could not read samples", { file: f2, err: String(e) });
+        continue;
+      }
+      for (const b of ["cp", "st", "en"]) {
+        if (got[b].length > room[b]) got[b].splice(0, got[b].length - Math.max(0, room[b]));
+        used[b] += got[b].length;
+      }
+      perFile.push(got.cp.concat(got.st, got.en));
+    }
+    return perFile.reverse().flat().sort((a, b) => a.ts - b.ts);
+  }
+  // ---- market recorder (gzip, hourly files) ----------------------------------------
+  record(ev, ts) {
+    const key = hour(ts);
+    if (!this.recStream || this.recStream.key !== key) {
+      this.closeRecorder();
+      const gz = createGzip({ level: 6 });
+      const file = createWriteStream(join(this.dir, "record", `${key}.jsonl.gz`), { flags: "a" });
+      file.on("error", (e) => this.log.error("recorder write failed", { err: String(e) }));
+      gz.pipe(file);
+      this.recStream = { key, gz, file };
+    }
+    this.recStream.gz.write(JSON.stringify(ev) + "\n");
+    this.recorded++;
+  }
+  closeRecorder() {
+    if (this.recStream) {
+      this.recStream.gz.end();
+      this.recStream = null;
+    }
+  }
+  recordFiles() {
+    try {
+      return readdirSync(join(this.dir, "record")).filter((f2) => f2.endsWith(".jsonl.gz")).sort().map((f2) => join(this.dir, "record", f2));
+    } catch {
+      return [];
+    }
+  }
+  // ---- models ----------------------------------------------------------------------
+  saveModel(m) {
+    writeFileAtomic(join(this.dir, "models", "current.json"), JSON.stringify(m, null, 1));
+    const safe = m.version.replace(/[^A-Za-z0-9_.-]/g, "_");
+    writeFileAtomic(join(this.dir, "models", `${safe}.json`), JSON.stringify(m));
+    this.pruneModels();
+  }
+  /** Earlier models are kept for reference, the newest few only (with trees each is ~100 KB). */
+  pruneModels(keep = 20) {
+    try {
+      const dir = join(this.dir, "models");
+      const old = readdirSync(dir).filter((f2) => f2.endsWith(".json") && f2 !== "current.json" && f2 !== "history.json").map((f2) => ({ f: f2, t: statSync(join(dir, f2)).mtimeMs })).sort((a, b) => b.t - a.t).slice(keep);
+      for (const x of old) rmSync(join(dir, x.f), { force: true });
+    } catch (e) {
+      this.log.warn("could not prune old models", { err: String(e) });
+    }
+  }
+  loadModel() {
+    const p = join(this.dir, "models", "current.json");
+    if (!existsSync(p)) return null;
+    try {
+      const m = JSON.parse(readFileSync(p, "utf8"));
+      return validateModel(m) ? m : null;
+    } catch {
+      return null;
+    }
+  }
+  /** What each training run tried and decided (the dashboard's learning history). */
+  saveLearnHistory(runs) {
+    writeFileAtomic(join(this.dir, "models", "history.json"), JSON.stringify(runs));
+  }
+  loadLearnHistory() {
+    const p = join(this.dir, "models", "history.json");
+    if (!existsSync(p)) return [];
+    try {
+      const runs = JSON.parse(readFileSync(p, "utf8"));
+      return Array.isArray(runs) ? runs : [];
+    } catch {
+      return [];
+    }
+  }
+  // ---- edge finder -----------------------------------------------------------------
+  saveEdges(report) {
+    writeFileAtomic(join(this.dir, "edges.json"), JSON.stringify(report));
+  }
+  loadEdges() {
+    const p = join(this.dir, "edges.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+  // ---- wallets ---------------------------------------------------------------------
+  saveWallets(snap) {
+    writeFileAtomic(join(this.dir, "wallets.json.gz"), gzipSync(JSON.stringify(snap)));
+  }
+  loadWallets() {
+    const p = join(this.dir, "wallets.json.gz");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(gunzipSync(readFileSync(p)).toString("utf8"));
+    } catch {
+      return null;
+    }
+  }
+  // ---- misc --------------------------------------------------------------------------
+  readSecret() {
+    const p = join(this.dir, "secret.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8")).token ?? null;
+    } catch {
+      return null;
+    }
+  }
+  writeSecret(token) {
+    writeFileAtomic(join(this.dir, "secret.json"), JSON.stringify({ token }));
+  }
+  /** Delete recordings/samples/journals past their retention. */
+  cleanup(recordDays, sampleDays, now = Date.now()) {
+    const prune = (sub, days) => {
+      const cutoff = day(now - days * 864e5);
+      try {
+        for (const f2 of readdirSync(join(this.dir, sub))) if (f2.slice(0, 10) < cutoff) rmSync(join(this.dir, sub, f2), { force: true });
+      } catch {
+      }
+    };
+    prune("record", recordDays);
+    prune("samples", sampleDays);
+    prune("journal", Math.max(sampleDays, 30));
+  }
+  diskUsageMb() {
+    let total = 0;
+    const walk = (d) => {
+      try {
+        for (const f2 of readdirSync(d)) {
+          const p = join(d, f2);
+          const st = statSync(p);
+          if (st.isDirectory()) walk(p);
+          else total += st.size;
+        }
+      } catch {
+      }
+    };
+    walk(this.dir);
+    return Math.round(total / 1e6);
+  }
+  close() {
+    if (this.flushTimer) clearInterval(this.flushTimer);
+    this.flush();
+    this.closeRecorder();
+  }
+};
+function appendLines(path, lines) {
+  const fd = openSync(path, "a");
+  try {
+    writeSync(fd, lines.join("\n") + "\n");
+  } finally {
+    closeSync(fd);
+  }
+}
+async function* readRecording(path) {
+  const rl = createInterface({ input: createReadStream(path).pipe(createGunzip()), crlfDelay: Infinity });
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      try {
+        yield JSON.parse(line);
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+
 // src/research/replay.ts
 async function replay(events, opts) {
   let engine = null;
@@ -4977,8 +5585,12 @@ function collectSamples(hours, predictability, seed) {
   for (let t = end; t <= end + 95 * 6e4; t += 5e3) e.advance(t);
   return samples;
 }
-function rowsOf(samples) {
-  return samples.filter((s) => s.kind === "checkpoint" && s.stage === "curve").map((s) => ({ ts: s.ts, stage: s.stage, x: s.x, y: s.y }));
+function splitByCoin(samples, share) {
+  const first = /* @__PURE__ */ new Map();
+  for (const s of samples) if (!first.has(s.mint) || s.ts < first.get(s.mint)) first.set(s.mint, s.ts);
+  const coins = [...first.entries()].sort((a, b) => a[1] - b[1]).map((e) => e[0]);
+  const testCoins = new Set(coins.slice(Math.floor(coins.length * share)));
+  return { learn: samples.filter((s) => !testCoins.has(s.mint)), test: samples.filter((s) => testCoins.has(s.mint)) };
 }
 async function pipelineSelfTest(opts = {}) {
   const log = opts.log ?? (() => {
@@ -4987,42 +5599,53 @@ async function pipelineSelfTest(opts = {}) {
   const notes = [];
   log(`simulating ${hours}h of an "edge" world\u2026`);
   const samples = collectSamples(hours, 0.9, opts.seed ?? 5).filter((s) => s.stage === "curve");
-  const cps = samples.filter((s) => s.kind === "checkpoint").sort((a, b) => a.ts - b.ts);
-  const cut = Math.floor(cps.length * 0.7);
-  const train = rowsOf(cps.slice(0, cut));
-  const test = cps.slice(cut);
-  const testRows = rowsOf(test);
-  const prior = priorModel().stages.curve;
-  const priorAuc = evaluate(prior, testRows).auc;
-  const trained = fitStage(prior, train);
-  const trainedAuc = evaluate(trained, testRows).auc;
-  const preds = test.map((s) => linear(trained, standardize(trained, s.x)));
-  const order = preds.map((p, i) => i).sort((a, b) => preds[b] - preds[a]);
-  const top = order.slice(0, Math.max(1, Math.floor(order.length / 10))).map((i) => test[i].ret);
-  const bottom = order.slice(Math.floor(order.length / 2)).map((i) => test[i].ret);
+  const prior = { ...priorModel(0), scaledAt: 1 };
+  const target = prior.target;
+  const { learn, test } = splitByCoin(samples, 0.7);
+  const learnRows = trainingRows(learn, target);
+  const testRows = trainingRows(test, target);
+  const trained = trainAndSelect(prior, learnRows, { now: 1 });
+  const rep = trained.reports.find((r2) => r2.stage === "curve");
+  const priorAuc = evaluate(prior.stages.curve, testRows).auc;
+  const trainedAuc = evaluate(trained.model.stages.curve, testRows).auc;
+  const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
+  const moments = test.filter((s) => s.kind !== "signal" && labelOf(s, target) !== null);
+  const preds = moments.map((s) => scoreVector(trained.model, "curve", s.x).p);
+  const order = preds.map((_, i) => i).sort((a, b) => preds[b] - preds[a]);
   const avg = (x) => x.reduce((a, b) => a + b, 0) / Math.max(1, x.length);
-  log(`positive control: prior AUC ${priorAuc.toFixed(3)}, trained AUC ${trainedAuc.toFixed(3)} on unseen data`);
+  const retOf = (i) => moments[i].grid[gi];
+  const top = order.slice(0, Math.max(1, Math.floor(order.length / 10))).map(retOf);
+  const bottom = order.slice(Math.floor(order.length / 2)).map(retOf);
+  log(`positive control: ${rep.adopted ? "adopted" : "did NOT adopt"} ${rep.recipe === "trees" ? `weighted sum + ${rep.treeCount} trees` : "weighted sum"}; AUC on unseen coins ${priorAuc.toFixed(3)} (prior) \u2192 ${trainedAuc.toFixed(3)}`);
   const r = rng(99);
-  const shuffled = cps.map((s) => ({ ...s }));
-  const outcomes = shuffled.map((s) => ({ y: s.y, ret: s.ret, grid: s.grid }));
-  for (let i = outcomes.length - 1; i > 0; i--) {
+  const shuffle = (rows) => {
+    const ys = rows.map((x) => x.y);
+    for (let i = ys.length - 1; i > 0; i--) {
+      const j = Math.floor(r() * (i + 1));
+      [ys[i], ys[j]] = [ys[j], ys[i]];
+    }
+    return rows.map((x, i) => ({ ...x, y: ys[i] }));
+  };
+  const nLearn = shuffle(learnRows);
+  const nTest = shuffle(testRows);
+  const noise = trainAndSelect(prior, nLearn, { now: 2 });
+  const nAuc = evaluate(noise.model.stages.curve, nTest).auc;
+  const perm = moments.map((_, i) => i);
+  for (let i = perm.length - 1; i > 0; i--) {
     const j = Math.floor(r() * (i + 1));
-    [outcomes[i], outcomes[j]] = [outcomes[j], outcomes[i]];
+    [perm[i], perm[j]] = [perm[j], perm[i]];
   }
-  shuffled.forEach((s, i) => Object.assign(s, outcomes[i]));
-  const nTrain = rowsOf(shuffled.slice(0, cut));
-  const nTest = rowsOf(shuffled.slice(cut));
-  const nTrained = fitStage(prior, nTrain);
-  const nAuc = evaluate(nTrained, nTest).auc;
-  const rescored = shuffled.slice(cut).map((s) => ({ ...s, kind: "signal", score: 50 + (linear(nTrained, standardize(nTrained, s.x)) - Math.log(nTrained.pRef / (1 - nTrained.pRef))) * 18.03 }));
+  const rescored = moments.map((s, i) => {
+    const o = moments[perm[i]];
+    return { ...s, kind: "signal", y: o.y, ret: o.ret, grid: o.grid, score: scoreVector(noise.model, "curve", s.x).score };
+  });
   const report = buildReport(rescored, { ...DEFAULT_SETTINGS, minScore: 60 }, priorModel(), [], Date.now());
-  log(`negative control: trained AUC ${nAuc.toFixed(3)}; gate: ${report.gate.verdict}`);
-  const passed = trainedAuc > 0.62 && trainedAuc >= priorAuc - 0.02 && avg(top) > avg(bottom) && Math.abs(nAuc - 0.5) < 0.06 && !report.gate.pass;
+  log(`negative control: AUC on unseen coins ${nAuc.toFixed(3)}; gate: ${report.gate.verdict}`);
+  const passed = rep.adopted && trainedAuc > 0.62 && trainedAuc >= priorAuc - 0.02 && avg(top) > avg(bottom) && Math.abs(nAuc - 0.5) < 0.06 && !report.gate.pass;
   if (!passed) notes.push("self-test did not meet all criteria \u2014 inspect the numbers above");
-  void auc;
   return {
     samples: samples.length,
-    positive: { priorAuc, trainedAuc, topDecileRet: avg(top), bottomHalfRet: avg(bottom) },
+    positive: { priorAuc, trainedAuc, recipe: rep.recipe ?? "none", trees: rep.treeCount ?? 0, topDecileRet: avg(top), bottomHalfRet: avg(bottom) },
     negative: { trainedAuc: nAuc, gatePass: report.gate.pass, gateVerdict: report.gate.verdict },
     passed,
     notes
@@ -5035,7 +5658,7 @@ var USAGE = `SIGNAL research CLI
   node dist/research.mjs report   [--data ./data] [--days 14]
   node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
   node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
-  node dist/research.mjs train    [--data ./data] [--days 14] [--adopt]
+  node dist/research.mjs train    [--data ./data] [--days 14] [--adopt] [--notrees] [--horizon 6]
   node dist/research.mjs edges    [--data ./data] [--days 30] [--placebo 5]   (searches for rules that made money on their own)
   node dist/research.mjs sim      [--hours 6] [--out ./simdata] [--predictability 0.7] [--seed 1]
   node dist/research.mjs selftest            (proves the learning pipeline on known worlds)
@@ -5116,9 +5739,13 @@ Go-live gate: ${r.gate.verdict} \u2014 ${r.gate.detail}`);
       const store = new DataStore(data, silentLogger);
       const samples = store.loadSamples(Number(a.days ?? 14));
       const current = store.loadModel() ?? priorModel();
-      const rows = samples.filter((s) => s.kind === "checkpoint").map((s) => ({ ts: s.ts, stage: s.stage, x: s.x, y: s.y }));
-      const { model, reports } = trainAndSelect(current, rows);
-      for (const r of reports) console.log(`${r.stage}: ${r.adopted ? "ADOPT" : "keep"} \u2014 ${r.reason}; AUC ${r.current.auc?.toFixed(3)} \u2192 ${r.candidate.auc?.toFixed(3)}, log-loss ${r.current.logLoss?.toFixed(4)} \u2192 ${r.candidate.logLoss?.toFixed(4)} (train ${r.trainRows}, validate ${r.valRows})`);
+      const rows = trainingRows(samples, current.target, { horizonMs: Number(a.horizon ?? DEFAULT_CONFIG.outcomeHorizonMs / 36e5) * 36e5 });
+      const { model, reports } = trainAndSelect(current, rows, { trees: !a.notrees });
+      console.log(`${rows.length.toLocaleString("en-US")} finished moments (${rows.filter((r) => r.kind === "entry").length.toLocaleString("en-US")} of them entry moments)`);
+      for (const r of reports) {
+        const recipes = r.linear ? ` \xB7 weighted sum ${r.linear.logLoss.toFixed(4)}${r.trees ? `, + trees ${r.trees.logLoss.toFixed(4)}` : ""} (log-loss on newer rows)` : "";
+        console.log(`${r.stage}: ${r.adopted ? "ADOPT" : "keep"} ${r.recipe === "trees" ? `weighted sum + ${r.treeCount} trees` : r.recipe ?? ""} \u2014 ${r.reason}; on ${r.freshRows} unseen moments AUC ${r.current.auc?.toFixed(3)} \u2192 ${r.candidate.auc?.toFixed(3)}, log-loss ${r.current.logLoss?.toFixed(4)} \u2192 ${r.candidate.logLoss?.toFixed(4)} (train ${r.trainRows}, check ${r.valRows})${recipes}`);
+      }
       if (a.adopt && reports.some((r) => r.adopted)) {
         store.saveModel(model);
         console.log(`saved ${model.version} to ${join2(data, "models/current.json")} \u2014 restart the server to use it`);

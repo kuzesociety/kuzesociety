@@ -2,7 +2,8 @@
 import { findEdges } from "../core/edges.js";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { trainAndSelect } from "../core/learn.js";
+import { trainAndSelect, trainingRows } from "../core/learn.js";
+import { DEFAULT_CONFIG } from "../core/engine.js";
 import { priorModel, type ModelSpec, validateModel } from "../core/model.js";
 import { buildReport } from "../core/report.js";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../core/settings.js";
@@ -17,7 +18,7 @@ const USAGE = `SIGNAL research CLI
   node dist/research.mjs report   [--data ./data] [--days 14]
   node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
   node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
-  node dist/research.mjs train    [--data ./data] [--days 14] [--adopt]
+  node dist/research.mjs train    [--data ./data] [--days 14] [--adopt] [--notrees] [--horizon 6]
   node dist/research.mjs edges    [--data ./data] [--days 30] [--placebo 5]   (searches for rules that made money on their own)
   node dist/research.mjs sim      [--hours 6] [--out ./simdata] [--predictability 0.7] [--seed 1]
   node dist/research.mjs selftest            (proves the learning pipeline on known worlds)
@@ -103,9 +104,13 @@ async function main() {
       const store = new DataStore(data, silentLogger);
       const samples = store.loadSamples(Number(a.days ?? 14));
       const current = store.loadModel() ?? priorModel();
-      const rows = samples.filter((s) => s.kind === "checkpoint").map((s) => ({ ts: s.ts, stage: s.stage, x: s.x, y: s.y }));
-      const { model, reports } = trainAndSelect(current, rows);
-      for (const r of reports) console.log(`${r.stage}: ${r.adopted ? "ADOPT" : "keep"} — ${r.reason}; AUC ${r.current.auc?.toFixed(3)} → ${r.candidate.auc?.toFixed(3)}, log-loss ${r.current.logLoss?.toFixed(4)} → ${r.candidate.logLoss?.toFixed(4)} (train ${r.trainRows}, validate ${r.valRows})`);
+      const rows = trainingRows(samples, current.target, { horizonMs: Number(a.horizon ?? DEFAULT_CONFIG.outcomeHorizonMs / 3_600_000) * 3_600_000 });
+      const { model, reports } = trainAndSelect(current, rows, { trees: !a.notrees });
+      console.log(`${rows.length.toLocaleString("en-US")} finished moments (${rows.filter((r) => r.kind === "entry").length.toLocaleString("en-US")} of them entry moments)`);
+      for (const r of reports) {
+        const recipes = r.linear ? ` · weighted sum ${r.linear.logLoss.toFixed(4)}${r.trees ? `, + trees ${r.trees.logLoss.toFixed(4)}` : ""} (log-loss on newer rows)` : "";
+        console.log(`${r.stage}: ${r.adopted ? "ADOPT" : "keep"} ${r.recipe === "trees" ? `weighted sum + ${r.treeCount} trees` : r.recipe ?? ""} — ${r.reason}; on ${r.freshRows} unseen moments AUC ${r.current.auc?.toFixed(3)} → ${r.candidate.auc?.toFixed(3)}, log-loss ${r.current.logLoss?.toFixed(4)} → ${r.candidate.logLoss?.toFixed(4)} (train ${r.trainRows}, check ${r.valRows})${recipes}`);
+      }
       if (a.adopt && reports.some((r) => r.adopted)) {
         store.saveModel(model);
         console.log(`saved ${model.version} to ${join(data, "models/current.json")} — restart the server to use it`);
