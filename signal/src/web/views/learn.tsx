@@ -7,6 +7,7 @@ import { ENTRY_POINTS } from "../../core/settings";
 import { pct } from "../format";
 import { api, toast, useApp } from "../store";
 import { Empty, Tag } from "../ui";
+import { Lab } from "./lab";
 import { WhatItLearned } from "./learned";
 
 export function Learn() {
@@ -53,6 +54,8 @@ export function Learn() {
       <WhatItLearned />
 
       <EdgeFinder mode={settings?.mode ?? "paper"} autopilot={!!settings?.autopilot} />
+
+      <Lab />
 
       {/* with the autopilot on, rules are switched by the edge finder's proof, which covers these settings too */}
       {r.suggestion && !settings?.autopilot && (

@@ -6,6 +6,7 @@
 import type { EdgeReport } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import type { AutopilotView } from "../core/autopilot.js";
+import type { LabView } from "../core/lab.js";
 import type { Check } from "../core/selfcheck.js";
 import type { LearningView } from "../core/insight.js";
 import type { Position } from "../core/positions.js";
@@ -50,6 +51,9 @@ export class Telegram {
       autopilot?: () => AutopilotView | null;
       /** the self-check (core/selfcheck) */
       checks?: () => { checks: Check[]; summary: string } | null;
+      /** the Lab (core/lab), and adding your own idea to it */
+      lab?: () => LabView | null;
+      labIdea?: (text: string) => { ok: true; note: string } | { ok: false; error: string };
     },
   ) {}
 
@@ -190,6 +194,8 @@ export class Telegram {
           "/learn — what the score learned, and is it still working?",
           "/autopilot on|off — trade the best proven rule by itself",
           "/checks — is everything working as it should?",
+          "/lab — rules the bot invented, proven only on coins after them",
+          "/idea mig300 top10&lt;=25% smart&gt;=1 tp100 sl30 hold30 — test your own rule",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -222,6 +228,24 @@ export class Telegram {
         ]
           .filter(Boolean)
           .join("\n");
+      }
+      case "/lab": {
+        const v = this.o.lab?.();
+        if (!v) return "The Lab is not available here.";
+        const pct = (x: number | null) => (x === null || !Number.isFinite(x) ? "—" : `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`);
+        const lines = [`🧪 <b>Lab</b> — ${esc(v.note)}`];
+        for (const i of v.proven) lines.push(`✅ ${esc(i.text)}: ${pct(i.mean)} per trade on ${i.n} coins after it (worst case ${pct(i.proof?.lo ?? null)})`);
+        for (const i of v.testing.slice(0, 8))
+          lines.push(`🔬 ${esc(i.code)}: ${i.n ? `${i.n} coins, ${pct(i.mean)} per trade` : "waiting for coins"}${i.nextLook ? ` · judged at ${i.nextLook}` : ""}${i.source === "you" ? " · yours" : ""}`);
+        if (v.retired.length) lines.push(`Retired lately: ${v.retired.length} (last: ${esc(v.retired[0]!.why ?? "")})`);
+        lines.push("Add your own: /idea mig300 top10&lt;=25% smart&gt;=1 tp100 sl30 hold30");
+        return lines.join("\n");
+      }
+      case "/idea": {
+        if (!this.o.labIdea) return "The Lab is not available here.";
+        const rule = text.trim().slice(cmd.length).trim();
+        const r = this.o.labIdea(rule);
+        return r.ok ? `🧪 ${esc(r.note)}` : `⚠️ ${esc(r.error)}`;
       }
       case "/checks": {
         const v = this.o.checks?.();

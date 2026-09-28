@@ -3,6 +3,7 @@ import { AUTOPILOT, type AutopilotState, RULE_KEYS, decideAutopilot, emptyAutopi
 import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import type { Position } from "../src/core/positions.js";
+import { ruleSummary } from "../src/core/presets.js";
 import { type Settings, sanitizeSettings } from "../src/core/settings.js";
 import { Scenario, key } from "./helpers.js";
 
@@ -170,7 +171,7 @@ describe("autopilot", () => {
     // …clearly below the worst case it had shown → benched, back to your own rule
     const d = decideAutopilot({ report: withFwd(60, -0.05, -0.15, 0.05), settings: settings(), state, closed: [], now: NOW });
     expect(d.action).toBe("restore");
-    expect(d.settings).toEqual({ minScore: 70, tpPct: 50 });
+    expect(d.settings).toEqual({ conds: [], minScore: 70, tpPct: 50 });
     expect(d.state.active).toBeNull();
     expect(d.state.benched.A).toBe(NOW + AUTOPILOT.benchMs);
     expect(d.note).toMatch(/qualified after it was proven/);
@@ -277,5 +278,54 @@ describe("autopilot in the engine", () => {
     // turning the autopilot off lets go at once
     s.engine.updateSettings({ autopilot: false });
     expect(s.engine.autoHold).toBeNull();
+  });
+
+  it("weighs a rule the Lab proved like any proven rule, and drops it when the coins after its proof fall short", () => {
+    const conds = [{ k: "top10", op: "<=" as const, v: 0.25 }];
+    const lab: EdgeFound = { ...rule("Lab: top holders few", { lo: 0.2, perDay: 30, holdMin: 20 }), cond: "lab", settings: { ...rule("x", { lo: 0, perDay: 1 }).settings, conds } };
+    // the edge finder has nothing, the Lab has a proof: switched in, conditions and all
+    const d = decideAutopilot({ report: report([]), settings: settings(), state: emptyAutopilot(), closed: [], now: NOW, extra: [lab] });
+    expect(d.action).toBe("switch");
+    expect(d.settings!.conds).toEqual(conds);
+    expect(d.note).toMatch(/coins that came after the Lab invented it/);
+    // it stays while the coins after its proof hold up…
+    const kept = decideAutopilot({ report: report([]), settings: settings(d.settings), state: d.state, closed: [], now: NOW + HOUR, extra: [lab], forward: { text: lab.text, n: 50, mean: 0.25, lo: 0.1, hi: 0.4 } });
+    expect(kept.action).toBe("none");
+    // …and is benched when they clearly fall short of its worst case
+    const own = { ...emptyAutopilot(), ...d.state, own: { minScore: 75 } };
+    const dropped = decideAutopilot({ report: report([]), settings: settings(d.settings), state: own, closed: [], now: NOW + 2 * HOUR, extra: [], forward: { text: lab.text, n: 60, mean: -0.1, lo: -0.2, hi: 0.05 } });
+    expect(dropped.state.benched[lab.text]).toBeGreaterThan(NOW);
+    expect(dropped.action).toBe("restore");
+    // your own rule comes back without the Lab rule's conditions (it was saved before rules had any)
+    expect(dropped.settings).toMatchObject({ conds: [], minScore: 75 });
+    expect(dropped.note).not.toMatch(/top 10 holders/);
+    // and a rule's conditions show wherever the rule is summed up
+    expect(ruleSummary({ ...settings(d.settings) })).toMatch(/top 10 holders ≤ 25%/);
+    // a Lab rule's conditions are part of the rule: changing them by hand turns the autopilot off
+    const e = new Engine({ now: NOW, settings: { autopilot: true } });
+    e.updateSettings({ conds }, "autopilot");
+    expect(e.settings.autopilot).toBe(true);
+    e.updateSettings({ conds: [] });
+    expect(e.settings.autopilot).toBe(false);
+    expect(RULE_KEYS).toContain("conds");
+  });
+
+  it("the engine trades a Lab rule's conditions exactly as they were recorded", () => {
+    for (const [conds, entered] of [
+      [[{ k: "holders", op: ">=" as const, v: Math.log1p(1000) }], false],
+      [[{ k: "holders", op: ">=" as const, v: Math.log1p(1) }], true],
+    ] as const) {
+      const s = new Scenario({ entryAt: "age20", scoreOnly: true, conds: conds as unknown as Settings["conds"] });
+      const mint = key(501);
+      s.create(mint, key(502));
+      s.crowd(mint, 10, 0.3, 5030, 2000);
+      s.advance(5_000);
+      const sig = s.engine.funnel.recent.toArray().find((r) => r.mint === mint);
+      expect(sig).toBeDefined();
+      if (entered) expect(s.positions().length + s.closed().length).toBeGreaterThan(0);
+      else expect(sig!.reason).toBe("rule_conditions");
+    }
+    // only real facts and at most three conditions are kept
+    expect(sanitizeSettings({ conds: [{ k: "moon", op: ">=", v: 1 }, { k: "top10", op: "<=", v: 0.3 }, { k: "top10", op: "==", v: 1 }] }).conds).toEqual([{ k: "top10", op: "<=", v: 0.3 }]);
   });
 });

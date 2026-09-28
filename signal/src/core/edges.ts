@@ -16,7 +16,7 @@ import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
 /** Time limits tried with every take-profit/stop-loss pair (minutes, 0 = none). */
 export const HOLDS_MIN = [0, 10, 30, 60] as const;
-const EXITS = GRID.length * HOLDS_MIN.length;
+export const EXITS = GRID.length * HOLDS_MIN.length;
 
 type Filters = Settings["filters"];
 
@@ -165,7 +165,7 @@ export { normInv, tInv } from "./util.js";
  * count (the coin's price stopped reaching us before that exit, or before the rule's window ended
  * where only luck decides which samples are watched that long: see counts, Sample.blind).
  */
-function exitReturn(s: Sample, c: number, h: number): number {
+export function exitReturn(s: Sample, c: number, h: number): number {
   const ret = s.grid[c]!;
   const hold = HOLDS_MIN[h]!;
   const window = hold ? hold * 60 : Infinity;
@@ -190,6 +190,7 @@ function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const out: Partial<Settings> = {
     entryAt: r.at ?? "score",
+    conds: [],
     minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,

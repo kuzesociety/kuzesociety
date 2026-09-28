@@ -91,6 +91,9 @@ export class DashboardServer {
       learning: () => this.learning(),
       autopilot: () => ctx.learner.autopilotView(),
       checks: () => ctx.learner.checksView(),
+      lab: () => ctx.learner.labView(),
+      labSummary: () => ctx.learner.labSummary(),
+      labIdea: (text) => ctx.learner.addLabIdea(text),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;
         // the engine's onSettings hook already broadcasts the change to open dashboards

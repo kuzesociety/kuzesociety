@@ -8,6 +8,7 @@ import { PRESETS, followsPreset, ruleSummary, strategyList } from "../src/core/p
 import type { EdgeReport } from "../src/core/edges.js";
 import { DEFAULT_SETTINGS, rebaseSettings, sanitizeSettings, settingsChanges } from "../src/core/settings.js";
 import { SetupStore, isLocalRequest, isPrivateChannel, lanAddress, rpcFromInput, tailscaleAddress, telegramTokenLooksValid } from "../src/node/setup.js";
+import { emptyLab, labView } from "../src/core/lab.js";
 import { Telegram, edgesMessage } from "../src/node/telegram.js";
 import { Engine } from "../src/core/engine.js";
 import { PUBLIC_RPC_WS, loadConfig } from "../src/node/config.js";
@@ -175,6 +176,20 @@ describe("setup from the dashboard", () => {
     expect(withUpdate.command("/update")).toMatch(/Downloading/);
     expect(asked).toBe(1);
     expect(new Telegram({ token: "t", chatId: "1", log: silent, engine: () => e }).command("/update")).toMatch(/cannot update/);
+    // the Lab from the phone: what it tests, and your own idea
+    let typed = "";
+    const withLab = new Telegram({
+      token: "t",
+      chatId: "1",
+      log: silent,
+      engine: () => e,
+      lab: () => ({ ...labView(emptyLab()), note: "Searched 1,000 rules on 30 h of market." }),
+      labIdea: (text) => ((typed = text), text.includes("tp") ? { ok: true, note: "Testing it." } : { ok: false, error: "Give the exit." }),
+    });
+    expect(withLab.command("/lab")).toMatch(/Lab.*Searched 1,000 rules/s);
+    expect(withLab.command("/idea mig300 top10<=25% smart>=1 tp100 sl30")).toMatch(/Testing it/);
+    expect(typed).toBe("mig300 top10<=25% smart>=1 tp100 sl30");
+    expect(withLab.command("/idea mig300")).toMatch(/Give the exit/);
     expect(withUpdate.command("/help")).toContain("/update");
   });
 

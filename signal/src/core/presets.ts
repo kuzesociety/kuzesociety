@@ -4,7 +4,8 @@
  * never leaves a mix of the old and the new strategy behind.
  */
 import type { EdgeReport } from "./edges.js";
-import { ENTRY_POINTS, type Settings } from "./settings.js";
+import { describeCond } from "./lab.js";
+import { ENTRY_POINTS, type RuleCond, type Settings } from "./settings.js";
 
 export interface Preset {
   key: string;
@@ -16,7 +17,7 @@ export interface Preset {
 }
 
 /** Settings every strategy sets, so a switch replaces the whole rule. */
-const BASE: Partial<Settings> = { entryAt: "score", trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+const BASE: Partial<Settings> = { entryAt: "score", conds: [], trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
 
 export const PRESETS: Preset[] = [
   {
@@ -40,16 +41,19 @@ export function followsPreset(s: Settings, p: Partial<Settings>): boolean {
   for (const [k, v] of Object.entries(p)) {
     if (k === "filters") {
       for (const [fk, fv] of Object.entries(v as Settings["filters"])) if (s.filters[fk as keyof Settings["filters"]] !== fv) return false;
+    } else if (k === "conds") {
+      if (JSON.stringify(s.conds ?? []) !== JSON.stringify(v ?? [])) return false;
     } else if (s[k as keyof Settings] !== v) return false;
   }
   return true;
 }
 
 /** "score ≥ 95 · +500% / −20% · 10 min", or "halfway to graduation · +50% / −30% · 30 min" */
-export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin"> & { entryAt?: string }): string {
+export function ruleSummary(s: Pick<Settings, "minScore" | "tpPct" | "slPct" | "maxHoldMin"> & { entryAt?: string; conds?: RuleCond[] }): string {
   const time = s.maxHoldMin > 0 ? (s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min`) : "no time limit";
   const entry = s.entryAt && s.entryAt !== "score" ? (ENTRY_POINTS[s.entryAt] ?? s.entryAt) : `score ≥ ${s.minScore}`;
-  return `${entry} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
+  const when = s.conds?.length ? ` · ${s.conds.map(describeCond).join(", ")}` : "";
+  return `${entry}${when} · +${s.tpPct}% / −${s.slPct}% · ${time}`;
 }
 
 const signedPct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;

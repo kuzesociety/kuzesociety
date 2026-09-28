@@ -23,6 +23,12 @@ export interface ApiContext {
   autopilot?: () => unknown;
   /** the self-check (core/selfcheck): every check with its status, and one summary line */
   checks?: () => unknown;
+  /** the Lab (core/lab): ideas being tested, proven and retired */
+  lab?: () => unknown;
+  /** the Lab's summary to paste into a chat with Claude */
+  labSummary?: () => string;
+  /** adds your own idea to the Lab */
+  labIdea?: (text: string) => { ok: true; note: string } | { ok: false; error: string };
   onSettingsChanged?: () => void;
 }
 
@@ -91,6 +97,10 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ view: ctx.autopilot?.() ?? null });
       case "/api/checks":
         return ok({ view: ctx.checks?.() ?? null });
+      case "/api/lab":
+        return ok({ view: ctx.lab?.() ?? null });
+      case "/api/lab/summary":
+        return ctx.labSummary ? ok({ text: ctx.labSummary() }) : err(404, "The Lab runs on the server bot only.");
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));
@@ -118,6 +128,12 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ reports: await ctx.learnRun() });
       case "/api/edges/run":
         return ok({ report: await ctx.edgesRun() });
+      case "/api/lab/idea": {
+        if (!ctx.labIdea) return err(404, "The Lab runs on the server bot only.");
+        const text = typeof body.text === "string" ? body.text.slice(0, 300) : "";
+        const r = ctx.labIdea(text);
+        return r.ok ? ok(r) : err(400, r.error);
+      }
       case "/api/live/resume":
         ctx.live?.resume();
         return ok({ live: ctx.live?.status() ?? null });

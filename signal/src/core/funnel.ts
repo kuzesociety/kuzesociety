@@ -40,6 +40,7 @@ export const REASON_TEXT: Record<string, string> = {
   insufficient_balance: "Not enough SOL — paper: Trades tab → Add paper SOL; live: fund the wallet",
   slippage: "Price moved more than your slippage before the buy landed",
   migrating: "Coin is migrating to PumpSwap (not tradable for a moment)",
+  rule_conditions: "Does not meet the conditions of the rule in use",
   not_followed: "Its price is not followed right now (more graduated coins than the bot can follow at once) — not buying at an old price",
   no_price: "No tradable price yet",
   no_liquidity: "Not enough liquidity",

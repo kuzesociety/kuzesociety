@@ -803,6 +803,169 @@ var OutcomeTracker = class {
   }
 };
 
+// src/core/features.ts
+var MarketPulse = class {
+  buys = new DecayRate(5 * 6e4);
+  sells = new DecayRate(5 * 6e4);
+  launches = new DecayRate(10 * 6e4);
+  history = [];
+  lastSample = 0;
+  onTrade(ts, buy, sol) {
+    if (buy) this.buys.add(ts, sol);
+    else this.sells.add(ts, sol);
+  }
+  onLaunch(ts) {
+    this.launches.add(ts);
+  }
+  /** SOL per minute of net buying across all tracked tokens. */
+  netPerMin(ts) {
+    return this.buys.perMinute(ts) - this.sells.perMinute(ts);
+  }
+  launchesPerMin(ts) {
+    return this.launches.perMinute(ts);
+  }
+  buyPerMin(ts) {
+    return this.buys.perMinute(ts);
+  }
+  /** z-score of current buy volume vs the last ~24h of samples. */
+  heat(ts) {
+    const v = this.buys.perMinute(ts);
+    if (ts - this.lastSample > 6e4) {
+      this.history.push(v);
+      if (this.history.length > 1440) this.history.shift();
+      this.lastSample = ts;
+    }
+    if (this.history.length < 10) return 0;
+    let m = 0;
+    for (const x of this.history) m += x;
+    m /= this.history.length;
+    let s = 0;
+    for (const x of this.history) s += (x - m) ** 2;
+    const sd = Math.sqrt(s / (this.history.length - 1));
+    return sd > 0 ? clamp((v - m) / sd, -3, 3) : 0;
+  }
+};
+function extractFeatures(t, ctx) {
+  const now = ctx.now;
+  const w60 = t.window(now, 6e4);
+  const w300 = t.window(now, 3e5);
+  const prev60 = t.window(now, 6e4, 6e4);
+  const scan = t.scanHolders(now, 6e4, (a) => ctx.wallets.isSmart(a));
+  const conc = scan;
+  let whaleMax = 0;
+  for (let i = t.trades.length - 1; i >= 0; i--) {
+    const r = t.trades.at(i);
+    if (now - r.ts > 3e5) break;
+    if (r.buy && r.sol > whaleMax) whaleMax = r.sol;
+  }
+  const smart = scan.smart;
+  const observed = now - ctx.wallets.startedAt > 45 * 6e4;
+  const freshShare = observed && t.uniqueBuyers > 0 ? t.freshBuys / t.uniqueBuyers : NaN;
+  const narrative = ctx.narratives.describe(t.mint, ctx.mcapOf);
+  const creator = t.creator ? ctx.wallets.creator(t.creator, now) : { launches24h: 0, best: 0, graduated: 0, launches: 0 };
+  const m = t.meta;
+  const socials = (m.twitter ? 1 : 0) + (m.telegram ? 1 : 0) + (m.website ? 1 : 0);
+  const mcap = t.mcapSol > 0 ? t.mcapSol : 1e-9;
+  const ago30 = t.mcapAgo(now, 3e4);
+  const ago120 = t.mcapAgo(now, 12e4);
+  const hour2 = new Date(now).getUTCHours() + new Date(now).getUTCMinutes() / 60;
+  return {
+    stage: t.stage === "amm" ? "amm" : "curve",
+    ageSec: Math.max(0, (now - t.createdAt) / 1e3),
+    mcapSol: t.mcapSol,
+    progress: t.progress,
+    net60: w60.net,
+    net300: w300.net,
+    netPrev60: prev60.net,
+    buys60: w60.buyN,
+    sells60: w60.sellN,
+    uniq60: scan.uniqRecent,
+    uniqTotal: t.uniqueBuyers,
+    trades60: w60.n,
+    avgBuy300: w300.buyN > 0 ? w300.buySol / w300.buyN : 0,
+    whale300: w300.buySol > 0 ? clamp(whaleMax / w300.buySol, 0, 1) : 0,
+    devShare: t.devBal / t.supply,
+    devSold: t.devMaxBal > 0 ? clamp(t.devSoldTok / t.devMaxBal, 0, 1) : t.devSoldTok > 0 ? 1 : 0,
+    bundleShare: t.bundleTok / t.supply,
+    earlyShare: t.earlyTok / t.supply,
+    top10: conc.top10,
+    top1: conc.top1,
+    holders: conc.holders,
+    drawdown: t.athMcapSol > 0 ? clamp(1 - t.mcapSol / t.athMcapSol, 0, 1) : 0,
+    chg30: ago30 > 0 ? Math.log(mcap / ago30) : 0,
+    chg120: ago120 > 0 ? Math.log(mcap / ago120) : 0,
+    smartBuyers: smart,
+    freshShare,
+    socials,
+    tweetLink: narrative.tweetLinked ? 1 : 0,
+    clusterSize: narrative.clusterSize,
+    isLeader: narrative.clusterSize > 1 && narrative.isLeader ? 1 : 0,
+    isFirst: narrative.clusterSize > 1 && narrative.isFirst ? 1 : 0,
+    creatorLaunches24h: creator.launches24h,
+    creatorBest: creator.best,
+    heat: ctx.pulse.heat(now),
+    hourUtc: hour2,
+    sinceMigrateSec: t.migrateAt ? Math.max(0, (now - t.migrateAt) / 1e3) : 0,
+    liquiditySol: t.stage === "amm" ? t.poolQuote / 1e9 : t.realSol / 1e9,
+    dexSignal: (m.dexProfile ? 1 : 0) + ((m.boosts ?? 0) > 0 ? 1 : 0)
+  };
+}
+var pct = (x) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
+var s2 = (x) => Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2);
+var FEATURE_DEFS = [
+  { key: "age", label: "Age", x: (f2) => Math.log1p(f2.ageSec), show: (f2) => fmtAge(f2.ageSec), good: "young", bad: "old for its stage" },
+  { key: "mcap", label: "Market cap", x: (f2) => Math.log(Math.max(f2.mcapSol, 1)), show: (f2) => `${f2.mcapSol.toFixed(0)} SOL`, good: "room to run", bad: "already big" },
+  { key: "progress", label: "Curve progress", x: (f2) => f2.progress, show: (f2) => pct(f2.progress), good: "curve filling", bad: "curve nearly done" },
+  { key: "net60", label: "Net inflow 60s", x: (f2) => Math.asinh(f2.net60), show: (f2) => `${s2(f2.net60)} SOL`, good: "buyers pouring in", bad: "net selling" },
+  { key: "net300", label: "Net inflow 5m", x: (f2) => Math.asinh(f2.net300), show: (f2) => `${s2(f2.net300)} SOL`, good: "sustained demand", bad: "demand fading" },
+  { key: "accel", label: "Acceleration", x: (f2) => clamp((f2.net60 - f2.netPrev60) / (Math.abs(f2.netPrev60) + 1), -3, 3), show: (f2) => `${s2(f2.net60 - f2.netPrev60)} SOL vs prior min`, good: "speeding up", bad: "slowing down" },
+  { key: "buyRatio", label: "Buy share 60s", x: (f2) => (f2.buys60 + 1) / (f2.buys60 + f2.sells60 + 2), show: (f2) => `${f2.buys60}B/${f2.sells60}S`, good: "mostly buys", bad: "mostly sells" },
+  { key: "uniq60", label: "New buyers 60s", x: (f2) => Math.log1p(f2.uniq60), show: (f2) => `${f2.uniq60}`, good: "many distinct buyers", bad: "few buyers" },
+  { key: "uniqTotal", label: "Buyers total", x: (f2) => Math.log1p(f2.uniqTotal), show: (f2) => `${f2.uniqTotal}`, good: "broad participation", bad: "thin participation" },
+  { key: "trades60", label: "Trades 60s", x: (f2) => Math.log1p(f2.trades60), show: (f2) => `${f2.trades60}`, good: "active", bad: "quiet" },
+  { key: "avgBuy", label: "Avg buy 5m", x: (f2) => Math.log(0.01 + f2.avgBuy300), show: (f2) => `${s2(f2.avgBuy300)} SOL`, good: "retail-sized buys", bad: "whale-sized buys" },
+  { key: "whale", label: "Largest buy share", x: (f2) => f2.whale300, show: (f2) => pct(f2.whale300), good: "no single whale", bad: "one whale dominates" },
+  { key: "devShare", label: "Dev holds", x: (f2) => f2.devShare, show: (f2) => pct(f2.devShare), good: "dev holds little", bad: "dev holds a lot" },
+  { key: "devSold", label: "Dev sold", x: (f2) => f2.devSold, show: (f2) => pct(f2.devSold), good: "dev holding", bad: "dev dumping" },
+  { key: "bundle", label: "Bundled supply", x: (f2) => f2.bundleShare, show: (f2) => pct(f2.bundleShare), good: "no bundle", bad: "bundled at launch" },
+  { key: "early", label: "Sniper supply", x: (f2) => f2.earlyShare, show: (f2) => pct(f2.earlyShare), good: "snipers gone", bad: "snipers holding" },
+  { key: "top10", label: "Top 10 holders", x: (f2) => f2.top10, show: (f2) => pct(f2.top10), good: "spread out", bad: "concentrated" },
+  { key: "holders", label: "Holders", x: (f2) => Math.log1p(f2.holders), show: (f2) => `${f2.holders}`, good: "many holders", bad: "few holders" },
+  { key: "drawdown", label: "Below peak", x: (f2) => f2.drawdown, show: (f2) => pct(f2.drawdown), good: "near highs", bad: "far below peak" },
+  { key: "chg30", label: "Move 30s", x: (f2) => clamp(f2.chg30, -2, 2), show: (f2) => pct(Math.exp(f2.chg30) - 1), good: "rising", bad: "falling" },
+  { key: "chg120", label: "Move 2m", x: (f2) => clamp(f2.chg120, -2, 2), show: (f2) => pct(Math.exp(f2.chg120) - 1), good: "trending up", bad: "trending down" },
+  { key: "smart", label: "Smart wallets in", x: (f2) => Math.log1p(f2.smartBuyers), show: (f2) => `${f2.smartBuyers}`, good: "proven wallets buying", bad: "" },
+  { key: "fresh", label: "Fresh wallets", x: (f2) => Number.isFinite(f2.freshShare) ? f2.freshShare : 0.3, show: (f2) => Number.isFinite(f2.freshShare) ? pct(f2.freshShare) : "learning", good: "real wallets", bad: "brand-new wallets (alts)" },
+  { key: "socials", label: "Socials", x: (f2) => f2.socials / 3, show: (f2) => `${f2.socials}/3`, good: "has socials", bad: "no socials" },
+  { key: "tweet", label: "Tweet-linked", x: (f2) => f2.tweetLink, show: (f2) => f2.tweetLink ? "yes" : "no", good: "anchored to a tweet", bad: "" },
+  { key: "cluster", label: "Narrative heat", x: (f2) => Math.log(Math.max(1, f2.clusterSize)), show: (f2) => `${f2.clusterSize} similar`, good: "hot narrative", bad: "" },
+  { key: "leader", label: "Narrative leader", x: (f2) => f2.isLeader, show: (f2) => f2.isLeader ? "leads" : "\u2014", good: "leads its narrative", bad: "" },
+  { key: "copycat", label: "Copycat", x: (f2) => f2.clusterSize > 1 && !f2.isLeader ? 1 : 0, show: (f2) => f2.clusterSize > 1 && !f2.isLeader ? "yes" : "no", good: "", bad: "copy of a bigger coin" },
+  { key: "serial", label: "Serial launcher", x: (f2) => Math.log1p(Math.max(0, f2.creatorLaunches24h - 1)), show: (f2) => `${f2.creatorLaunches24h} launches/24h`, good: "", bad: "dev launches many coins" },
+  { key: "creatorBest", label: "Dev track record", x: (f2) => Math.log1p(f2.creatorBest / 100), show: (f2) => `best ${f2.creatorBest.toFixed(0)} SOL`, good: "dev had a winner", bad: "" },
+  { key: "heat", label: "Market heat", x: (f2) => f2.heat, show: (f2) => s2(f2.heat), good: "hot market", bad: "cold market" },
+  { key: "hourSin", label: "Hour (sin)", x: (f2) => Math.sin(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
+  { key: "hourCos", label: "Hour (cos)", x: (f2) => Math.cos(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
+  { key: "liquidity", label: "Liquidity", x: (f2) => Math.log1p(f2.liquiditySol), show: (f2) => `${f2.liquiditySol.toFixed(1)} SOL`, good: "deep pool", bad: "thin pool" },
+  { key: "sinceMig", label: "Since migration", x: (f2) => f2.stage === "amm" ? Math.log1p(f2.sinceMigrateSec) : 0, show: (f2) => f2.stage === "amm" ? fmtAge(f2.sinceMigrateSec) : "\u2014", good: "just graduated", bad: "stale after graduation" },
+  { key: "dex", label: "DEX listing paid", x: (f2) => f2.dexSignal, show: (f2) => `${f2.dexSignal}/2`, good: "paid profile/boost", bad: "" }
+];
+var FEATURE_KEYS = FEATURE_DEFS.map((d) => d.key);
+function featureVector(f2) {
+  const out = new Array(FEATURE_DEFS.length);
+  for (let i = 0; i < FEATURE_DEFS.length; i++) {
+    const v = FEATURE_DEFS[i].x(f2);
+    out[i] = Number.isFinite(v) ? v : 0;
+  }
+  return out;
+}
+function fmtAge(sec) {
+  if (sec < 90) return `${Math.round(sec)}s`;
+  if (sec < 5400) return `${Math.round(sec / 60)}m`;
+  if (sec < 172800) return `${(sec / 3600).toFixed(1)}h`;
+  return `${(sec / 86400).toFixed(1)}d`;
+}
+
 // src/core/settings.ts
 var ENTRY_POINTS = {
   age20: "20 s after launch",
@@ -824,6 +987,7 @@ var DEFAULT_SETTINGS = {
   mode: "paper",
   minScore: 75,
   entryAt: "score",
+  conds: [],
   scoreOnly: false,
   tradeCurve: true,
   tradeAmm: true,
@@ -888,6 +1052,7 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
     minScore: clamp(num(i.minScore, b.minScore), 0, 100),
     entryAt: i.entryAt === "score" || typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS ? i.entryAt : b.entryAt,
+    conds: sanitizeConds(i.conds, b.conds),
     scoreOnly: bool(i.scoreOnly, b.scoreOnly),
     tradeCurve: bool(i.tradeCurve, b.tradeCurve),
     tradeAmm: bool(i.tradeAmm, b.tradeAmm),
@@ -927,6 +1092,25 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
   };
   if (!out.tradeCurve && !out.tradeAmm) out.tradeCurve = true;
   return out;
+}
+function sanitizeConds(v, d = []) {
+  if (!Array.isArray(v)) return d.map((c) => ({ ...c }));
+  const out = [];
+  for (const c of v) {
+    if (!c || typeof c !== "object") continue;
+    const { k, op, v: val } = c;
+    if (typeof k === "string" && FEATURE_KEYS.includes(k) && (op === ">=" || op === "<=") && typeof val === "number" && Number.isFinite(val)) out.push({ k, op, v: val });
+    if (out.length === 3) break;
+  }
+  return out;
+}
+function condsHold(conds, x) {
+  for (const c of conds) {
+    const v = x[FEATURE_KEYS.indexOf(c.k)];
+    if (v === void 0 || !Number.isFinite(v)) return false;
+    if (c.op === ">=" ? v < c.v - 1e-9 : v > c.v + 1e-9) return false;
+  }
+  return true;
 }
 function exitPlanFrom(s) {
   return {
@@ -1006,6 +1190,7 @@ function settingsFor(r, horizonMs) {
   const cond = CONDITIONS.find((c) => c.key === r.cond);
   const out = {
     entryAt: r.at ?? "score",
+    conds: [],
     minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,
@@ -1388,13 +1573,13 @@ function* boostSteps(train, valid, keys, params = {}) {
     const tree = { f: [], t: [], l: [], r: [], v: [] };
     const splitBin = [];
     const gain = new Array(keys.length).fill(0);
-    const leafOf = (G, H) => -G / (H + p.lambda) * p.lr;
-    const newNode = (G, H) => {
+    const leafOf = (G, H2) => -G / (H2 + p.lambda) * p.lr;
+    const newNode = (G, H2) => {
       tree.f.push(-1);
       tree.t.push(0);
       tree.l.push(-1);
       tree.r.push(-1);
-      tree.v.push(leafOf(G, H));
+      tree.v.push(leafOf(G, H2));
       splitBin.push(-1);
       return tree.f.length - 1;
     };
@@ -1517,169 +1702,6 @@ function validEnsemble(ens, featureKeys) {
     }
   }
   return true;
-}
-
-// src/core/features.ts
-var MarketPulse = class {
-  buys = new DecayRate(5 * 6e4);
-  sells = new DecayRate(5 * 6e4);
-  launches = new DecayRate(10 * 6e4);
-  history = [];
-  lastSample = 0;
-  onTrade(ts, buy, sol) {
-    if (buy) this.buys.add(ts, sol);
-    else this.sells.add(ts, sol);
-  }
-  onLaunch(ts) {
-    this.launches.add(ts);
-  }
-  /** SOL per minute of net buying across all tracked tokens. */
-  netPerMin(ts) {
-    return this.buys.perMinute(ts) - this.sells.perMinute(ts);
-  }
-  launchesPerMin(ts) {
-    return this.launches.perMinute(ts);
-  }
-  buyPerMin(ts) {
-    return this.buys.perMinute(ts);
-  }
-  /** z-score of current buy volume vs the last ~24h of samples. */
-  heat(ts) {
-    const v = this.buys.perMinute(ts);
-    if (ts - this.lastSample > 6e4) {
-      this.history.push(v);
-      if (this.history.length > 1440) this.history.shift();
-      this.lastSample = ts;
-    }
-    if (this.history.length < 10) return 0;
-    let m = 0;
-    for (const x of this.history) m += x;
-    m /= this.history.length;
-    let s = 0;
-    for (const x of this.history) s += (x - m) ** 2;
-    const sd = Math.sqrt(s / (this.history.length - 1));
-    return sd > 0 ? clamp((v - m) / sd, -3, 3) : 0;
-  }
-};
-function extractFeatures(t, ctx) {
-  const now = ctx.now;
-  const w60 = t.window(now, 6e4);
-  const w300 = t.window(now, 3e5);
-  const prev60 = t.window(now, 6e4, 6e4);
-  const scan = t.scanHolders(now, 6e4, (a) => ctx.wallets.isSmart(a));
-  const conc = scan;
-  let whaleMax = 0;
-  for (let i = t.trades.length - 1; i >= 0; i--) {
-    const r = t.trades.at(i);
-    if (now - r.ts > 3e5) break;
-    if (r.buy && r.sol > whaleMax) whaleMax = r.sol;
-  }
-  const smart = scan.smart;
-  const observed = now - ctx.wallets.startedAt > 45 * 6e4;
-  const freshShare = observed && t.uniqueBuyers > 0 ? t.freshBuys / t.uniqueBuyers : NaN;
-  const narrative = ctx.narratives.describe(t.mint, ctx.mcapOf);
-  const creator = t.creator ? ctx.wallets.creator(t.creator, now) : { launches24h: 0, best: 0, graduated: 0, launches: 0 };
-  const m = t.meta;
-  const socials = (m.twitter ? 1 : 0) + (m.telegram ? 1 : 0) + (m.website ? 1 : 0);
-  const mcap = t.mcapSol > 0 ? t.mcapSol : 1e-9;
-  const ago30 = t.mcapAgo(now, 3e4);
-  const ago120 = t.mcapAgo(now, 12e4);
-  const hour2 = new Date(now).getUTCHours() + new Date(now).getUTCMinutes() / 60;
-  return {
-    stage: t.stage === "amm" ? "amm" : "curve",
-    ageSec: Math.max(0, (now - t.createdAt) / 1e3),
-    mcapSol: t.mcapSol,
-    progress: t.progress,
-    net60: w60.net,
-    net300: w300.net,
-    netPrev60: prev60.net,
-    buys60: w60.buyN,
-    sells60: w60.sellN,
-    uniq60: scan.uniqRecent,
-    uniqTotal: t.uniqueBuyers,
-    trades60: w60.n,
-    avgBuy300: w300.buyN > 0 ? w300.buySol / w300.buyN : 0,
-    whale300: w300.buySol > 0 ? clamp(whaleMax / w300.buySol, 0, 1) : 0,
-    devShare: t.devBal / t.supply,
-    devSold: t.devMaxBal > 0 ? clamp(t.devSoldTok / t.devMaxBal, 0, 1) : t.devSoldTok > 0 ? 1 : 0,
-    bundleShare: t.bundleTok / t.supply,
-    earlyShare: t.earlyTok / t.supply,
-    top10: conc.top10,
-    top1: conc.top1,
-    holders: conc.holders,
-    drawdown: t.athMcapSol > 0 ? clamp(1 - t.mcapSol / t.athMcapSol, 0, 1) : 0,
-    chg30: ago30 > 0 ? Math.log(mcap / ago30) : 0,
-    chg120: ago120 > 0 ? Math.log(mcap / ago120) : 0,
-    smartBuyers: smart,
-    freshShare,
-    socials,
-    tweetLink: narrative.tweetLinked ? 1 : 0,
-    clusterSize: narrative.clusterSize,
-    isLeader: narrative.clusterSize > 1 && narrative.isLeader ? 1 : 0,
-    isFirst: narrative.clusterSize > 1 && narrative.isFirst ? 1 : 0,
-    creatorLaunches24h: creator.launches24h,
-    creatorBest: creator.best,
-    heat: ctx.pulse.heat(now),
-    hourUtc: hour2,
-    sinceMigrateSec: t.migrateAt ? Math.max(0, (now - t.migrateAt) / 1e3) : 0,
-    liquiditySol: t.stage === "amm" ? t.poolQuote / 1e9 : t.realSol / 1e9,
-    dexSignal: (m.dexProfile ? 1 : 0) + ((m.boosts ?? 0) > 0 ? 1 : 0)
-  };
-}
-var pct = (x) => `${(x * 100).toFixed(x < 0.1 ? 1 : 0)}%`;
-var s2 = (x) => Math.abs(x) >= 10 ? x.toFixed(0) : x.toFixed(2);
-var FEATURE_DEFS = [
-  { key: "age", label: "Age", x: (f2) => Math.log1p(f2.ageSec), show: (f2) => fmtAge(f2.ageSec), good: "young", bad: "old for its stage" },
-  { key: "mcap", label: "Market cap", x: (f2) => Math.log(Math.max(f2.mcapSol, 1)), show: (f2) => `${f2.mcapSol.toFixed(0)} SOL`, good: "room to run", bad: "already big" },
-  { key: "progress", label: "Curve progress", x: (f2) => f2.progress, show: (f2) => pct(f2.progress), good: "curve filling", bad: "curve nearly done" },
-  { key: "net60", label: "Net inflow 60s", x: (f2) => Math.asinh(f2.net60), show: (f2) => `${s2(f2.net60)} SOL`, good: "buyers pouring in", bad: "net selling" },
-  { key: "net300", label: "Net inflow 5m", x: (f2) => Math.asinh(f2.net300), show: (f2) => `${s2(f2.net300)} SOL`, good: "sustained demand", bad: "demand fading" },
-  { key: "accel", label: "Acceleration", x: (f2) => clamp((f2.net60 - f2.netPrev60) / (Math.abs(f2.netPrev60) + 1), -3, 3), show: (f2) => `${s2(f2.net60 - f2.netPrev60)} SOL vs prior min`, good: "speeding up", bad: "slowing down" },
-  { key: "buyRatio", label: "Buy share 60s", x: (f2) => (f2.buys60 + 1) / (f2.buys60 + f2.sells60 + 2), show: (f2) => `${f2.buys60}B/${f2.sells60}S`, good: "mostly buys", bad: "mostly sells" },
-  { key: "uniq60", label: "New buyers 60s", x: (f2) => Math.log1p(f2.uniq60), show: (f2) => `${f2.uniq60}`, good: "many distinct buyers", bad: "few buyers" },
-  { key: "uniqTotal", label: "Buyers total", x: (f2) => Math.log1p(f2.uniqTotal), show: (f2) => `${f2.uniqTotal}`, good: "broad participation", bad: "thin participation" },
-  { key: "trades60", label: "Trades 60s", x: (f2) => Math.log1p(f2.trades60), show: (f2) => `${f2.trades60}`, good: "active", bad: "quiet" },
-  { key: "avgBuy", label: "Avg buy 5m", x: (f2) => Math.log(0.01 + f2.avgBuy300), show: (f2) => `${s2(f2.avgBuy300)} SOL`, good: "retail-sized buys", bad: "whale-sized buys" },
-  { key: "whale", label: "Largest buy share", x: (f2) => f2.whale300, show: (f2) => pct(f2.whale300), good: "no single whale", bad: "one whale dominates" },
-  { key: "devShare", label: "Dev holds", x: (f2) => f2.devShare, show: (f2) => pct(f2.devShare), good: "dev holds little", bad: "dev holds a lot" },
-  { key: "devSold", label: "Dev sold", x: (f2) => f2.devSold, show: (f2) => pct(f2.devSold), good: "dev holding", bad: "dev dumping" },
-  { key: "bundle", label: "Bundled supply", x: (f2) => f2.bundleShare, show: (f2) => pct(f2.bundleShare), good: "no bundle", bad: "bundled at launch" },
-  { key: "early", label: "Sniper supply", x: (f2) => f2.earlyShare, show: (f2) => pct(f2.earlyShare), good: "snipers gone", bad: "snipers holding" },
-  { key: "top10", label: "Top 10 holders", x: (f2) => f2.top10, show: (f2) => pct(f2.top10), good: "spread out", bad: "concentrated" },
-  { key: "holders", label: "Holders", x: (f2) => Math.log1p(f2.holders), show: (f2) => `${f2.holders}`, good: "many holders", bad: "few holders" },
-  { key: "drawdown", label: "Below peak", x: (f2) => f2.drawdown, show: (f2) => pct(f2.drawdown), good: "near highs", bad: "far below peak" },
-  { key: "chg30", label: "Move 30s", x: (f2) => clamp(f2.chg30, -2, 2), show: (f2) => pct(Math.exp(f2.chg30) - 1), good: "rising", bad: "falling" },
-  { key: "chg120", label: "Move 2m", x: (f2) => clamp(f2.chg120, -2, 2), show: (f2) => pct(Math.exp(f2.chg120) - 1), good: "trending up", bad: "trending down" },
-  { key: "smart", label: "Smart wallets in", x: (f2) => Math.log1p(f2.smartBuyers), show: (f2) => `${f2.smartBuyers}`, good: "proven wallets buying", bad: "" },
-  { key: "fresh", label: "Fresh wallets", x: (f2) => Number.isFinite(f2.freshShare) ? f2.freshShare : 0.3, show: (f2) => Number.isFinite(f2.freshShare) ? pct(f2.freshShare) : "learning", good: "real wallets", bad: "brand-new wallets (alts)" },
-  { key: "socials", label: "Socials", x: (f2) => f2.socials / 3, show: (f2) => `${f2.socials}/3`, good: "has socials", bad: "no socials" },
-  { key: "tweet", label: "Tweet-linked", x: (f2) => f2.tweetLink, show: (f2) => f2.tweetLink ? "yes" : "no", good: "anchored to a tweet", bad: "" },
-  { key: "cluster", label: "Narrative heat", x: (f2) => Math.log(Math.max(1, f2.clusterSize)), show: (f2) => `${f2.clusterSize} similar`, good: "hot narrative", bad: "" },
-  { key: "leader", label: "Narrative leader", x: (f2) => f2.isLeader, show: (f2) => f2.isLeader ? "leads" : "\u2014", good: "leads its narrative", bad: "" },
-  { key: "copycat", label: "Copycat", x: (f2) => f2.clusterSize > 1 && !f2.isLeader ? 1 : 0, show: (f2) => f2.clusterSize > 1 && !f2.isLeader ? "yes" : "no", good: "", bad: "copy of a bigger coin" },
-  { key: "serial", label: "Serial launcher", x: (f2) => Math.log1p(Math.max(0, f2.creatorLaunches24h - 1)), show: (f2) => `${f2.creatorLaunches24h} launches/24h`, good: "", bad: "dev launches many coins" },
-  { key: "creatorBest", label: "Dev track record", x: (f2) => Math.log1p(f2.creatorBest / 100), show: (f2) => `best ${f2.creatorBest.toFixed(0)} SOL`, good: "dev had a winner", bad: "" },
-  { key: "heat", label: "Market heat", x: (f2) => f2.heat, show: (f2) => s2(f2.heat), good: "hot market", bad: "cold market" },
-  { key: "hourSin", label: "Hour (sin)", x: (f2) => Math.sin(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
-  { key: "hourCos", label: "Hour (cos)", x: (f2) => Math.cos(2 * Math.PI * f2.hourUtc / 24), show: (f2) => `${f2.hourUtc.toFixed(0)}h UTC`, good: "", bad: "" },
-  { key: "liquidity", label: "Liquidity", x: (f2) => Math.log1p(f2.liquiditySol), show: (f2) => `${f2.liquiditySol.toFixed(1)} SOL`, good: "deep pool", bad: "thin pool" },
-  { key: "sinceMig", label: "Since migration", x: (f2) => f2.stage === "amm" ? Math.log1p(f2.sinceMigrateSec) : 0, show: (f2) => f2.stage === "amm" ? fmtAge(f2.sinceMigrateSec) : "\u2014", good: "just graduated", bad: "stale after graduation" },
-  { key: "dex", label: "DEX listing paid", x: (f2) => f2.dexSignal, show: (f2) => `${f2.dexSignal}/2`, good: "paid profile/boost", bad: "" }
-];
-var FEATURE_KEYS = FEATURE_DEFS.map((d) => d.key);
-function featureVector(f2) {
-  const out = new Array(FEATURE_DEFS.length);
-  for (let i = 0; i < FEATURE_DEFS.length; i++) {
-    const v = FEATURE_DEFS[i].x(f2);
-    out[i] = Number.isFinite(v) ? v : 0;
-  }
-  return out;
-}
-function fmtAge(sec) {
-  if (sec < 90) return `${Math.round(sec)}s`;
-  if (sec < 5400) return `${Math.round(sec / 60)}m`;
-  if (sec < 172800) return `${(sec / 3600).toFixed(1)}h`;
-  return `${(sec / 86400).toFixed(1)}d`;
 }
 
 // src/core/model.ts
@@ -2108,10 +2130,10 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
   let fPrev = objective(beta);
   let converged = false;
   const g = new Float64Array(d);
-  const H = new Float64Array(d * d);
+  const H2 = new Float64Array(d * d);
   for (let iter = 0; iter < maxIter; iter++) {
     g.fill(0);
-    H.fill(0);
+    H2.fill(0);
     for (let i = 0; i < n; i++) {
       const o = i * k;
       let s = beta[0];
@@ -2120,26 +2142,26 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
       const r = w[i] * (p - y[i]);
       const v = w[i] * Math.max(p * (1 - p), 1e-9);
       g[0] += r;
-      H[0] += v;
+      H2[0] += v;
       for (let j = 0; j < k; j++) {
         const zj = Z[o + j];
         g[j + 1] += r * zj;
-        H[j + 1] += v * zj;
+        H2[j + 1] += v * zj;
         const vz = v * zj;
         const row = (j + 1) * d + 1;
-        for (let m = 0; m <= j; m++) H[row + m] += vz * Z[o + m];
+        for (let m = 0; m <= j; m++) H2[row + m] += vz * Z[o + m];
       }
       if ((i & 4095) === 4095) yield;
     }
     for (let j = 1; j < d; j++) {
       g[j] += lambda * (beta[j] - prior[j]);
-      H[j * d + j] += lambda;
-      H[j * d] = H[j];
-      for (let m = 1; m < j; m++) H[m * d + j] = H[j * d + m];
+      H2[j * d + j] += lambda;
+      H2[j * d] = H2[j];
+      for (let m = 1; m < j; m++) H2[m * d + j] = H2[j * d + m];
     }
     g[0] += 1e-4 * (beta[0] - prior[0]);
-    H[0] += 1e-4;
-    const step = choleskyFlat(H, g, d);
+    H2[0] += 1e-4;
+    const step = choleskyFlat(H2, g, d);
     if (!step) break;
     let t = 1;
     let next = beta;
@@ -2349,7 +2371,7 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
   const L = o.calibrate === false ? lin : yield* calibrateSteps(lin, partB);
   const sL = yield* scoreRowsSteps(L, val);
   const mL = sL.metrics;
-  let H = null;
+  let H2 = null;
   let mH = null;
   let treesZ = 0;
   let treeCount = 0;
@@ -2359,19 +2381,19 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
     const res = yield* boostSteps(dataA, dataB, FEATURE_KEYS, boost);
     if (res.ens.trees.length) {
       const withTrees = { ...lin, trees: res.ens };
-      H = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
-      const sH = yield* scoreRowsSteps(H, val);
+      H2 = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
+      const sH = yield* scoreRowsSteps(H2, val);
       mH = sH.metrics;
       treesZ = lossGainZ(sL.losses, sH.losses, val).z;
       treeCount = res.ens.trees.length;
     }
   }
-  const treesWin = !!(H && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
-  const cand = treesWin ? H : L;
+  const treesWin = !!(H2 && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
+  const cand = treesWin ? H2 : L;
   const recipe = treesWin ? "trees" : "linear";
   const fresh = val.filter((r) => r.ts > seenTo);
   const freshPos = fresh.reduce((s, r) => s + r.y, 0);
-  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H ? treesZ : void 0 };
+  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H2 ? treesZ : void 0 };
   if (fresh.length < o.minFreshRows || freshPos < o.minFreshPositives) {
     return {
       rows,
@@ -2528,6 +2550,7 @@ var REASON_TEXT = {
   insufficient_balance: "Not enough SOL \u2014 paper: Trades tab \u2192 Add paper SOL; live: fund the wallet",
   slippage: "Price moved more than your slippage before the buy landed",
   migrating: "Coin is migrating to PumpSwap (not tradable for a moment)",
+  rule_conditions: "Does not meet the conditions of the rule in use",
   not_followed: "Its price is not followed right now (more graduated coins than the bot can follow at once) \u2014 not buying at an old price",
   no_price: "No tradable price yet",
   no_liquidity: "Not enough liquidity",
@@ -2809,8 +2832,110 @@ var NarrativeIndex = class {
   }
 };
 
+// src/core/lab.ts
+var DAY = 864e5;
+var NF = FEATURE_KEYS.length;
+var H = HOLDS_MIN.length;
+var LAB = {
+  /** ideas from the search tested at once */
+  maxActive: 20,
+  /** your own ideas tested at once */
+  mineMax: 5,
+  /** new ideas from one search at most, one per entry */
+  newPerRun: 3,
+  /** finished coins at which an idea is looked at; it can be proven only at these */
+  looks: [60, 120, 240, 480],
+  /** one-sided error per look: an idea without an edge passes a look by luck at most this often */
+  alpha: 5e-4,
+  /** a proof resting on a handful of lucky wins is not trusted */
+  minWins: 10,
+  /** an idea not proven after this long leaves */
+  maxAgeMs: 7 * DAY,
+  /** a proven idea leaves after this long, and has to be found and proven again */
+  provenMs: 14 * DAY,
+  /** coins after its proof before a proven idea can be dropped for falling short */
+  postMin: 40,
+  /** the search: fewest trades a rule needs on the data it is invented from */
+  minSeen: 60,
+  /** the search needs this much finished data */
+  minHours: 24,
+  minRows: 1e3,
+  /** candidate thresholds: these shares of each fact's values at each entry */
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9],
+  /** thresholds per entry that get every exit after the first look (on SCREEN exits) */
+  screenTop: 16,
+  /** single conditions per entry carried into pairs */
+  pairTop: 8,
+  /** a failed idea is not suggested again for this long */
+  retryAfterMs: 3 * DAY,
+  /** retired ideas kept to show */
+  keepRetired: 30,
+  /** results kept per idea (oldest dropped beyond) */
+  keepVals: 3e3
+};
+var sig2 = (v) => v === 0 || !Number.isFinite(v) ? 0 : Number(v.toPrecision(2));
+var signedPct = (x) => `${x >= 0 ? "+" : ""}${Math.round(x * 100)}%`;
+var pctFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => `${Math.round(r * 100)}%`, pct: true });
+var countFact = (key, label) => ({ key, label, raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r >= 10 ? sig2(r) : Math.round(r), show: (r) => `${Math.round(r)}` });
+var solFact = (key, label) => ({ key, label, raw: Math.sinh, x: Math.asinh, nice: sig2, show: (r) => `${r} SOL` });
+var moveFact = (key, label) => ({ key, label, raw: (x) => Math.exp(x) - 1, x: (r) => Math.max(-2, Math.min(2, Math.log(1 + Math.max(-0.99, r)))), nice: (r) => Math.round(r * 100) / 100, show: signedPct, pct: true });
+var yesNoFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => r >= 0.5 ? 1 : 0, show: (r) => r >= 0.5 ? "yes" : "no", yesNo: true });
+var LAB_FACTS = [
+  { key: "age", label: "Age", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r < 90 ? Math.round(r / 5) * 5 : r < 5400 ? Math.round(r / 60) * 60 : Math.round(r / 600) * 600, show: fmtAge },
+  { key: "mcap", label: "Market cap", raw: Math.exp, x: (r) => Math.log(Math.max(r, 1)), nice: sig2, show: (r) => `${r} SOL` },
+  pctFact("progress", "Curve progress"),
+  solFact("net60", "Net inflow 60s"),
+  solFact("net300", "Net inflow 5m"),
+  { key: "accel", label: "Acceleration", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 10) / 10, show: (r) => r.toFixed(1) },
+  pctFact("buyRatio", "Buy share 60s"),
+  countFact("uniq60", "New buyers 60s"),
+  countFact("uniqTotal", "Buyers total"),
+  countFact("trades60", "Trades 60s"),
+  { key: "avgBuy", label: "Avg buy 5m", raw: (x) => Math.exp(x) - 0.01, x: (r) => Math.log(0.01 + Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
+  pctFact("whale", "Largest buy share"),
+  pctFact("devShare", "Dev holds"),
+  pctFact("devSold", "Dev sold"),
+  pctFact("bundle", "Bundled supply"),
+  pctFact("early", "Sniper supply"),
+  pctFact("top10", "Top 10 holders"),
+  countFact("holders", "Holders"),
+  pctFact("drawdown", "Below peak"),
+  moveFact("chg30", "Move 30s"),
+  moveFact("chg120", "Move 2m"),
+  countFact("smart", "Smart wallets in"),
+  pctFact("fresh", "Fresh wallets"),
+  { key: "socials", label: "Socials", raw: (x) => x * 3, x: (r) => r / 3, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 3` },
+  yesNoFact("tweet", "Tweet-linked"),
+  { key: "cluster", label: "Narrative heat", raw: Math.exp, x: (r) => Math.log(Math.max(1, r)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} similar coins` },
+  yesNoFact("leader", "Narrative leader"),
+  yesNoFact("copycat", "Copycat"),
+  { key: "serial", label: "Dev launches in 24 h", raw: (x) => Math.expm1(x) + 1, x: (r) => Math.log1p(Math.max(0, r - 1)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)}` },
+  { key: "creatorBest", label: "Dev's best coin", raw: (x) => Math.expm1(x) * 100, x: (r) => Math.log1p(Math.max(0, r) / 100), nice: sig2, show: (r) => `${r} SOL` },
+  { key: "heat", label: "Market heat", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => r.toFixed(2) },
+  { key: "liquidity", label: "Liquidity", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
+  { key: "dex", label: "DEX listing paid", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 2` }
+];
+var FACT = new Map(LAB_FACTS.map((f2) => [f2.key, f2]));
+var FACT_INDEX = LAB_FACTS.map((f2) => FEATURE_KEYS.indexOf(f2.key));
+var GRID_TPS = [...new Set(GRID.map((g) => g.tp))];
+var GRID_SLS = [...new Set(GRID.map((g) => g.sl))];
+var LAB_FORMAT = `entry, then up to 3 conditions, then the exit \u2014 e.g. "mig300 top10<=25% smart>=1 tp100 sl30 hold30". Entry: score50\u2026score95 (the first time the score reaches it) or ${Object.keys(ENTRY_POINTS).join(", ")}. Optional: stage=curve or stage=amm. Conditions on: ${LAB_FACTS.map((f2) => f2.key).join(", ")} (with >= or <=; % for shares; =1 / =0 for yes/no). Take profit tp: ${GRID_TPS.join(", ")}; stop loss sl: ${GRID_SLS.join(", ")}; time limit hold (minutes): ${HOLDS_MIN.filter((h) => h > 0).join(", ")}, or none.`;
+var STRICT = 1 - 2 * LAB.alpha;
+var SCREEN = [
+  [25, 10, 0],
+  [50, 20, 0],
+  [50, 20, 10],
+  [100, 30, 0],
+  [100, 30, 30],
+  [100, 50, 0],
+  [200, 50, 0],
+  [150, 40, 60],
+  [300, 70, 0],
+  [500, 50, 0]
+].map(([tp, sl, hold]) => GRID.findIndex((g) => g.tp === tp && g.sl === sl) * H + HOLDS_MIN.indexOf(hold)).filter((e) => e >= 0);
+
 // src/core/presets.ts
-var BASE = { entryAt: "score", trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+var BASE = { entryAt: "score", conds: [], trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
 var PRESETS = [
   {
     key: "plan",
@@ -2830,7 +2955,7 @@ var PRESETS = [
 
 // src/core/autopilot.ts
 var HOUR2 = 36e5;
-var RULE_KEYS = ["entryAt", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"];
+var RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"];
 var AUTOPILOT = {
   /** an edge-finder answer older than this switches nothing */
   freshMs: 6 * HOUR2,
@@ -2851,7 +2976,7 @@ var AUTOPILOT = {
 };
 function ruleOf(s) {
   const out = {};
-  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : s[k];
+  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
   return out;
 }
 function ruleChanged(a, b) {
@@ -3882,6 +4007,7 @@ var Engine = class {
     if (t.nonSol) return "non_sol_quote";
     if (t.stage === "curve" && !s.tradeCurve || t.stage === "amm" && !s.tradeAmm) return "stage_off";
     if (t.stage === "migrating") return "migrating";
+    if (s.conds.length && !condsHold(s.conds, e.x)) return "rule_conditions";
     if (t.stage === "amm" && this.followedPools && !(t.pool && this.followedPools.has(t.pool) && !this.stalePools.has(t.pool))) return "not_followed";
     for (const p of this.positions.values()) if (p.mint === t.mint) return "pending";
     if (!s.reentry && this.tradedMints.has(t.mint)) return "already_traded";
@@ -5657,6 +5783,19 @@ var DataStore = class {
   }
   loadAutopilot() {
     const p = join(this.dir, "autopilot.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+  /** The Lab (core/lab): the ideas being tested, their results so far, and the retired ones. */
+  saveLab(state) {
+    writeFileAtomic(join(this.dir, "lab.json"), JSON.stringify(state));
+  }
+  loadLab() {
+    const p = join(this.dir, "lab.json");
     if (!existsSync(p)) return null;
     try {
       return JSON.parse(readFileSync(p, "utf8"));

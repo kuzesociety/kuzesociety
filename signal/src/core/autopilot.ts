@@ -34,7 +34,7 @@ import { clusteredMeanCI, hourOf, meanCI } from "./util.js";
 const HOUR = 3_600_000;
 
 /** The settings a trading rule is made of (what a strategy or an edge-finder rule sets). */
-export const RULE_KEYS = ["entryAt", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"] as const;
+export const RULE_KEYS = ["entryAt", "conds", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"] as const;
 
 export const AUTOPILOT = {
   /** an edge-finder answer older than this switches nothing */
@@ -108,7 +108,7 @@ export function worstPerDay(rule: EdgeFound, s: Settings): number {
 /** The rule part of the settings (a copy). */
 export function ruleOf(s: Settings): Partial<Settings> {
   const out: Record<string, unknown> = {};
-  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : s[k];
+  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : k === "conds" ? (s.conds ?? []).map((c) => ({ ...c })) : s[k];
   return out as Partial<Settings>;
 }
 
@@ -179,7 +179,17 @@ function whyNone(report: EdgeReport | null, fresh: boolean, trusted: boolean, li
  * The autopilot's decision for this moment: the latest edge-finder report, the settings, the
  * autopilot's own state and the closed trades (to judge the rule in use).
  */
-export function decideAutopilot(o: { report: EdgeReport | null; settings: Settings; state: AutopilotState; closed: Position[]; now: number }): AutopilotDecision {
+export function decideAutopilot(o: {
+  report: EdgeReport | null;
+  settings: Settings;
+  state: AutopilotState;
+  closed: Position[];
+  now: number;
+  /** rules the Lab proved on coins after their invention (core/lab labProofs: fresh ones only) */
+  extra?: EdgeFound[];
+  /** the rule in use on the coins after its proof, when the Lab proved it (core/lab labForward) */
+  forward?: EdgeReport["incumbent"];
+}): AutopilotDecision {
   const s = o.settings;
   const now = o.now;
   const st: AutopilotState = { ...o.state, benched: { ...o.state.benched }, log: [...o.state.log] };
@@ -221,7 +231,7 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
 
   // 1b. …and on every coin that qualified for it after it was proven (not only the ones it traded)
   const report = o.report;
-  const fwd = report?.incumbent;
+  const fwd = o.forward ?? report?.incumbent;
   if (st.active && st.proof && !benchedNow && fwd?.text === st.active && fwd.n >= AUTOPILOT.forwardMin && fwd.hi < st.proof.lo) {
     st.benched[st.active] = now + AUTOPILOT.benchMs;
     notes.push(`Dropped "${st.active}": on ${fwd.n} coins that qualified after it was proven it averaged ${pct(fwd.mean)}, below the ${pct(st.proof.lo)} worst case it had shown. Benched for a day.`);
@@ -231,7 +241,7 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
   // 2. what the latest search proved
   const { fresh, trusted } = evidenceOf(report, now);
   const passes = (r: EdgeFound) => r.holdout.lo > 0 && (!live || (r.holdout.n >= AUTOPILOT.liveMinTrades && r.holdout.lo > AUTOPILOT.liveMinLo));
-  const ranked = (trusted ? report!.survivors : [])
+  const ranked = [...(trusted ? report!.survivors : []), ...(o.extra ?? [])]
     .filter((r) => passes(r) && !((st.benched[r.text] ?? 0) > now))
     .map((r) => ({ r, v: worstPerDay(r, s) }))
     .sort((a, b) => b.v - a.v);
@@ -275,18 +285,18 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
       since: now,
       proof: { mean: best.r.holdout.mean, lo: best.r.holdout.lo, n: best.r.holdout.n },
       rule: best.r,
-      proofTo: report!.cutoff ?? report!.generatedAt,
+      proofTo: best.r.cond === "lab" ? now : (report?.cutoff ?? report?.generatedAt ?? now),
       holding: false,
       holdReason: "",
     });
     const sol = best.v * s.positionSol;
     notes.push(
-      `Now trading: ${best.r.text}. On ${best.r.holdout.n} trades the search never saw it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades and the coins after it.`,
+      `Now trading: ${best.r.text}. On ${best.r.holdout.n} ${best.r.cond === "lab" ? "coins that came after the Lab invented it" : "trades the search never saw"} it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades and the coins after it.`,
     );
     return done("switch", { rule: best.r, settings: best.r.settings });
   }
 
-  const why = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) > 0);
+  const why = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) + (o.extra?.length ?? 0) > 0);
   if (live) {
     if (st.holding && !st.active) {
       st.holdReason = why;
@@ -300,19 +310,20 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
   if (st.active && benchedNow) {
     const own = st.own;
     Object.assign(st, { active: null, proof: null, rule: null, own: null });
-    notes.push(own ? `Back to your own rule (${ruleSummary({ ...s, ...own } as Settings)}): ${why}.` : `No proven rule: ${why}.`);
-    return done("restore", own ? { settings: own } : {});
+    notes.push(own ? `Back to your own rule (${ruleSummary({ ...s, conds: [], ...own } as Settings)}): ${why}.` : `No proven rule: ${why}.`);
+    // a rule saved before rules had conditions has none
+    return done("restore", own ? { settings: { conds: [], ...own } } : {});
   }
   return done("none");
 }
 
 /** What the dashboard shows about the autopilot: the rule in use, the ranking, and recent decisions. */
-export function autopilotView(o: { report: EdgeReport | null; settings: Settings; state: AutopilotState; now: number }) {
+export function autopilotView(o: { report: EdgeReport | null; settings: Settings; state: AutopilotState; now: number; extra?: EdgeFound[]; forward?: EdgeReport["incumbent"] }) {
   const s = o.settings;
   const report = o.report;
   const live = s.mode === "live";
   const { trusted } = evidenceOf(report, o.now);
-  const ranking = (report?.status === "ok" ? report.survivors : [])
+  const ranking = [...(report?.status === "ok" ? report.survivors : []), ...(o.extra ?? [])]
     .map((r) => ({
       text: r.text,
       perTrade: r.holdout.mean,
@@ -326,7 +337,8 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
       active: r.text === o.state.active,
     }))
     .sort((a, b) => b.worstSolPerDay - a.worstSolPerDay);
-  const fwd = report?.incumbent && report.incumbent.text === o.state.active ? report.incumbent : null;
+  const inc = o.forward ?? report?.incumbent;
+  const fwd = inc && inc.text === o.state.active ? inc : null;
   return {
     on: s.autopilot,
     live,

@@ -3,9 +3,17 @@
  * to a safe range so a typo can never produce an absurd order. Open positions keep the
  * exit settings they were opened with; changes apply to new entries.
  */
+import { FEATURE_KEYS } from "./features.js";
 import { clamp, num } from "./util.js";
 
 export type Mode = "paper" | "live";
+
+/** One condition of a rule on a fact recorded about a coin at the moment of entry (features.ts FEATURE_KEYS, in the model's units). */
+export interface RuleCond {
+  k: string;
+  op: ">=" | "<=";
+  v: number;
+}
 
 export interface Filters {
   /** market-cap window, SOL (0 = no limit) */
@@ -40,6 +48,11 @@ export interface Settings {
    * coin's life (see ENTRY_POINTS) — for rules the edge finder proves on recorded data.
    */
   entryAt: string;
+  /**
+   * More conditions of the rule, on the facts recorded about a coin at the moment of entry — set
+   * by rules the Lab proved (core/lab). Every one must hold, whatever "score only" says.
+   */
+  conds: RuleCond[];
   /**
    * Score only: ignore every token filter below and enter on the score alone.
    * Account limits (budget, max positions, one entry per coin) still apply —
@@ -120,6 +133,7 @@ export const DEFAULT_SETTINGS: Settings = {
   mode: "paper",
   minScore: 75,
   entryAt: "score",
+  conds: [],
   scoreOnly: false,
   tradeCurve: true,
   tradeAmm: true,
@@ -189,6 +203,7 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     mode: i.mode === "live" || i.mode === "paper" ? i.mode : b.mode,
     minScore: clamp(num(i.minScore, b.minScore), 0, 100),
     entryAt: i.entryAt === "score" || (typeof i.entryAt === "string" && i.entryAt in ENTRY_POINTS) ? i.entryAt : b.entryAt,
+    conds: sanitizeConds(i.conds, b.conds),
     scoreOnly: bool(i.scoreOnly, b.scoreOnly),
     tradeCurve: bool(i.tradeCurve, b.tradeCurve),
     tradeAmm: bool(i.tradeAmm, b.tradeAmm),
@@ -230,6 +245,29 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
   return out;
 }
 
+/** Up to three valid conditions from `v`; `d` (copied) when `v` is not a list. */
+export function sanitizeConds(v: unknown, d: RuleCond[] = []): RuleCond[] {
+  if (!Array.isArray(v)) return d.map((c) => ({ ...c }));
+  const out: RuleCond[] = [];
+  for (const c of v) {
+    if (!c || typeof c !== "object") continue;
+    const { k, op, v: val } = c as Record<string, unknown>;
+    if (typeof k === "string" && FEATURE_KEYS.includes(k) && (op === ">=" || op === "<=") && typeof val === "number" && Number.isFinite(val)) out.push({ k, op, v: val });
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
+/** Whether a coin's facts at entry (features.ts featureVector) meet every condition. */
+export function condsHold(conds: readonly RuleCond[], x: ArrayLike<number>): boolean {
+  for (const c of conds) {
+    const v = x[FEATURE_KEYS.indexOf(c.k)];
+    if (v === undefined || !Number.isFinite(v)) return false;
+    if (c.op === ">=" ? v < c.v - 1e-9 : v > c.v + 1e-9) return false;
+  }
+  return true;
+}
+
 /** Exit rules frozen onto a position when it opens. */
 export interface ExitPlan {
   tpPct: number;
@@ -256,7 +294,10 @@ export function exitPlanFrom(s: Settings): ExitPlan {
 /** The fields of an edited copy that differ from the settings it started from (filters too). */
 export function settingsChanges(draft: Settings, base: Settings): Partial<Settings> {
   const out: Record<string, unknown> = {};
-  for (const k of Object.keys(draft) as (keyof Settings)[]) if (k !== "filters" && draft[k] !== base[k]) out[k] = draft[k];
+  for (const k of Object.keys(draft) as (keyof Settings)[]) {
+    if (k === "filters") continue;
+    if (k === "conds" ? JSON.stringify(draft.conds) !== JSON.stringify(base.conds) : draft[k] !== base[k]) out[k] = draft[k];
+  }
   const f: Record<string, unknown> = {};
   for (const k of Object.keys(draft.filters) as (keyof Settings["filters"])[]) if (draft.filters[k] !== base.filters[k]) f[k] = draft.filters[k];
   if (Object.keys(f).length) out.filters = f;

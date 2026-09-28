@@ -6,19 +6,23 @@
  *   3. autopilot: trade the best proven rule, at once (core/autopilot) — and every 10 minutes,
  *      check the rule in use against its own trades;
  *   4. check the score on coins it has never seen, and retrain early if it clearly stopped working;
+ *   2b. the Lab (core/lab): invent rules beyond the edge finder's menu, each proven only on coins
+ *      that came after it was invented; proven ones go to the autopilot too;
  *   5. self-check (core/selfcheck): the bot watching itself — recordings against real trades, the
  *      rule in use against its promise, steady decisions, what it can see, the loop and the engine
  *      (the full check each cycle, the quick ones every 10 minutes). A check that turns bad, or
  *      recovers, is sent to Telegram at once, and once a day a check-up.
  * Everything pauses every few milliseconds, so trading never waits for it.
  */
-import { AUTOPILOT, type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot } from "../core/autopilot.js";
+import { AUTOPILOT, type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot, trackRecord } from "../core/autopilot.js";
 import { type EdgeReport, findEdgesAsync } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import { type FreshCheck, type LearnRun, adoptionNote, freshCheckAsync, learnRunOf } from "../core/insight.js";
+import { LAB, type LabState, addLabIdea, emptyLab, labForward, labProofs, labSummary, labView, parseLabRule, restoreLab, runLabAsync } from "../core/lab.js";
 import { type TrainReport, trainAndSelectAsync, trainingRows } from "../core/learn.js";
 import type { ModelSpec } from "../core/model.js";
 import type { Sample } from "../core/outcomes.js";
+import { ruleSummary } from "../core/presets.js";
 import { buildReport } from "../core/report.js";
 import { type Check, type CheckStatus, checkChanges, checksSummary, runChecks } from "../core/selfcheck.js";
 import type { Settings } from "../core/settings.js";
@@ -41,6 +45,11 @@ export class Learner {
   /** the current model on finished outcomes of coins it has not seen */
   lastFresh: FreshCheck[] = [];
   autopilot: AutopilotState = emptyAutopilot();
+  /** the Lab (core/lab) */
+  lab: LabState = emptyLab();
+  labRunning = false;
+  /** your ideas typed while the Lab was running, added once it is done */
+  private labPending: string[] = [];
   /** the latest self-check (core/selfcheck) and when it ran */
   checks: Check[] = [];
   checksAt = 0;
@@ -75,6 +84,8 @@ export class Learner {
       onAutopilot?: (msg: string) => void;
       /** a self-check turned bad or recovered, and the daily check-up */
       onCheck?: (msg: string) => void;
+      /** the Lab proved an idea, or a proven one stopped working */
+      onLab?: (msg: string) => void;
       /** delay of the first self-check after start (default a minute) */
       firstCheckMs?: number;
     },
@@ -84,6 +95,7 @@ export class Learner {
     this.lastEdges = (this.o.store.loadEdges() as EdgeReport | null) ?? null;
     this.history = this.o.store.loadLearnHistory() as LearnRun[];
     this.autopilot = { ...emptyAutopilot(), ...((this.o.store.loadAutopilot() as Partial<AutopilotState> | null) ?? {}) };
+    this.lab = restoreLab(this.o.store.loadLab());
     this.seen = { autopilot: this.o.engine().settings.autopilot, mode: this.o.engine().settings.mode };
     this.startedAt = Date.now();
     this.lastDaily = ((this.o.store.loadSelfCheck() as { lastDaily?: number } | null)?.lastDaily ?? 0) || Date.now();
@@ -133,6 +145,7 @@ export class Learner {
       const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
       if (Date.now() >= this.learnDueAfter(Date.now() - 1)) await this.learn(samples, this.lastRun ? "schedule" : "start");
       await this.findEdges(samples);
+      await this.runLab(samples);
       await this.checkDrift(samples);
       this.selfCheck(samples);
     } catch (e) {
@@ -193,13 +206,94 @@ export class Learner {
     }
   }
 
+  /**
+   * One Lab run (core/lab): the ideas' coins since the last run, the looks that are due, and new
+   * ideas from the finished data; then the autopilot sees what it proved.
+   */
+  async runLab(samples?: Sample[]): Promise<LabState> {
+    if (this.labRunning) return this.lab;
+    this.labRunning = true;
+    try {
+      const before = new Map(this.lab.ideas.map((i) => [i.id, i.status]));
+      const res = await runLabAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), this.lab, { now: Date.now(), horizonMs: this.horizonMs() });
+      this.lab = res.state;
+      for (const text of this.labPending.splice(0)) {
+        const r = addLabIdea(this.lab, text);
+        if (r.ok) this.lab = r.state;
+        else this.o.log.warn("lab idea not added", { text, error: r.error });
+      }
+      this.saveLab();
+      const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
+      for (const i of res.proven)
+        this.o.onLab?.(
+          `🧪 Lab: an idea ${i.source === "you" ? "of yours" : "it invented"} held up on ${i.proof!.n} coins that came after it — ${i.text}. ${pct(i.proof!.mean)} per trade (worst case ${pct(i.proof!.lo)}). ${this.o.engine().settings.autopilot ? "The autopilot weighs it like any proven rule." : "Turn the autopilot on to let it be used."}`,
+        );
+      for (const i of this.lab.ideas)
+        if (i.provenAt && i.status === "retired" && before.get(i.id) === "proven") this.o.onLab?.(`🧪 Lab: "${i.text}" ${i.why}.`);
+      if (res.proven.length || res.added.length) this.o.log.info("lab", { proven: res.proven.map((i) => i.code), added: res.added.map((i) => i.code) });
+      this.pilot();
+      return this.lab;
+    } catch (e) {
+      this.o.log.error("lab run failed", { err: String(e) });
+      return this.lab;
+    } finally {
+      this.labRunning = false;
+    }
+  }
+
+  private saveLab() {
+    try {
+      this.o.store.saveLab(this.lab);
+    } catch (e) {
+      this.o.log.warn("lab save failed", { err: String(e) });
+    }
+  }
+
+  /** Adds your own idea to the Lab (text, see core/lab parseLabRule). */
+  addLabIdea(text: string): { ok: true; note: string } | { ok: false; error: string } {
+    const p = parseLabRule(text);
+    if ("error" in p) return { ok: false, error: p.error };
+    if (this.labRunning) {
+      this.labPending.push(text);
+      return { ok: true, note: "Added — the Lab is running right now; it joins the tests in a moment. Only coins from now on count for it." };
+    }
+    const r = addLabIdea(this.lab, text);
+    if (!r.ok) return r;
+    this.lab = r.state;
+    this.saveLab();
+    return { ok: true, note: `Testing: ${r.idea.text}. Only coins from now on count for it; it is first judged after ${LAB.looks[0]} finished coins (the first ones finish about ${Math.round(this.horizonMs() / 3_600_000)} hours from now).` };
+  }
+
+  /** What the dashboard shows about the Lab. */
+  labView() {
+    return labView(this.lab);
+  }
+
+  /** The Lab's summary to paste into a chat with Claude. */
+  labSummary() {
+    const engine = this.o.engine();
+    const s = engine.settings;
+    const own = trackRecord(s, engine.closed.toArray(), Date.now());
+    const record = own ? `its last ${own.n} ${s.mode} trades made ${(own.mean * 100).toFixed(1)}% each on average` : undefined;
+    return labSummary(this.lab, { rule: ruleSummary(s), record });
+  }
+
   /** The autopilot's decision for this moment, applied (after every search, every 10 minutes, at start, and when the mode or the autopilot switch changes). */
   pilot() {
     if (this.piloting) return;
     this.piloting = true;
     try {
       const engine = this.o.engine();
-      const d = decideAutopilot({ report: this.lastEdges, settings: engine.settings, state: this.autopilot, closed: engine.closed.toArray(), now: Date.now() });
+      const now = Date.now();
+      const d = decideAutopilot({
+        report: this.lastEdges,
+        settings: engine.settings,
+        state: this.autopilot,
+        closed: engine.closed.toArray(),
+        now,
+        extra: labProofs(this.lab, now),
+        forward: this.autopilot.active ? labForward(this.lab, this.autopilot.active) : undefined,
+      });
       this.autopilot = d.state;
       if (d.settings) {
         engine.updateSettings(d.settings, "autopilot");
@@ -295,7 +389,15 @@ export class Learner {
 
   /** What the dashboard shows about the autopilot. */
   autopilotView() {
-    return autopilotView({ report: this.lastEdges, settings: this.o.engine().settings, state: this.autopilot, now: Date.now() });
+    const now = Date.now();
+    return autopilotView({
+      report: this.lastEdges,
+      settings: this.o.engine().settings,
+      state: this.autopilot,
+      now,
+      extra: labProofs(this.lab, now),
+      forward: this.autopilot.active ? labForward(this.lab, this.autopilot.active) : undefined,
+    });
   }
 
   /** Paper mode + autoTune (and the autopilot off): adopt a robustly better TP/SL/score combination. */

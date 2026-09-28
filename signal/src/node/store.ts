@@ -338,6 +338,21 @@ export class DataStore {
     }
   }
 
+  /** The Lab (core/lab): the ideas being tested, their results so far, and the retired ones. */
+  saveLab(state: unknown) {
+    writeFileAtomic(join(this.dir, "lab.json"), JSON.stringify(state));
+  }
+
+  loadLab(): unknown {
+    const p = join(this.dir, "lab.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   /** What each training run tried and decided (the dashboard's learning history). */
   saveLearnHistory(runs: unknown[]) {
     writeFileAtomic(join(this.dir, "models", "history.json"), JSON.stringify(runs));

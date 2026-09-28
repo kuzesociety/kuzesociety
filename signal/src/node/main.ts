@@ -306,6 +306,7 @@ export async function main() {
     onDrift: (m) => telegram?.send(m),
     onAutopilot: (m) => telegram?.send(m),
     onCheck: (m) => telegram?.send(m),
+    onLab: (m) => telegram?.send(m),
   });
   learner.start();
 
@@ -327,6 +328,8 @@ export async function main() {
       learning: () => server?.learning() ?? null,
       autopilot: () => learner?.autopilotView() ?? null,
       checks: () => learner?.checksView() ?? null,
+      lab: () => learner?.labView() ?? null,
+      labIdea: (text) => learner.addLabIdea(text),
       links: () => {
         const out: { label: string; url: string }[] = [];
         const lanIp = lanAddress();

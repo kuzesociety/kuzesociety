@@ -28,7 +28,7 @@ import {
   quoteSell,
 } from "./positions.js";
 import { ruleChanged, ruleKey } from "./autopilot.js";
-import { DEFAULT_SETTINGS, type Settings, exitPlanFrom, sanitizeSettings } from "./settings.js";
+import { DEFAULT_SETTINGS, type Settings, condsHold, exitPlanFrom, sanitizeSettings } from "./settings.js";
 import { type TokenState, TokenState as Token } from "./token.js";
 import type { AmmSwap, MarketEvent, TradeEvent } from "./types.js";
 import { type Logger, Ring, clamp, newId, rng, silentLogger } from "./util.js";
@@ -755,6 +755,8 @@ export class Engine {
     if (t.nonSol) return "non_sol_quote";
     if ((t.stage === "curve" && !s.tradeCurve) || (t.stage === "amm" && !s.tradeAmm)) return "stage_off";
     if (t.stage === "migrating") return "migrating";
+    // a rule the Lab proved holds only for coins that met its conditions at this moment, as recorded
+    if (s.conds.length && !condsHold(s.conds, e.x)) return "rule_conditions";
     // a graduated coin whose pool is not followed, or followed again but not traded since, has no
     // current price: its last one may be an hour old
     if (t.stage === "amm" && this.followedPools && !(t.pool && this.followedPools.has(t.pool) && !this.stalePools.has(t.pool))) return "not_followed";
