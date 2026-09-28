@@ -6,6 +6,7 @@ import { ext } from "../ext";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
 import { Autopilot } from "./autopilot";
+import { SelfCheck } from "./selfcheck";
 
 type Filters = Settings["filters"];
 
@@ -107,6 +108,7 @@ export function Bot() {
       </div>
 
       <Autopilot settings={settings} />
+      <SelfCheck />
 
       <Strategies settings={settings} onApplied={() => void refreshState()} />
 

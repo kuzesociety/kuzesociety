@@ -21,6 +21,8 @@ export interface ApiContext {
   learning?: () => unknown | Promise<unknown>;
   /** the autopilot: rule in use, ranking, decisions (core/autopilot: AutopilotView) */
   autopilot?: () => unknown;
+  /** the self-check (core/selfcheck): every check with its status, and one summary line */
+  checks?: () => unknown;
   onSettingsChanged?: () => void;
 }
 
@@ -87,6 +89,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ view: (await ctx.learning?.()) ?? null });
       case "/api/autopilot":
         return ok({ view: ctx.autopilot?.() ?? null });
+      case "/api/checks":
+        return ok({ view: ctx.checks?.() ?? null });
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));

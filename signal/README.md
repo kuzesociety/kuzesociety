@@ -75,6 +75,16 @@ It is built not to fool itself:
 
 Every decision, with its numbers, is listed on the Autopilot card and sent to Telegram.
 
+**Self-check** (Bot tab, Telegram `/checks`): the bot watches itself, so a problem does not have to be spotted by you. Every 10 minutes (in full every 2 hours) it answers, with ✓ / ⚠️ / 🛑:
+- **Do its recordings match its real trades?** Every closed trade is paired with the recording of the same coin at the same moment, under the same exits. The recordings are what the score, the edge finder and the autopilot learn and prove from; if they come out clearly better than what the bot actually got (by more than 5 points per trade at the low end of the range), everything proven on them is too optimistic, and you are told. This is the check that catches the kind of problem where a price stops updating.
+- **Does the rule in use keep its promise?** Its own trades against the worst case it was switched in on.
+- **Are the autopilot's decisions steady?** More than 4 rule changes in a day looks like chasing noise.
+- **Does the bot see what it records?** How many recordings went unobserved (graduated coins beyond the 40 followed pools, feed outages); a down feed is flagged at once.
+- **Are the promises plausible?** A rule claiming more than +30% per trade is flagged: on a real market that is more often a measuring problem than an edge.
+- **Does learning run on time, and does the engine run cleanly** (errors, failed saves)?
+
+A check that turns bad, or recovers, is sent to Telegram at once, and once a day a check-up summarises trades, the rule in use and every check.
+
 **What is automatic, and what never is.** With the autopilot on, every finding on the dashboard is applied by itself as soon as it is proven: the score (a new model replaces the current one when it predicts coins neither has seen better) and the whole rule (entry, coins, exits, time limit). There is one standard of proof for all of it: better on data the search never saw, counted per hour, with a clean luck check. The Learn tab's *Better settings found* is a narrower search inside the edge finder's, so it is shown (with its Apply button and auto-tune) only when the autopilot is off. Never set automatically, on purpose: your trade size, limits and mode (how much you risk is your call — sizing up on past results is how accounts blow up), and the realism settings such as the paper delay (a shorter simulated delay always looks better, which would be fooling itself).
 
 **Strategy** (under the Autopilot): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
@@ -94,7 +104,7 @@ Every decision, with its numbers, is listed on the Autopilot card and sent to Te
 
 **Why no trade?** The Bot tab shows, for the last hour, how many coins were scored, how many reached your score, what was bought, and exactly why the rest were blocked.
 
-Telegram commands: `/status /positions /pause /resume /autopilot /strategy /edges /learn /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/autopilot` shows the rule in use and why; `/autopilot on|off` switches it. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
+Telegram commands: `/status /positions /pause /resume /autopilot /checks /strategy /edges /learn /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/autopilot` shows the rule in use and why; `/autopilot on|off` switches it. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
 
 ## 5. Is it making money?
 
@@ -141,13 +151,13 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 120 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 127 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
 
 Layout:
-- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning (`learn.ts`, boosted trees in `boost.ts`, what it learned in `insight.ts`), the edge finder (`edges.ts`) and the autopilot (`autopilot.ts`), positions, outcomes, funnel
+- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning (`learn.ts`, boosted trees in `boost.ts`, what it learned in `insight.ts`), the edge finder (`edges.ts`), the autopilot (`autopilot.ts`) and the self-check (`selfcheck.ts`), positions, outcomes, funnel
 - `src/node`: server: feeds, websocket reconnects, storage, HTTP/SSE API, Telegram, live executor
 - `src/web`: dashboard (Preact, bundled into one HTML file)
 - `src/companion`: the demo page: the same dashboard and engine running on a simulated market in the browser, plus research and a setup wizard

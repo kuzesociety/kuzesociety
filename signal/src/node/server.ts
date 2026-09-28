@@ -90,6 +90,7 @@ export class DashboardServer {
       edgesRun: () => ctx.learner.findEdges(),
       learning: () => this.learning(),
       autopilot: () => ctx.learner.autopilotView(),
+      checks: () => ctx.learner.checksView(),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;
         // the engine's onSettings hook already broadcasts the change to open dashboards

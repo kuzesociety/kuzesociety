@@ -6,6 +6,7 @@
 import type { EdgeReport } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import type { AutopilotView } from "../core/autopilot.js";
+import type { Check } from "../core/selfcheck.js";
 import type { LearningView } from "../core/insight.js";
 import type { Position } from "../core/positions.js";
 import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
@@ -47,6 +48,8 @@ export class Telegram {
       learning?: () => Promise<LearningView | null> | LearningView | null;
       /** the autopilot's state */
       autopilot?: () => AutopilotView | null;
+      /** the self-check (core/selfcheck) */
+      checks?: () => { checks: Check[]; summary: string } | null;
     },
   ) {}
 
@@ -186,6 +189,7 @@ export class Telegram {
           "/edges — has the bot found an edge? (checked every 2 h)",
           "/learn — what the score learned, and is it still working?",
           "/autopilot on|off — trade the best proven rule by itself",
+          "/checks — is everything working as it should?",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -210,6 +214,7 @@ export class Telegram {
           `<b>${s.enabled ? "▶️ Trading" : "⏸ Paused"}</b> · ${s.mode.toUpperCase()}${e.killed ? " · KILL SWITCH" : ""}`,
           `Score ≥ ${s.minScore}${s.scoreOnly ? " (score only)" : ""} · TP ${s.tpPct}% · SL ${s.slPct}% · ${s.maxHoldMin > 0 ? `sell after ${s.maxHoldMin} min` : "no time limit"} · ${s.positionSol} SOL`,
           autopilotLine(this.o.autopilot?.() ?? null, s.autopilot),
+          this.o.checks?.() ? `🩺 Self-check: ${this.o.checks()!.summary} (/checks)` : "",
           `Today ${sol(a.dayPnl)} SOL · total ${sol(a.realized)} SOL · ${a.wins}W/${a.losses}L`,
           `Open ${a.open.length}/${s.maxOpen}`,
           data,
@@ -217,6 +222,12 @@ export class Telegram {
         ]
           .filter(Boolean)
           .join("\n");
+      }
+      case "/checks": {
+        const v = this.o.checks?.();
+        if (!v || !v.checks.length) return "The self-check has not run yet (it runs every 10 minutes).";
+        const icon = { ok: "✅", info: "ℹ️", warn: "⚠️", fail: "🛑" } as const;
+        return [`🩺 <b>Self-check</b>: ${v.summary}`, ...v.checks.map((c) => `${icon[c.status]} <b>${esc(c.title)}</b> — ${esc(c.detail)}`)].join("\n");
       }
       case "/autopilot": {
         const want = arg?.toLowerCase();

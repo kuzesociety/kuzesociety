@@ -305,6 +305,7 @@ export async function main() {
     onEdges: (m) => telegram?.send(m),
     onDrift: (m) => telegram?.send(m),
     onAutopilot: (m) => telegram?.send(m),
+    onCheck: (m) => telegram?.send(m),
   });
   learner.start();
 
@@ -325,6 +326,7 @@ export async function main() {
       edges: () => ({ report: learner.lastEdges, running: learner.edgesRunning }),
       learning: () => server?.learning() ?? null,
       autopilot: () => learner?.autopilotView() ?? null,
+      checks: () => learner?.checksView() ?? null,
       links: () => {
         const out: { label: string; url: string }[] = [];
         const lanIp = lanAddress();

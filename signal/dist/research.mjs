@@ -5592,6 +5592,19 @@ var DataStore = class {
       return null;
     }
   }
+  /** The self-check's own state (when the last daily check-up went out). */
+  saveSelfCheck(state) {
+    writeFileAtomic(join(this.dir, "selfcheck.json"), JSON.stringify(state));
+  }
+  loadSelfCheck() {
+    const p = join(this.dir, "selfcheck.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
   /** The autopilot's state: the rule in use, the user's own rule, benched rules, decisions. */
   saveAutopilot(state) {
     writeFileAtomic(join(this.dir, "autopilot.json"), JSON.stringify(state));
