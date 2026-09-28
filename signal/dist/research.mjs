@@ -524,6 +524,11 @@ var K_SL = 2;
 var COMBOS = 1 + GRID.length;
 var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
 var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
+function comboObserved(s, gi) {
+  if (s.blind === void 0) return true;
+  const t = s.gridT?.[gi];
+  return t !== void 0 && t <= s.blind;
+}
 var r4 = (v) => Math.round(v * 1e4) / 1e4;
 var OutcomeTracker = class {
   constructor(opts, sink) {
@@ -546,6 +551,29 @@ var OutcomeTracker = class {
   /** Coins with would-be trades still being followed. */
   openMints() {
     return this.byMint.keys();
+  }
+  /**
+   * The coin's price no longer reaches us (its pool is not followed any more): its would-be
+   * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
+   * dropped — their entry could not be seen.
+   */
+  blindMint(mint, at) {
+    const list = this.byMint.get(mint);
+    if (!list) return;
+    for (const h of [...list]) {
+      if (!h.entered) {
+        this.remove(h);
+        continue;
+      }
+      if (h.blind !== void 0) continue;
+      h.blind = Math.max(at, h.ts);
+      for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1) this.resolveCombo(h, i, h.lastM);
+      if (h.open === 0) this.emit(h, at);
+    }
+  }
+  /** The trade feed went quiet at `at`: nothing open is observed from then on. */
+  blindAll(at) {
+    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at);
   }
   add(t, kind, tag, now, score, p, x, custom, facts) {
     if (this.openCount >= this.opts.maxOpen) {
@@ -577,7 +605,8 @@ var OutcomeTracker = class {
       open: COMBOS,
       path: PATH_MIN.map(() => null),
       pathNext: 0,
-      f: facts
+      f: facts,
+      lastM: 1
     };
     let list = this.byMint.get(t.mint);
     if (!list) {
@@ -604,6 +633,7 @@ var OutcomeTracker = class {
     h.a = tokensUi * pricePerMcap * (1 - sellFee) / this.opts.sizeSol;
     h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
     h.ts = now;
+    h.lastM = this.mult(h, t.mcapSol);
   }
   mult(h, mcap) {
     return h.a * mcap - h.b;
@@ -629,6 +659,7 @@ var OutcomeTracker = class {
       }
       if (t.stage === "migrating") continue;
       const m = this.mult(h, t.mcapSol);
+      if (h.blind === void 0) h.lastM = m;
       if (m > h.maxMult) {
         h.maxMult = m;
         h.maxAt = now;
@@ -717,6 +748,7 @@ var OutcomeTracker = class {
       gridT,
       path: h.path.map((v) => v === null ? null : r4(v)),
       f: h.f,
+      ...h.blind !== void 0 ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {},
       maxMult: h.maxMult,
       minMult: h.minMult,
       secToMax: Math.max(0, (h.maxAt - h.ts) / 1e3),
@@ -950,7 +982,8 @@ var DEFAULTS = {
 function exitReturn(s, c, h) {
   const ret = s.grid[c];
   const hold = HOLDS_MIN[h];
-  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return ret;
+  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
+  if (s.blind !== void 0 && hold * 60 > s.blind) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold)];
   return v ?? ret;
 }
@@ -979,6 +1012,24 @@ function settingsFor(r, horizonMs) {
   if (cond.filters) out.filters = { ...OPEN_FILTERS, ...cond.filters };
   return out;
 }
+function forwardTest(rows, rule, after) {
+  const tag = rule.at ?? `x${rule.level}`;
+  const cond = CONDITIONS.find((c) => c.key === rule.cond);
+  const combo = GRID.findIndex((g) => g.tp === rule.tp && g.sl === rule.sl);
+  const h = HOLDS_MIN.indexOf(rule.hold);
+  if (!cond || combo < 0 || h < 0) return void 0;
+  const v = [];
+  const hours = [];
+  for (const s of rows) {
+    if (s.ts <= after || s.tag !== tag || !cond.test(s)) continue;
+    const x = exitReturn(s, combo, h);
+    if (Number.isNaN(x)) continue;
+    v.push(x);
+    hours.push(hourOf(s.ts));
+  }
+  const m = clusteredMeanCI(v, hours);
+  return { text: describe(rule), n: v.length, mean: m.mean, lo: m.lo, hi: m.hi };
+}
 function stats(d, idx, e, z) {
   let n = 0;
   let sum = 0;
@@ -986,6 +1037,7 @@ function stats(d, idx, e, z) {
   let w = 0;
   for (let k = 0; k < idx.length; k++) {
     const v = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e];
+    if (Number.isNaN(v)) continue;
     n++;
     sum += v;
     sq += v * v;
@@ -999,11 +1051,13 @@ function stats(d, idx, e, z) {
 function holdoutStats(d, idx, e, tests) {
   const st = stats(d, idx, e, 0);
   if (st.n < 2) return st;
-  const vals = new Float64Array(idx.length);
-  const hours = new Int32Array(idx.length);
+  const vals = [];
+  const hours = [];
   for (let k = 0; k < idx.length; k++) {
-    vals[k] = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e];
-    hours[k] = d.hour[idx[k]];
+    const v = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e];
+    if (Number.isNaN(v)) continue;
+    vals.push(v);
+    hours.push(d.hour[idx[k]]);
   }
   return { ...st, lo: clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, tests)).lo };
 }
@@ -1061,6 +1115,8 @@ function* steps(samples, opts) {
     (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS) && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
   );
   rows.sort((a, b) => a.ts - b.ts);
+  if (rows.length) base.cutoff = rows[rows.length - 1].ts;
+  if (opts.incumbent) base.incumbent = forwardTest(rows, opts.incumbent.rule, opts.incumbent.after);
   const n = rows.length;
   const t0 = n ? rows[0].ts : 0;
   const t1 = n ? rows[n - 1].ts : 0;
@@ -1113,9 +1169,12 @@ function* steps(samples, opts) {
     if (c.g.at) rule.at = c.g.at;
     const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0);
     let held = 0;
+    let heldN = 0;
     for (const i of c.g.hold) {
+      if (Number.isNaN(R[i * EXITS + c.e])) continue;
       const sec = rows[i].gridT?.[combo] ?? 0;
       held += rule.hold ? Math.min(sec, rule.hold * 60) : sec;
+      heldN++;
     }
     return {
       ...rule,
@@ -1124,15 +1183,22 @@ function* steps(samples, opts) {
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
       tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i].mint)).size / c.g.holdDays,
-      avgHoldMin: c.g.hold.length ? held / c.g.hold.length / 60 : void 0,
+      avgHoldMin: heldN ? held / heldN / 60 : void 0,
       settings: settingsFor(rule, o.horizonMs)
     };
   };
   const survivors = run.passed.map((x) => toFound(x.c, x.hold)).sort((a, b) => b.holdout.lo - a.holdout.lo);
   const failed = run.cands.filter((x) => !run.passed.includes(x)).slice(0, 3).map((x) => toFound(x.c, x.hold));
   const colMean = new Float64Array(EXITS);
-  for (let i = 0; i < n; i++) for (let e = 0; e < EXITS; e++) colMean[e] += R[i * EXITS + e];
-  for (let e = 0; e < EXITS; e++) colMean[e] /= n;
+  const colN = new Float64Array(EXITS);
+  for (let i = 0; i < n; i++)
+    for (let e = 0; e < EXITS; e++) {
+      const v = R[i * EXITS + e];
+      if (Number.isNaN(v)) continue;
+      colMean[e] += v;
+      colN[e]++;
+    }
+  for (let e = 0; e < EXITS; e++) colMean[e] = colN[e] ? colMean[e] / colN[e] : 0;
   const rand = rng(o.seed);
   const counts = [];
   for (let r = 0; r < o.placeboRuns; r++) {
@@ -1891,9 +1957,11 @@ var SAME_MOMENT_MS = 3e3;
 function labelOf(s, target) {
   const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
   if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
+    if (!comboObserved(s, gi)) return null;
     const r = s.grid[gi];
     return Number.isFinite(r) ? r > 0 ? 1 : 0 : null;
   }
+  if (s.blind !== void 0) return null;
   if (s.tp === target.tpPct && s.sl === target.slPct && Number.isFinite(s.ret)) return s.ret > 0 ? 1 : 0;
   return null;
 }
@@ -2766,6 +2834,8 @@ var AUTOPILOT = {
   maxPlacebo: 0.2,
   /** trades of the rule in use before its own results are judged */
   checkAfter: 30,
+  /** coins that qualified after it was proven, before its forward test is judged */
+  forwardMin: 40,
   benchMs: 24 * HOUR2
 };
 function ruleOf(s) {
@@ -4272,6 +4342,7 @@ var Engine = class {
       const t = this.tokens.get(p.mint);
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
+    if (this.feedDown()) this.outcomes.blindAll(Math.max(0, ...[...this.feeds.values()].filter((f2) => f2.critical).map((f2) => f2.lastMsgAt)));
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
     const every = this.modelReady() ? 5 * 6e4 : 3e4;
     if (now - this.lastNormalize >= every) {
@@ -4342,8 +4413,10 @@ var Engine = class {
   saved = { at: 0, failures: 0, error: "" };
   /**
    * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
-   * would-be trades are still being followed (without their swaps, a coin that keeps trading
-   * would look dead and bias the results), newest first, `max` in all.
+   * would-be trades are still being followed, newest first, `max` in all. The graduated coins
+   * left out stop being observed from now on: their would-be trades are marked (outcomes
+   * blindMint), so a stop that nobody saw is not counted as a trade that held its value.
+   * Called only when pools are followed one by one (not with the whole PumpSwap stream).
    */
   poolsToFollow(max = 40) {
     const out = /* @__PURE__ */ new Set();
@@ -4354,12 +4427,12 @@ var Engine = class {
     const followed = [];
     for (const mint of this.outcomes.openMints()) {
       const t = this.tokens.get(mint);
-      if (t?.stage === "amm" && t.pool && !out.has(t.pool)) followed.push({ pool: t.pool, at: t.migrateAt ?? 0 });
+      if (t?.stage === "amm" && !(t.pool && out.has(t.pool))) followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0 });
     }
     followed.sort((a, b) => b.at - a.at);
     for (const f2 of followed) {
-      if (out.size >= max) break;
-      out.add(f2.pool);
+      if (f2.pool && out.size < max) out.add(f2.pool);
+      else if (!(f2.pool && out.has(f2.pool))) this.outcomes.blindMint(f2.mint, this.now);
     }
     return [...out];
   }
@@ -4642,6 +4715,14 @@ function nearestGrid(tp, sl) {
 function gridOf(s) {
   return s.grid?.length === GRID.length ? s.grid : void 0;
 }
+function observedReturn(s, tp, sl) {
+  if (s.blind !== void 0) {
+    if (!gridOf(s)) return void 0;
+    const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
+    if (!comboObserved(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return void 0;
+  }
+  return sampleReturn(s, tp, sl).ret;
+}
 function sampleReturn(s, tp, sl) {
   if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
   const g = gridOf(s);
@@ -4695,7 +4776,7 @@ function buildReport(samples, settings, model, closed, now) {
   const checkpoints = samples.filter((s) => s.kind === "checkpoint");
   const signals = samples.filter((s) => s.kind === "signal");
   const exactCombo = samples.length === 0 || sampleReturn(samples[0], tp, sl).exact;
-  const retOf = (s) => sampleReturn(s, tp, sl).ret;
+  const retOf = (s) => observedReturn(s, tp, sl);
   const t0 = samples.reduce((m, s) => Math.min(m, s.ts), Infinity);
   const t1 = samples.reduce((m, s) => Math.max(m, s.ts), 0);
   const spanHours = samples.length ? Math.max(1 / 60, (t1 - t0) / 36e5) : 0;
@@ -4734,7 +4815,7 @@ function buildReport(samples, settings, model, closed, now) {
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid = GRID.map((g, i) => {
-    const st = statsOf(valuesOf(pool, (s) => gridOf(s)?.[i]));
+    const st = statsOf(valuesOf(pool, (s) => comboObserved(s, i) ? gridOf(s)?.[i] : void 0));
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
   const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
@@ -4772,7 +4853,7 @@ function buildReport(samples, settings, model, closed, now) {
     const older = rows.filter((s) => s.ts < mid);
     const newer = rows.filter((s) => s.ts >= mid);
     GRID.forEach((g, i) => {
-      const val = (s) => gridOf(s)?.[i];
+      const val = (s) => comboObserved(s, i) ? gridOf(s)?.[i] : void 0;
       const all = valuesOf(rows, val);
       if (all.v.length < 150) return;
       const lo = bound(all, strict);

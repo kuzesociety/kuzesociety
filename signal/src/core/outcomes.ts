@@ -77,6 +77,12 @@ export interface Sample {
   path?: (number | null)[];
   /** entry conditions (signal and entry samples) */
   f?: EntryFacts;
+  /**
+   * seconds after entry at which the coin's price stopped reaching us (its PumpSwap pool was no
+   * longer followed, or the trade feed went quiet); exits after that were not observed and are
+   * unknown (comboObserved). Missing: observed to the end.
+   */
+  blind?: number;
   maxMult: number;
   minMult: number;
   secToMax: number;
@@ -128,6 +134,20 @@ interface Hypo {
   path: (number | null)[];
   pathNext: number;
   f?: EntryFacts;
+  /** when the price stopped being observed (ms) */
+  blind?: number;
+  /** the latest net multiple seen */
+  lastM: number;
+}
+
+/**
+ * Whether GRID combo `gi` of a sample ended (target, stop, or the coin's end) while its price was
+ * still observed. A stop that was never seen because nobody was watching is not a win.
+ */
+export function comboObserved(s: Pick<Sample, "blind" | "gridT">, gi: number): boolean {
+  if (s.blind === undefined) return true;
+  const t = s.gridT?.[gi];
+  return t !== undefined && t <= s.blind;
 }
 
 export interface OutcomeOptions {
@@ -166,6 +186,32 @@ export class OutcomeTracker {
   /** Coins with would-be trades still being followed. */
   openMints(): IterableIterator<string> {
     return this.byMint.keys();
+  }
+
+  /**
+   * The coin's price no longer reaches us (its pool is not followed any more): its would-be
+   * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
+   * dropped — their entry could not be seen.
+   */
+  blindMint(mint: string, at: number) {
+    const list = this.byMint.get(mint);
+    if (!list) return;
+    for (const h of [...list]) {
+      if (!h.entered) {
+        this.remove(h);
+        continue;
+      }
+      if (h.blind !== undefined) continue;
+      h.blind = Math.max(at, h.ts);
+      // exits already triggered and landing: at the last price seen, not one seen later
+      for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1) this.resolveCombo(h, i, h.lastM);
+      if (h.open === 0) this.emit(h, at);
+    }
+  }
+
+  /** The trade feed went quiet at `at`: nothing open is observed from then on. */
+  blindAll(at: number) {
+    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at);
   }
 
   add(
@@ -209,6 +255,7 @@ export class OutcomeTracker {
       path: PATH_MIN.map(() => null),
       pathNext: 0,
       f: facts,
+      lastM: 1,
     };
     let list = this.byMint.get(t.mint);
     if (!list) {
@@ -238,6 +285,7 @@ export class OutcomeTracker {
     h.a = (tokensUi * pricePerMcap * (1 - sellFee)) / this.opts.sizeSol;
     h.b = (this.opts.costs.priorityFeeSol - (this.opts.costs.refundRent ? this.opts.costs.ataRentSol : 0)) / this.opts.sizeSol;
     h.ts = now;
+    h.lastM = this.mult(h, t.mcapSol);
   }
 
   private mult(h: Hypo, mcap: number) {
@@ -266,6 +314,7 @@ export class OutcomeTracker {
       }
       if (t.stage === "migrating") continue; // untradeable while migrating
       const m = this.mult(h, t.mcapSol);
+      if (h.blind === undefined) h.lastM = m;
       if (m > h.maxMult) {
         h.maxMult = m;
         h.maxAt = now;
@@ -358,6 +407,7 @@ export class OutcomeTracker {
       gridT,
       path: h.path.map((v) => (v === null ? null : r4(v))),
       f: h.f,
+      ...(h.blind !== undefined ? { blind: Math.round((h.blind - h.ts) / 100) / 10 } : {}),
       maxMult: h.maxMult,
       minMult: h.minMult,
       secToMax: Math.max(0, (h.maxAt - h.ts) / 1000),

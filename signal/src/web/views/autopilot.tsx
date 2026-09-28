@@ -78,8 +78,11 @@ function Status({ v }: { v: AutopilotView }) {
         <div class="entrymoment good">
           <b>Trading:</b> {v.active}
           <div style="font-size:12.5px;margin-top:2px">
-            Since {ago(v.since)} · it showed {pct(v.proof.mean, 1, true)} per trade on {v.proof.n} trades the search never saw (worst case {pct(v.proof.lo, 1, true)}). Checked against its own
-            trades as they close.
+            Since {ago(v.since)} · it showed {pct(v.proof.mean, 1, true)} per trade on {v.proof.n} trades the search never saw (worst case {pct(v.proof.lo, 1, true)}).
+            {v.forward
+              ? ` On the ${v.forward.n} coins that qualified since: ${pct(v.forward.mean, 1, true)} per trade.`
+              : " Judged on its own trades and on the coins that qualify after it, as they finish."}
+            {!v.relisted && v.reportAt > v.since && " The last search did not list it again — that alone is not evidence against it, so it stays until its results say otherwise."}
           </div>
         </div>
       ) : (

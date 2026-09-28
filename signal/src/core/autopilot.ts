@@ -5,7 +5,10 @@
  * are ranked by what they would earn per day at the user's trade size and limits, counted
  * pessimistically: the worst case per trade on unseen data (the holdout's corrected lower bound)
  * × the trades the open-position and hourly limits leave room for. The best one is switched in
- * at once. While it holds up, another rule replaces it only when clearly better (by 25%).
+ * at once. It then stays until there is evidence against it: its own trades, the coins that
+ * qualified after its proof (forward test), or a rule worth clearly more (25%). A later search
+ * that simply does not list it again is not evidence — each search re-checks only its best
+ * candidates, and those shift as the data grows.
  *
  * It does not fool itself:
  *   - an answer counts only while fresh (6 hours) and made by the current method of proof
@@ -15,9 +18,10 @@
  *     hot hour of the market is not taken for an edge (core/edges.ts holdoutStats);
  *   - with real money it uses only rules that meet the go-live bar (≥ 100 unseen trades and a
  *     worst case above +2% per trade); without one, new live entries wait — exits always go on;
- *   - the rule in use is checked against its own trades: after 30, if it is clearly worse than
- *     it had shown (the upper 95% bound of its average below its worst case on unseen data), it
- *     is benched for a day and the next best, or the user's own rule, takes over.
+ *   - the rule in use is checked against its own trades (after 30) and against every coin that
+ *     qualified for it after its proof (after 40, as far as their prices were observed): if either
+ *     is clearly worse than it had shown (the upper 95% bound of the average below its worst case
+ *     on unseen data), it is benched for a day and the next best, or the user's own rule, takes over.
  * It changes the rule only — entry, which coins, exits, time limit — never the trade size, the
  * limits or the mode. Changing the rule by hand turns it off (Engine.updateSettings).
  */
@@ -44,6 +48,8 @@ export const AUTOPILOT = {
   maxPlacebo: 0.2,
   /** trades of the rule in use before its own results are judged */
   checkAfter: 30,
+  /** coins that qualified after it was proven, before its forward test is judged */
+  forwardMin: 40,
   benchMs: 24 * HOUR,
 };
 
@@ -63,10 +69,14 @@ export interface AutopilotState {
   benched: Record<string, number>;
   /** decisions, newest last */
   log: { at: number; what: string }[];
+  /** the rule in use as it was proven: valued with it, and tested forward, when a search does not list it again */
+  rule?: EdgeFound | null;
+  /** the newest would-be entry its proof used; the coins after it are its forward test */
+  proofTo?: number;
 }
 
 export function emptyAutopilot(): AutopilotState {
-  return { active: null, since: 0, proof: null, own: null, holding: false, holdReason: "", benched: {}, log: [] };
+  return { active: null, since: 0, proof: null, own: null, holding: false, holdReason: "", benched: {}, log: [], rule: null, proofTo: 0 };
 }
 
 export interface AutopilotDecision {
@@ -175,8 +185,16 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
     }
   }
 
-  // 2. what the latest search proved
+  // 1b. …and on every coin that qualified for it after it was proven (not only the ones it traded)
   const report = o.report;
+  const fwd = report?.incumbent;
+  if (st.active && st.proof && !benchedNow && fwd?.text === st.active && fwd.n >= AUTOPILOT.forwardMin && fwd.hi < st.proof.lo) {
+    st.benched[st.active] = now + AUTOPILOT.benchMs;
+    notes.push(`Dropped "${st.active}": on ${fwd.n} coins that qualified after it was proven it averaged ${pct(fwd.mean)}, below the ${pct(st.proof.lo)} worst case it had shown. Benched for a day.`);
+    benchedNow = true;
+  }
+
+  // 2. what the latest search proved
   const { fresh, trusted } = evidenceOf(report, now);
   const passes = (r: EdgeFound) => r.holdout.lo > 0 && (!live || (r.holdout.n >= AUTOPILOT.liveMinTrades && r.holdout.lo > AUTOPILOT.liveMinLo));
   const ranked = (trusted ? report!.survivors : [])
@@ -184,35 +202,55 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
     .map((r) => ({ r, v: worstPerDay(r, s) }))
     .sort((a, b) => b.v - a.v);
   const best = ranked[0];
-  const cur = st.active ? ranked.find((x) => x.r.text === st.active) : undefined;
+
+  // 3. the rule in use stays until there is evidence against it — its own trades, the coins after
+  //    its proof, or a rule worth clearly more. A search that does not list it again is not such
+  //    evidence: each search re-checks only its best candidates, and those shift as data comes in.
+  //    With real money it must meet the go-live bar.
+  const liveGrade = (p: AutopilotState["proof"]) => !!p && p.n >= AUTOPILOT.liveMinTrades && p.lo > AUTOPILOT.liveMinLo;
+  const stands = !!st.active && !benchedNow && (!live || liveGrade(st.proof));
+  if (stands) {
+    const listed = ranked.find((x) => x.r.text === st.active);
+    const curV = listed?.v ?? (st.rule ? worstPerDay(st.rule, s) : 0);
+    if (!best || best.r.text === st.active || best.v < curV * AUTOPILOT.better) {
+      if (st.holding) Object.assign(st, { holding: false, holdReason: "" });
+      return done("none");
+    }
+  }
 
   if (best) {
-    if (cur && (cur === best || best.v < cur.v * AUTOPILOT.better)) return done("none");
     if (st.active === null && !st.holding && !st.own) st.own = ruleOf(s);
-    const was = st.active;
-    Object.assign(st, { active: best.r.text, since: now, proof: { mean: best.r.holdout.mean, lo: best.r.holdout.lo, n: best.r.holdout.n }, holding: false, holdReason: "" });
+    const was = stands ? st.active : null;
+    Object.assign(st, {
+      active: best.r.text,
+      since: now,
+      proof: { mean: best.r.holdout.mean, lo: best.r.holdout.lo, n: best.r.holdout.n },
+      rule: best.r,
+      proofTo: report!.cutoff ?? report!.generatedAt,
+      holding: false,
+      holdReason: "",
+    });
     const sol = best.v * s.positionSol;
     notes.push(
-      `Now trading: ${best.r.text}. On ${best.r.holdout.n} trades the search never saw it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades.`,
+      `Now trading: ${best.r.text}. On ${best.r.holdout.n} trades the search never saw it made ${pct(best.r.holdout.mean)} per trade (worst case ${pct(best.r.holdout.lo)}), about ${best.r.tradesPerDay.toFixed(0)} coins a day; at your size and limits that is at least ~${sol.toFixed(2)} SOL a day on that data${was ? `, more than "${was}"` : ""}. Past results can stop working: it is checked against its own trades and the coins after it.`,
     );
     return done("switch", { rule: best.r, settings: best.r.settings });
   }
 
   const why = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) > 0);
   if (live) {
-    if (st.holding && !benchedNow) {
+    if (st.holding && !st.active) {
       st.holdReason = why;
       return done("none");
     }
-    Object.assign(st, { active: null, proof: null, holding: true, holdReason: why });
+    Object.assign(st, { active: null, proof: null, rule: null, holding: true, holdReason: why });
     notes.push(`Holding new live entries: ${why}. Open positions are still managed.`);
     return done("hold");
   }
-  // paper: back to the user's own rule once the evidence says the auto rule no longer holds —
-  // a stale or missing answer is no evidence either way
-  if (st.active && (benchedNow || fresh)) {
+  // paper: back to the user's own rule once the rule in use was dropped and nothing proven replaces it
+  if (st.active && benchedNow) {
     const own = st.own;
-    Object.assign(st, { active: null, proof: null, own: null });
+    Object.assign(st, { active: null, proof: null, rule: null, own: null });
     notes.push(own ? `Back to your own rule (${ruleSummary({ ...s, ...own } as Settings)}): ${why}.` : `No proven rule: ${why}.`);
     return done("restore", own ? { settings: own } : {});
   }
@@ -239,12 +277,17 @@ export function autopilotView(o: { report: EdgeReport | null; settings: Settings
       active: r.text === o.state.active,
     }))
     .sort((a, b) => b.worstSolPerDay - a.worstSolPerDay);
+  const fwd = report?.incumbent && report.incumbent.text === o.state.active ? report.incumbent : null;
   return {
     on: s.autopilot,
     live,
     active: o.state.active,
     since: o.state.since,
     proof: o.state.proof,
+    /** the latest search listed the rule in use again */
+    relisted: !!o.state.active && ranking.some((r) => r.active),
+    /** the rule in use on coins that qualified after its proof */
+    forward: fwd && fwd.n > 0 ? { n: fwd.n, mean: fwd.mean, lo: fwd.lo, hi: fwd.hi } : null,
     holding: o.state.holding,
     holdReason: o.state.holdReason,
     rule: ruleSummary(s),

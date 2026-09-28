@@ -128,6 +128,21 @@ describe("edge finder", () => {
     for (const seed of [3, 6]) expect(findEdges(moody(seed), { now: T0 + 3 * 86_400_000, placeboRuns: 0 }).survivors).toHaveLength(0);
   });
 
+  it("measures the rule in use on the coins that qualified after its proof (its forward test)", () => {
+    const samples = makeEntries(6000, 10, 8);
+    const after = T0 + 7 * 86_400_000;
+    const rule = { level: 75, cond: "any", tp: 100, sl: 50, hold: 0 };
+    const rep = findEdges(samples, { now: T0 + 11 * 86_400_000, placeboRuns: 0, incumbent: { rule, after } });
+    const gi = GRID.findIndex((g) => g.tp === 100 && g.sl === 50);
+    const mine = samples.filter((s) => s.tag === "x75" && s.ts > after && s.ts <= rep.cutoff!);
+    expect(mine.length).toBeGreaterThan(40);
+    expect(rep.incumbent!.n).toBe(mine.length);
+    expect(rep.incumbent!.mean).toBeCloseTo(mine.reduce((a, s) => a + s.grid[gi]!, 0) / mine.length, 9);
+    expect(rep.incumbent!.lo).toBeLessThan(rep.incumbent!.mean);
+    expect(rep.incumbent!.hi).toBeGreaterThan(rep.incumbent!.mean);
+    expect(rep.incumbent!.text).toMatch(/first reaches 75/);
+  });
+
   it("filter rules carry the exact filter, with every other filter open", () => {
     const target = GRID.findIndex((g) => g.tp === 100 && g.sl === 30);
     const samples = makeEntries(14_000, 10, 5, (s, c) => (c === target && s.f!.buyers >= 100 && s.score >= 60 ? 0.5 : null));

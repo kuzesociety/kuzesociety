@@ -94,13 +94,9 @@ describe("autopilot", () => {
     const liveOld = decideAutopilot({ report: report([a], { method: null }), settings: settings({ mode: "live" }), state: emptyAutopilot(), closed: [], now: NOW });
     expect(liveOld.action).toBe("hold");
     expect(liveOld.state.holdReason).toMatch(/older version/);
-    // a rule in use whose search stops being trusted is dropped: back to the user's own rule
-    const state: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - HOUR, proof: { mean: 0.4, lo: 0.2, n: 150 }, own: { minScore: 70 } };
-    const d = decideAutopilot({ report: report([a], { placebo: 1.2 }), settings: settings(), state, closed: [], now: NOW });
-    expect(d.action).toBe("restore");
-    expect(d.settings).toEqual({ minScore: 70 });
-    expect(d.note).toMatch(/luck check/);
-    // but an old answer is no evidence either way: the rule stays
+    // for the rule in use, an untrusted or old search is no evidence either way: it stays
+    const state: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - HOUR, proof: { mean: 0.4, lo: 0.2, n: 150 }, own: { minScore: 70 }, rule: a };
+    expect(decideAutopilot({ report: report([a], { placebo: 1.2 }), settings: settings(), state, closed: [], now: NOW }).action).toBe("none");
     expect(decideAutopilot({ report: report([a], { at: NOW - 9 * HOUR }), settings: settings(), state, closed: [], now: NOW }).action).toBe("none");
   });
 
@@ -150,19 +146,54 @@ describe("autopilot", () => {
     // trades from before it was switched in do not count against it
     expect(decideAutopilot({ report: report([a, b]), settings: settings(), state, closed: trades(40, () => -40, since - 5 * HOUR), now: NOW }).action).toBe("none");
     // a benched rule stays out until its day is over
-    const later = decideAutopilot({ report: report([a]), settings: settings(), state: d.state, closed: [], now: NOW + HOUR });
-    expect(later.action).toBe("restore");
-    const tomorrow = decideAutopilot({ report: report([a], { at: NOW + 25 * HOUR }), settings: settings(), state: later.state, closed: [], now: NOW + 26 * HOUR });
+    const later = decideAutopilot({ report: report([a], { at: NOW + HOUR }), settings: settings(), state: d.state, closed: [], now: NOW + HOUR });
+    expect(later.action).toBe("none");
+    expect(later.state.active).toBe("B");
+    const fresh: AutopilotState = { ...later.state, active: null, proof: null, rule: null };
+    expect(decideAutopilot({ report: report([a], { at: NOW + HOUR }), settings: settings(), state: fresh, closed: [], now: NOW + HOUR }).action).toBe("none");
+    const tomorrow = decideAutopilot({ report: report([a], { at: NOW + 25 * HOUR }), settings: settings(), state: fresh, closed: [], now: NOW + 26 * HOUR });
     expect(tomorrow.rule?.text).toBe("A");
   });
 
-  it("paper: back to your own rule when its rule no longer holds up on the newest data", () => {
-    const state: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - 3 * HOUR, proof: { mean: 0.3, lo: 0.1, n: 150 }, own: { minScore: 70, tpPct: 50 } };
-    const d = decideAutopilot({ report: report([]), settings: settings(), state, closed: [], now: NOW });
+  it("keeps the rule in use when a later search does not list it again — only its results can drop it", () => {
+    const a = rule("A", { lo: 0.1, perDay: 20 });
+    const state: AutopilotState = { ...emptyAutopilot(), active: "A", since: NOW - 3 * HOUR, proof: { mean: 0.3, lo: 0.1, n: 150 }, own: { minScore: 70, tpPct: 50 }, rule: a, proofTo: NOW - 8 * HOUR };
+    // the next search proves nothing: that is not evidence against the rule in use, it stays
+    const kept = decideAutopilot({ report: report([]), settings: settings(), state, closed: [], now: NOW });
+    expect(kept.action).toBe("none");
+    expect(kept.state.active).toBe("A");
+    expect(kept.note).toBe("");
+    // the coins that qualified after its proof: too few yet, or consistent with its promise → it stays
+    const withFwd = (n: number, mean: number, lo: number, hi: number) => ({ ...report([]), incumbent: { text: "A", n, mean, lo, hi } });
+    expect(decideAutopilot({ report: withFwd(20, -0.5, -0.9, -0.1), settings: settings(), state, closed: [], now: NOW }).action).toBe("none");
+    expect(decideAutopilot({ report: withFwd(60, 0.12, 0.02, 0.22), settings: settings(), state, closed: [], now: NOW }).action).toBe("none");
+    // …clearly below the worst case it had shown → benched, back to your own rule
+    const d = decideAutopilot({ report: withFwd(60, -0.05, -0.15, 0.05), settings: settings(), state, closed: [], now: NOW });
     expect(d.action).toBe("restore");
     expect(d.settings).toEqual({ minScore: 70, tpPct: 50 });
     expect(d.state.active).toBeNull();
+    expect(d.state.benched.A).toBe(NOW + AUTOPILOT.benchMs);
+    expect(d.note).toMatch(/qualified after it was proven/);
     expect(d.note).toMatch(/Back to your own rule/);
+    // a rule not listed again is replaced only by one clearly better than what it had shown
+    const close = rule("C", { lo: 0.11, perDay: 20 });
+    expect(decideAutopilot({ report: report([close]), settings: settings(), state, closed: [], now: NOW }).action).toBe("none");
+    const clearly = rule("D", { lo: 0.1 * AUTOPILOT.better + 0.02, perDay: 20 });
+    const sw = decideAutopilot({ report: report([clearly]), settings: settings(), state, closed: [], now: NOW });
+    expect(sw.action).toBe("switch");
+    expect(sw.state.rule?.text).toBe("D");
+    expect(sw.state.proofTo).toBeGreaterThan(0);
+  });
+
+  it("with real money a rule in use must meet the go-live bar too", () => {
+    const p = rule("paper grade", { lo: 0.05, perDay: 30, n: 60 });
+    const state: AutopilotState = { ...emptyAutopilot(), active: p.text, since: NOW - HOUR, proof: { mean: 0.2, lo: 0.05, n: 60 }, own: {}, rule: p };
+    const d = decideAutopilot({ report: report([p]), settings: settings({ mode: "live" }), state, closed: [], now: NOW });
+    expect(d.action).toBe("hold");
+    expect(d.state.active).toBeNull();
+    const g = rule("live grade", { lo: 0.05, perDay: 30, n: 180 });
+    const ok: AutopilotState = { ...state, active: g.text, proof: { mean: 0.2, lo: 0.05, n: 180 }, rule: g };
+    expect(decideAutopilot({ report: report([]), settings: settings({ mode: "live" }), state: ok, closed: [], now: NOW }).action).toBe("none");
   });
 });
 

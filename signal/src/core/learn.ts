@@ -22,7 +22,7 @@
 import { type BoostData, type BoostParams, boostSteps } from "./boost.js";
 import { FEATURE_KEYS } from "./features.js";
 import { type ModelInsight, type ModelSpec, type Recipe, type StageKey, type StageModel, linear, rawLogit, standardize, stageLogit } from "./model.js";
-import { GRID, GRID_VERSION, type Sample } from "./outcomes.js";
+import { GRID, GRID_VERSION, type Sample, comboObserved } from "./outcomes.js";
 import { clamp, logit, runSteps, runStepsAsync, sigmoid } from "./util.js";
 
 export interface TrainRow {
@@ -54,13 +54,16 @@ export const SAME_MOMENT_MS = 3_000;
  * The model's label for a sample: whether a trade at the target take profit / stop loss ended
  * in profit. Read from the exit grid, so it does not depend on the settings the bot had while
  * recording; older samples without that grid count only when they were recorded at the target.
+ * No label when the trade had not ended before the coin's price stopped being observed.
  */
 export function labelOf(s: Sample, target: { tpPct: number; slPct: number }): 0 | 1 | null {
   const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
   if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
+    if (!comboObserved(s, gi)) return null;
     const r = s.grid[gi]!;
     return Number.isFinite(r) ? (r > 0 ? 1 : 0) : null;
   }
+  if (s.blind !== undefined) return null;
   if (s.tp === target.tpPct && s.sl === target.slPct && Number.isFinite(s.ret)) return s.ret > 0 ? 1 : 0;
   return null;
 }

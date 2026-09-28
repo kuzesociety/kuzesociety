@@ -67,8 +67,9 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 It is built not to fool itself:
 - It acts only on a fresh search (under 6 hours old) whose luck check stayed clean: the same search on shuffled outcomes, where no rule can work, may "find" at most 1 rule in 5 runs. Coins bought in the same hour count as one piece of evidence, so a hot hour of the market is not taken for an edge.
-- A new rule replaces the one in use only if it earns at least 25% more, so it does not flip-flop on noise.
-- The rule in use is judged on its own trades. After 30, if it is clearly worse than it had shown (the top of its 95% range below the worst case it promised), it is benched for a day and the next best rule, or your own, takes over.
+- Once in use, a rule stays until there is evidence against it. A later search that simply does not list it again is not such evidence: each search re-checks only its best candidates, and those shift as data comes in. A new rule replaces it only if it earns at least 25% more, so it does not flip-flop on noise.
+- The rule in use is judged on its own trades (after 30) and on every coin that qualified for it after it was proven (after 40, the trades it could not take included). If either is clearly worse than it had shown (the top of its 95% range below the worst case it promised), it is benched for a day and the next best rule, or your own, takes over.
+- Only what was actually seen counts. The bot follows at most 40 PumpSwap pools at once, so a graduated coin's price stops reaching it after a while; from then on its would-be trades are marked unobserved, and a stop-loss nobody saw is never counted as a trade that held its value. The same goes for anything open while the trade feed was down (for example a sleeping computer).
 - **Real money:** turning it on asks for a second tap (`/autopilot on yes`), and it uses only rules at the go-live bar (at least 100 unseen trades and a worst case above +2% per trade). Until one exists, **new live entries wait**; open positions are still managed. A bot already trading live before this update keeps its own rule until you turn the autopilot on.
 - In paper mode, while nothing is proven, it trades your own rule.
 
@@ -140,7 +141,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 114 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 120 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```

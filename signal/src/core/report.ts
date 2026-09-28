@@ -3,7 +3,7 @@
  * from resolved outcome samples, with confidence intervals, plus the go-live gate.
  */
 import { breakEvenP, type ModelSpec } from "./model.js";
-import { ENTRY_LEVELS, GRID, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, type Sample, comboObserved } from "./outcomes.js";
 import type { Position } from "./positions.js";
 import type { Settings } from "./settings.js";
 import { clusteredMeanCI, hourOf, quantile, wilson } from "./util.js";
@@ -77,6 +77,16 @@ export function gridOf(s: Sample): number[] | undefined {
   return s.grid?.length === GRID.length ? s.grid : undefined;
 }
 
+/** The sample's return for (tp, sl) when that exit was observed (see Sample.blind), else undefined. */
+export function observedReturn(s: Sample, tp: number, sl: number): number | undefined {
+  if (s.blind !== undefined) {
+    if (!gridOf(s)) return undefined;
+    const gi = GRID.findIndex((c) => c.tp === tp && c.sl === sl);
+    if (!comboObserved(s, gi >= 0 ? gi : nearestGrid(tp, sl))) return undefined;
+  }
+  return sampleReturn(s, tp, sl).ret;
+}
+
 /** Return of a sample for the (tp, sl) combo: exact when recorded, else from the grid. */
 export function sampleReturn(s: Sample, tp: number, sl: number): { ret: number; exact: boolean } {
   if (s.tp === tp && s.sl === sl) return { ret: s.ret, exact: true };
@@ -137,7 +147,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
   const checkpoints = samples.filter((s) => s.kind === "checkpoint");
   const signals = samples.filter((s) => s.kind === "signal");
   const exactCombo = samples.length === 0 || sampleReturn(samples[0]!, tp, sl).exact;
-  const retOf = (s: Sample) => sampleReturn(s, tp, sl).ret;
+  const retOf = (s: Sample) => observedReturn(s, tp, sl);
   const t0 = samples.reduce((m, s) => Math.min(m, s.ts), Infinity);
   const t1 = samples.reduce((m, s) => Math.max(m, s.ts), 0);
   const spanHours = samples.length ? Math.max(1 / 60, (t1 - t0) / 3_600_000) : 0;
@@ -185,7 +195,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid: GridCell[] = GRID.map((g, i) => {
-    const st = statsOf(valuesOf(pool, (s) => gridOf(s)?.[i]));
+    const st = statsOf(valuesOf(pool, (s) => (comboObserved(s, i) ? gridOf(s)?.[i] : undefined)));
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
   const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
@@ -230,7 +240,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     const older = rows.filter((s) => s.ts < mid);
     const newer = rows.filter((s) => s.ts >= mid);
     GRID.forEach((g, i) => {
-      const val = (s: Sample) => gridOf(s)?.[i];
+      const val = (s: Sample) => (comboObserved(s, i) ? gridOf(s)?.[i] : undefined);
       const all = valuesOf(rows, val);
       if (all.v.length < 150) return;
       const lo = bound(all, strict);

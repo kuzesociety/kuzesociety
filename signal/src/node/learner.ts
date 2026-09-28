@@ -139,7 +139,9 @@ export class Learner {
     if (this.edgesRunning) return this.lastEdges;
     this.edgesRunning = true;
     try {
-      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5, horizonMs: this.horizonMs() });
+      const ap = this.autopilot;
+      const incumbent = ap.active && ap.rule ? { rule: ap.rule, after: ap.proofTo ?? 0 } : undefined;
+      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5, horizonMs: this.horizonMs(), incumbent });
       const before = new Set(this.lastEdges?.survivors.map((x) => x.text) ?? []);
       const fresh = rep.survivors.filter((x) => !before.has(x.text));
       this.lastEdges = rep;

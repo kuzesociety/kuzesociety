@@ -10,9 +10,9 @@
  *   3. Placebo: the whole search is repeated on shuffled outcomes, where no edge exists;
  *      how often it "finds" one there shows how often it fools itself.
  */
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, comboObserved } from "./outcomes.js";
 import { ENTRY_POINTS, type Settings } from "./settings.js";
-import { clusteredMeanCI, rng } from "./util.js";
+import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
 /** Time limits tried with every take-profit/stop-loss pair (minutes, 0 = none). */
 export const HOLDS_MIN = [0, 10, 30, 60] as const;
@@ -119,6 +119,13 @@ export interface EdgeReport {
   /** best candidates that failed the holdout, shown for transparency */
   failed: EdgeFound[];
   placebo: { runs: number; avgSurvivors: number; maxSurvivors: number };
+  /** the newest would-be entry the search used (its proof covers entries up to here) */
+  cutoff?: number;
+  /**
+   * The rule in use (EdgeOptions.incumbent) on every coin that qualified for it after it was
+   * proven, as far as observed: its forward test. Range: 95%, counted per hour.
+   */
+  incumbent?: { text: string; n: number; mean: number; lo: number; hi: number };
 }
 
 export interface EdgeOptions {
@@ -134,9 +141,11 @@ export interface EdgeOptions {
   minWins?: number;
   placeboRuns?: number;
   seed?: number;
+  /** the rule in use and the newest entry its proof used: measured on what came after (EdgeReport.incumbent) */
+  incumbent?: { rule: EdgeRule; after: number };
 }
 
-const DEFAULTS: Required<Omit<EdgeOptions, "now">> = {
+const DEFAULTS: Required<Omit<EdgeOptions, "now" | "incumbent">> = {
   horizonMs: 6 * 3_600_000,
   minHours: 24,
   minSamples: 1_000,
@@ -150,11 +159,16 @@ const DEFAULTS: Required<Omit<EdgeOptions, "now">> = {
 
 export { normInv, tInv } from "./util.js";
 
-/** Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h]. */
+/**
+ * Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h] — NaN when that exit was
+ * not observed (the coin's price stopped reaching us before it happened: see Sample.blind).
+ */
 function exitReturn(s: Sample, c: number, h: number): number {
   const ret = s.grid[c]!;
   const hold = HOLDS_MIN[h]!;
-  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return ret;
+  if (hold === 0 || (s.gridT?.[c] ?? 0) <= hold * 60) return comboObserved(s, c) ? ret : NaN;
+  // sold at the time limit
+  if (s.blind !== undefined && hold * 60 > s.blind) return NaN;
   const v = s.path?.[PATH_MIN.indexOf(hold as (typeof PATH_MIN)[number])];
   return v ?? ret;
 }
@@ -185,6 +199,29 @@ function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
   };
   if (cond.filters) out.filters = { ...OPEN_FILTERS, ...cond.filters };
   return out;
+}
+
+/**
+ * A rule on every coin that qualified for it after `after` (entries its proof never saw), as far
+ * as observed: what it would have made since. The range counts evidence per market hour.
+ */
+function forwardTest(rows: Sample[], rule: EdgeRule, after: number): EdgeReport["incumbent"] {
+  const tag = rule.at ?? `x${rule.level}`;
+  const cond = CONDITIONS.find((c) => c.key === rule.cond);
+  const combo = GRID.findIndex((g) => g.tp === rule.tp && g.sl === rule.sl);
+  const h = HOLDS_MIN.indexOf(rule.hold as (typeof HOLDS_MIN)[number]);
+  if (!cond || combo < 0 || h < 0) return undefined;
+  const v: number[] = [];
+  const hours: number[] = [];
+  for (const s of rows) {
+    if (s.ts <= after || s.tag !== tag || !cond.test(s)) continue;
+    const x = exitReturn(s, combo, h);
+    if (Number.isNaN(x)) continue;
+    v.push(x);
+    hours.push(hourOf(s.ts));
+  }
+  const m = clusteredMeanCI(v, hours);
+  return { text: describe(rule), n: v.length, mean: m.mean, lo: m.lo, hi: m.hi };
 }
 
 interface Group {
@@ -220,6 +257,7 @@ function stats(d: Data, idx: Int32Array, e: number, z: number): EdgeStats {
   let w = 0;
   for (let k = 0; k < idx.length; k++) {
     const v = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]!;
+    if (Number.isNaN(v)) continue; // not observed
     n++;
     sum += v;
     sq += v * v;
@@ -241,11 +279,13 @@ function stats(d: Data, idx: Int32Array, e: number, z: number): EdgeStats {
 function holdoutStats(d: Data, idx: Int32Array, e: number, tests: number): EdgeStats {
   const st = stats(d, idx, e, 0);
   if (st.n < 2) return st;
-  const vals = new Float64Array(idx.length);
-  const hours = new Int32Array(idx.length);
+  const vals: number[] = [];
+  const hours: number[] = [];
   for (let k = 0; k < idx.length; k++) {
-    vals[k] = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]!;
-    hours[k] = d.hour[idx[k]!]!;
+    const v = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]!;
+    if (Number.isNaN(v)) continue; // not observed
+    vals.push(v);
+    hours.push(d.hour[idx[k]!]!);
   }
   // one-sided at 0.05/tests = two-sided at 1 − 0.1/tests
   return { ...st, lo: clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, tests)).lo };
@@ -259,7 +299,7 @@ interface SearchResult {
 
 const wins = (st: EdgeStats) => Math.round(st.winRate * st.n);
 
-function* search(d: Data, groups: Group[], o: Required<Omit<EdgeOptions, "now">>): Generator<void, SearchResult> {
+function* search(d: Data, groups: Group[], o: Required<Omit<EdgeOptions, "now" | "incumbent">>): Generator<void, SearchResult> {
   let tested = 0;
   const best: Scored[] = [];
   for (const g of groups) {
@@ -338,6 +378,8 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
       s.ts <= cutoff,
   );
   rows.sort((a, b) => a.ts - b.ts);
+  if (rows.length) base.cutoff = rows[rows.length - 1]!.ts;
+  if (opts.incumbent) base.incumbent = forwardTest(rows, opts.incumbent.rule, opts.incumbent.after);
   const n = rows.length;
   const t0 = n ? rows[0]!.ts : 0;
   const t1 = n ? rows[n - 1]!.ts : 0;
@@ -399,9 +441,12 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0)!;
     // time in the trade: until the target, the stop or the time limit, whichever came first
     let held = 0;
+    let heldN = 0;
     for (const i of c.g.hold) {
+      if (Number.isNaN(R[i * EXITS + c.e]!)) continue; // not observed
       const sec = rows[i]!.gridT?.[combo] ?? 0;
       held += rule.hold ? Math.min(sec, rule.hold * 60) : sec;
+      heldN++;
     }
     return {
       ...rule,
@@ -410,7 +455,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
       tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i]!.mint)).size / c.g.holdDays,
-      avgHoldMin: c.g.hold.length ? held / c.g.hold.length / 60 : undefined,
+      avgHoldMin: heldN ? held / heldN / 60 : undefined,
       settings: settingsFor(rule, o.horizonMs),
     };
   };
@@ -422,8 +467,15 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
 
   // Placebo: outcomes shuffled across entries and centred per exit, so no rule has an edge.
   const colMean = new Float64Array(EXITS);
-  for (let i = 0; i < n; i++) for (let e = 0; e < EXITS; e++) colMean[e] += R[i * EXITS + e]!;
-  for (let e = 0; e < EXITS; e++) colMean[e] /= n;
+  const colN = new Float64Array(EXITS);
+  for (let i = 0; i < n; i++)
+    for (let e = 0; e < EXITS; e++) {
+      const v = R[i * EXITS + e]!;
+      if (Number.isNaN(v)) continue;
+      colMean[e] += v;
+      colN[e]++;
+    }
+  for (let e = 0; e < EXITS; e++) colMean[e] = colN[e] ? colMean[e]! / colN[e]! : 0;
   const rand = rng(o.seed);
   const counts: number[] = [];
   for (let r = 0; r < o.placeboRuns; r++) {

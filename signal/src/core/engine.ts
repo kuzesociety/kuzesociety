@@ -1271,6 +1271,8 @@ export class Engine {
       const t = this.tokens.get(p.mint);
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
+    // the trade feed went quiet (network, a sleeping computer): what happened meanwhile was not seen
+    if (this.feedDown()) this.outcomes.blindAll(Math.max(0, ...[...this.feeds.values()].filter((f) => f.critical).map((f) => f.lastMsgAt)));
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
     const every = this.modelReady() ? 5 * 60_000 : 30_000;
     if (now - this.lastNormalize >= every) {
@@ -1355,8 +1357,10 @@ export class Engine {
 
   /**
    * PumpSwap pools whose swaps must reach us: coins we hold first, then graduated coins whose
-   * would-be trades are still being followed (without their swaps, a coin that keeps trading
-   * would look dead and bias the results), newest first, `max` in all.
+   * would-be trades are still being followed, newest first, `max` in all. The graduated coins
+   * left out stop being observed from now on: their would-be trades are marked (outcomes
+   * blindMint), so a stop that nobody saw is not counted as a trade that held its value.
+   * Called only when pools are followed one by one (not with the whole PumpSwap stream).
    */
   poolsToFollow(max = 40): string[] {
     const out = new Set<string>();
@@ -1364,15 +1368,15 @@ export class Engine {
       const pool = this.tokens.get(p.mint)?.pool;
       if (pool) out.add(pool);
     }
-    const followed: { pool: string; at: number }[] = [];
+    const followed: { mint: string; pool?: string; at: number }[] = [];
     for (const mint of this.outcomes.openMints()) {
       const t = this.tokens.get(mint);
-      if (t?.stage === "amm" && t.pool && !out.has(t.pool)) followed.push({ pool: t.pool, at: t.migrateAt ?? 0 });
+      if (t?.stage === "amm" && !(t.pool && out.has(t.pool))) followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0 });
     }
     followed.sort((a, b) => b.at - a.at);
     for (const f of followed) {
-      if (out.size >= max) break;
-      out.add(f.pool);
+      if (f.pool && out.size < max) out.add(f.pool);
+      else if (!(f.pool && out.has(f.pool))) this.outcomes.blindMint(f.mint, this.now);
     }
     return [...out];
   }
