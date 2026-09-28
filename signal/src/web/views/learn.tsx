@@ -1,4 +1,5 @@
 import { useEffect, useState } from "preact/hooks";
+import { AUTOPILOT } from "../../core/autopilot";
 import { CONDITIONS, type EdgeFound, type EdgeReport, HOLDS_MIN } from "../../core/edges";
 import { ENTRY_LEVELS, GRID, GRID_SL, GRID_TP } from "../../core/outcomes";
 import type { LearnReport } from "../../core/report";
@@ -53,7 +54,8 @@ export function Learn() {
 
       <EdgeFinder mode={settings?.mode ?? "paper"} autopilot={!!settings?.autopilot} />
 
-      {r.suggestion && (
+      {/* with the autopilot on, rules are switched by the edge finder's proof, which covers these settings too */}
+      {r.suggestion && !settings?.autopilot && (
         <div class="card" style="margin-top:12px;border-color:var(--flare)">
           <h2>Better settings found</h2>
           <p style="margin:0 0 10px">
@@ -77,7 +79,9 @@ export function Learn() {
             >
               Apply
             </button>
-            <span class="faint" style="font-size:12.5px">Past results can stop working. Auto-tune can do this for you in paper mode (Bot → Advanced).</span>
+            <span class="faint" style="font-size:12.5px">
+              Past results can stop working. The autopilot (Bot tab) switches rules by itself, only on proof from data the search never saw; auto-tune does this in paper mode (Bot → Advanced).
+            </span>
           </div>
         </div>
       )}
@@ -289,6 +293,13 @@ function EdgeFinder({ mode, autopilot }: { mode: string; autopilot: boolean }) {
             </details>
           )}
           {r.survivors.length > 0 && <p class="faint note">Coins/day counts every coin that qualified; your size, open-position and hourly limits decide how many the bot actually takes.</p>}
+          {r.survivors.length > 0 && autopilot && (
+            <p class="note">
+              {r.placebo.avgSurvivors <= AUTOPILOT.maxPlacebo
+                ? "Autopilot is on: the bot trades the best of these by itself (Bot tab). Picking one here turns it off."
+                : "Autopilot is on but does not use these: on shuffled data the same search found rules too, so they may be luck."}
+            </p>
+          )}
           {!r.survivors.length && <p class="note">{r.note}</p>}
           {r.failed.length > 0 && (
             <details class="more">

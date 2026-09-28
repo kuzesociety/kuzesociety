@@ -4,7 +4,7 @@ import { priorModel } from "../src/core/model.js";
 import { GRID, type Sample } from "../src/core/outcomes.js";
 import { buildReport } from "../src/core/report.js";
 import { DEFAULT_SETTINGS } from "../src/core/settings.js";
-import { rng } from "../src/core/util.js";
+import { meanCI, rng } from "../src/core/util.js";
 
 function makeSamples(n: number, edge: (score: number, gi: number, r: () => number) => number, seed = 1): Sample[] {
   const r = rng(seed);
@@ -42,6 +42,41 @@ describe("learning report", () => {
     expect(rep.suggestion!.slPct).toBe(50);
     expect(rep.suggestion!.minScore).toBeGreaterThanOrEqual(80);
     expect(rep.buckets.length).toBe(10);
+  });
+
+  it("is not fooled by a lucky run of hot market hours: evidence is counted per hour", () => {
+    // Every exit loses on average. But in a hot hour every coin wins far more often, and this
+    // stretch happened to have 20 hot hours out of 30: trade by trade, the go-live check
+    // would call it proven.
+    const r = rng(9);
+    const hours = Array.from({ length: 30 }, (_, i) => i < 20);
+    for (let i = hours.length - 1; i > 0; i--) {
+      const j = Math.floor(r() * (i + 1));
+      [hours[i], hours[j]] = [hours[j]!, hours[i]!];
+    }
+    const T = 1_700_000_000_000;
+    const samples: Sample[] = [];
+    for (let i = 0; i < 6000; i++) {
+      const ts = T + (i % 3000) * 36_000; // 100 moments an hour for 30 hours
+      const hot = hours[Math.floor((i % 3000) / 100)]!;
+      const grid = GRID.map((g) => {
+        const even = (g.sl + 5) / (g.tp + g.sl + 5); // break-even win chance (a loss averages the stop + 5%)
+        return r() < even * (hot ? 1.7 : 0.1) ? g.tp / 100 : -(g.sl / 100 + 0.1 * r());
+      });
+      const ret = grid[GRID.findIndex((g) => g.tp === 100 && g.sl === 50)]!;
+      const kind = i < 3000 ? "signal" : "entry";
+      samples.push({
+        id: `s${i}`, kind, tag: kind === "entry" ? `x${50 + 5 * (i % 10)}` : "sig", mint: `m${i}`, symbol: "X", ts, stage: "curve",
+        score: kind === "entry" ? 50 + 5 * (i % 10) : 80, p: 0.1, x: [], entryMcap: 30, tp: 100, sl: 50, y: 0, ret,
+        exit: "timeout", grid, maxMult: 1, minMult: 1, secToMax: 0, resolvedAt: 0,
+      });
+    }
+    const signals = samples.filter((s) => s.kind === "signal").map((s) => s.ret);
+    expect(meanCI(signals).lo).toBeGreaterThan(0.02); // what a trade-by-trade check would have said
+    const rep = buildReport(samples, { ...DEFAULT_SETTINGS, minScore: 75 }, priorModel(), [], Date.now());
+    expect(rep.gate.pass).toBe(false);
+    expect(rep.signalStats.retLo).toBeLessThan(0.02);
+    expect(rep.suggestion).toBeNull();
   });
 });
 

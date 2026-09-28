@@ -74,6 +74,8 @@ It is built not to fool itself:
 
 Every decision, with its numbers, is listed on the Autopilot card and sent to Telegram.
 
+**What is automatic, and what never is.** With the autopilot on, every finding on the dashboard is applied by itself as soon as it is proven: the score (a new model replaces the current one when it predicts coins neither has seen better) and the whole rule (entry, coins, exits, time limit). There is one standard of proof for all of it: better on data the search never saw, counted per hour, with a clean luck check. The Learn tab's *Better settings found* is a narrower search inside the edge finder's, so it is shown (with its Apply button and auto-tune) only when the autopilot is off. Never set automatically, on purpose: your trade size, limits and mode (how much you risk is your call — sizing up on past results is how accounts blow up), and the realism settings such as the paper delay (a shorter simulated delay always looks better, which would be fooling itself).
+
 **Strategy** (under the Autopilot): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
 
 
@@ -104,7 +106,7 @@ The **Learn** tab answers this with your own data:
 - a threshold table (coins per hour versus result)
 - a take-profit × stop-loss heat map for coins above your score
 - your paper-trading results (profit factor, drawdown)
-- the **go-live check**: it passes only with ≥150 resolved signals at your settings *and* a 95% lower bound on average net return above +2%
+- the **go-live check**: it passes only with ≥150 resolved signals at your settings *and* a 95% lower bound on average net return above +2%. Every range on the tab counts coins bought in the same hour as one piece of evidence, so a lucky run of hot market hours does not look like proof
 - the **edge finder**: independently of your settings, it searches 23 kinds of entry — the first time a coin reaches one of 10 score levels, or every coin at one of 13 fixed points in its life (20 s–12 min after launch; a quarter, half or three quarters of the way to graduation; 1, 5, 15 or 60 min after graduating) — × 22 coin conditions (stage, market cap, age, bundles, holders, buyers, socials, dev behaviour) × 192 exits (take profit 25–500%, stop loss 10–70%, optional 10/30/60-minute time limit) for rules that made money after every cost. It ranks them on the older two thirds of the data, re-checks the best 20 on the newest third (which the search never saw) with a bound corrected for testing 20 at once — counting coins bought in the same hour as one piece of evidence, since a hot hour lifts them all — and repeats everything on shuffled data to show how often the search fools itself. Every rule it reports is one the bot can run: the autopilot trades the best one by itself, or **Paper-trade this rule** switches your settings to it
 
 Exact replays on recorded data are available through the research CLI:
@@ -138,7 +140,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 113 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 114 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```

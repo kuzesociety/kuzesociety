@@ -439,12 +439,6 @@ function quantile(sorted, q) {
   const hi = Math.ceil(pos);
   return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
 }
-function mean(xs) {
-  if (xs.length === 0) return NaN;
-  let s = 0;
-  for (const x of xs) s += x;
-  return s / xs.length;
-}
 function wilson(successes, n, z = 1.96) {
   if (n === 0) return { lo: 0, hi: 1, p: NaN };
   const p = successes / n;
@@ -453,15 +447,57 @@ function wilson(successes, n, z = 1.96) {
   const half = z * Math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denom;
   return { lo: Math.max(0, centre - half), hi: Math.min(1, centre + half), p };
 }
-function meanCI(xs) {
+var hourOf = (ts) => Math.floor(ts / 36e5);
+function clusteredMeanCI(xs, cluster, level = 0.95) {
   const n = xs.length;
-  if (n === 0) return { mean: NaN, lo: NaN, hi: NaN, n };
-  const m = mean(xs);
-  if (n === 1) return { mean: m, lo: -Infinity, hi: Infinity, n };
-  let v = 0;
-  for (const x of xs) v += (x - m) ** 2;
-  const se = Math.sqrt(v / (n - 1) / n);
-  return { mean: m, lo: m - 1.96 * se, hi: m + 1.96 * se, n };
+  if (n === 0) return { mean: NaN, lo: NaN, hi: NaN, n, clusters: 0 };
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += xs[i];
+  const m = sum / n;
+  const by = /* @__PURE__ */ new Map();
+  let sq = 0;
+  for (let i = 0; i < n; i++) {
+    const d = xs[i] - m;
+    sq += d * d;
+    by.set(cluster[i], (by.get(cluster[i]) ?? 0) + d);
+  }
+  const c = by.size;
+  if (n < 2 || c < 2) return { mean: m, lo: -Infinity, hi: Infinity, n, clusters: c };
+  const q = 1 - (1 - level) / 2;
+  let cs = 0;
+  for (const v of by.values()) cs += v * v;
+  const half = Math.max(tInv(q, n - 1) * Math.sqrt(sq / (n - 1) / n), tInv(q, c - 1) * Math.sqrt(cs / (n * n) * (c / (c - 1))));
+  return { mean: m, lo: m - half, hi: m + half, n, clusters: c };
+}
+function normInv(p) {
+  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
+  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
+  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
+  const q = Math.min(Math.max(p, 1e-12), 1 - 1e-12);
+  if (q < 0.02425) {
+    const t2 = Math.sqrt(-2 * Math.log(q));
+    return (((((c[0] * t2 + c[1]) * t2 + c[2]) * t2 + c[3]) * t2 + c[4]) * t2 + c[5]) / ((((d[0] * t2 + d[1]) * t2 + d[2]) * t2 + d[3]) * t2 + 1);
+  }
+  if (q > 1 - 0.02425) return -normInv(1 - q);
+  const t = q - 0.5;
+  const r = t * t;
+  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * t / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
+}
+function tInv(p, df) {
+  if (!(df >= 1)) return Infinity;
+  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
+  if (df === 2) {
+    const a = 2 * p - 1;
+    return a * Math.sqrt(2 / (1 - a * a));
+  }
+  const z = normInv(p);
+  const z2 = z * z;
+  const g1 = z * (z2 + 1) / 4;
+  const g2 = z * ((5 * z2 + 16) * z2 + 3) / 96;
+  const g3 = z * (((3 * z2 + 19) * z2 + 17) * z2 - 15) / 384;
+  const g4 = z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945) / 92160;
+  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
 }
 var silentLogger = { debug() {
 }, info() {
@@ -910,36 +946,6 @@ var DEFAULTS = {
   placeboRuns: 3,
   seed: 7
 };
-function normInv(p) {
-  const a = [-39.69683028665376, 220.9460984245205, -275.9285104469687, 138.357751867269, -30.66479806614716, 2.506628277459239];
-  const b = [-54.47609879822406, 161.5858368580409, -155.6989798598866, 66.80131188771972, -13.28068155288572];
-  const c = [-0.007784894002430293, -0.3223964580411365, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
-  const d = [0.007784695709041462, 0.3224671290700398, 2.445134137142996, 3.754408661907416];
-  const q = Math.min(Math.max(p, 1e-12), 1 - 1e-12);
-  if (q < 0.02425) {
-    const t2 = Math.sqrt(-2 * Math.log(q));
-    return (((((c[0] * t2 + c[1]) * t2 + c[2]) * t2 + c[3]) * t2 + c[4]) * t2 + c[5]) / ((((d[0] * t2 + d[1]) * t2 + d[2]) * t2 + d[3]) * t2 + 1);
-  }
-  if (q > 1 - 0.02425) return -normInv(1 - q);
-  const t = q - 0.5;
-  const r = t * t;
-  return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * t / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
-}
-function tInv(p, df) {
-  if (!(df >= 1)) return Infinity;
-  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
-  if (df === 2) {
-    const a = 2 * p - 1;
-    return a * Math.sqrt(2 / (1 - a * a));
-  }
-  const z = normInv(p);
-  const z2 = z * z;
-  const g1 = z * (z2 + 1) / 4;
-  const g2 = z * ((5 * z2 + 16) * z2 + 3) / 96;
-  const g3 = z * (((3 * z2 + 19) * z2 + 17) * z2 - 15) / 384;
-  const g4 = z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945) / 92160;
-  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
-}
 function exitReturn(s, c, h) {
   const ret = s.grid[c];
   const hold = HOLDS_MIN[h];
@@ -985,32 +991,20 @@ function stats(d, idx, e, z) {
     if (d.wins(v)) w++;
   }
   if (n < 2) return { n, mean: n ? sum : NaN, lo: -Infinity, winRate: n ? w / n : NaN };
-  const mean2 = sum / n;
-  const variance = Math.max(0, (sq - n * mean2 * mean2) / (n - 1));
-  return { n, mean: mean2, lo: mean2 - z * Math.sqrt(variance / n), winRate: w / n };
+  const mean = sum / n;
+  const variance = Math.max(0, (sq - n * mean * mean) / (n - 1));
+  return { n, mean, lo: mean - z * Math.sqrt(variance / n), winRate: w / n };
 }
 function holdoutStats(d, idx, e, tests) {
   const st = stats(d, idx, e, 0);
-  const n = st.n;
-  if (n < 2) return st;
-  const byHour = /* @__PURE__ */ new Map();
-  let sq = 0;
+  if (st.n < 2) return st;
+  const vals = new Float64Array(idx.length);
+  const hours = new Int32Array(idx.length);
   for (let k = 0; k < idx.length; k++) {
-    const v = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e] - st.mean;
-    sq += v * v;
-    const h = d.hour[idx[k]];
-    byHour.set(h, (byHour.get(h) ?? 0) + v);
+    vals[k] = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e];
+    hours[k] = d.hour[idx[k]];
   }
-  const hours = byHour.size;
-  const q = 1 - 0.05 / Math.max(1, tests);
-  const seIid = Math.sqrt(sq / (n - 1) / n);
-  let lo = st.mean - tInv(q, n - 1) * seIid;
-  if (hours < 2) return { ...st, lo: -Infinity };
-  let cs = 0;
-  for (const v of byHour.values()) cs += v * v;
-  const seHour = Math.sqrt(cs / (n * n) * (hours / (hours - 1)));
-  lo = Math.min(lo, st.mean - tInv(q, hours - 1) * seHour);
-  return { ...st, lo };
+  return { ...st, lo: clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, tests)).lo };
 }
 var wins = (st) => Math.round(st.winRate * st.n);
 function* search(d, groups, o) {
@@ -1760,7 +1754,7 @@ function priorModel(now = 0) {
 function scalePrior(base, rows) {
   const n = rows.length;
   const blend = n / (n + 600);
-  const mean2 = {};
+  const mean = {};
   const std = {};
   FEATURE_KEYS.forEach((k2, j) => {
     let m = 0;
@@ -1771,14 +1765,14 @@ function scalePrior(base, rows) {
     const sd = Math.sqrt(v / Math.max(1, n - 1));
     const pm = base.mean[k2] ?? 0;
     const ps = base.std[k2] ?? 1;
-    mean2[k2] = (1 - blend) * pm + blend * m;
+    mean[k2] = (1 - blend) * pm + blend * m;
     std[k2] = Math.max((1 - blend) * ps + blend * sd, 0.5 * ps, 1e-6);
   });
   const lin = [];
   for (const r of rows) {
     let s22 = 0;
     FEATURE_KEYS.forEach((k2, j) => {
-      s22 += (base.weights[k2] ?? 0) * clamp((r[j] - mean2[k2]) / std[k2], -5, 5);
+      s22 += (base.weights[k2] ?? 0) * clamp((r[j] - mean[k2]) / std[k2], -5, 5);
     });
     lin.push(s22);
   }
@@ -1787,7 +1781,7 @@ function scalePrior(base, rows) {
   const k = lsd > 1e-6 ? clamp(0.85 / lsd, 0.15, 3) : 1;
   const weights = {};
   for (const key of FEATURE_KEYS) weights[key] = (base.weights[key] ?? 0) * k;
-  return { mean: mean2, std, weights, bias: base.bias - lm * k };
+  return { mean, std, weights, bias: base.bias - lm * k };
 }
 var POINTS_PER_LOGIT = 12.5 / Math.LN2;
 function standardize(stage, x) {
@@ -2100,7 +2094,7 @@ function* fitStageSteps(base, rows, weights, opts = {}) {
   const blend = n / (n + half);
   let sw = 0;
   for (let i = 0; i < n; i++) sw += weights[i];
-  const mean2 = {};
+  const mean = {};
   const std = {};
   for (let j = 0; j < d; j++) {
     const k = FEATURE_KEYS[j];
@@ -2112,12 +2106,12 @@ function* fitStageSteps(base, rows, weights, opts = {}) {
     v /= sw || 1;
     const pm = base.mean[k] ?? 0;
     const ps = base.std[k] ?? 1;
-    mean2[k] = (1 - blend) * pm + blend * m;
+    mean[k] = (1 - blend) * pm + blend * m;
     const sd = (1 - blend) * ps + blend * Math.sqrt(v);
     std[k] = sd > 1e-6 ? sd : ps;
     if ((j & 3) === 3) yield;
   }
-  const shape = { pRef: base.pRef, bias: 0, weights: {}, mean: mean2, std };
+  const shape = { pRef: base.pRef, bias: 0, weights: {}, mean, std };
   const zero = new Set(opts.zero ?? []);
   const prior = [base.bias];
   FEATURE_KEYS.forEach((k) => prior.push(zero.has(k) ? 0 : (base.weights[k] ?? 0) * ((std[k] ?? 1) / (base.std[k] ?? 1))));
@@ -2139,7 +2133,7 @@ function* fitStageSteps(base, rows, weights, opts = {}) {
   const { beta } = yield* newtonSteps(Z, n, d, y, weights, prior, lambda);
   const out = {};
   FEATURE_KEYS.forEach((k, j) => out[k] = clamp(beta[j + 1], -10, 10));
-  return { pRef: baseRate, bias: beta[0], weights: out, mean: mean2, std };
+  return { pRef: baseRate, bias: beta[0], weights: out, mean, std };
 }
 function* calibrateSteps(stage, rows) {
   if (rows.length < 50) return stage;
@@ -4653,11 +4647,22 @@ function sampleReturn(s, tp, sl) {
   if (g && gi >= 0 && Number.isFinite(g[gi])) return { ret: g[gi], exact: true };
   return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
 }
-function statsOf(rets) {
-  const wins2 = rets.filter((r) => r > 0).length;
-  const w = wilson(wins2, rets.length);
-  const m = meanCI(rets);
-  return { n: rets.length, winRate: rets.length ? wins2 / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
+function valuesOf(rows, val) {
+  const v = [];
+  const h = [];
+  for (const s of rows) {
+    const x = val(s);
+    if (x === void 0 || !Number.isFinite(x)) continue;
+    v.push(x);
+    h.push(hourOf(s.ts));
+  }
+  return { v, h };
+}
+function statsOf({ v, h }) {
+  const wins2 = v.filter((r) => r > 0).length;
+  const w = wilson(wins2, v.length);
+  const m = clusteredMeanCI(v, h);
+  return { n: v.length, winRate: v.length ? wins2 / v.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
 }
 function paperStats(closed) {
   const done = closed.filter((p) => p.status === "closed" && Number.isFinite(p.pnl));
@@ -4696,19 +4701,19 @@ function buildReport(samples, settings, model, closed, now) {
   for (let lo = 0; lo < 100; lo += 10) {
     const hi = lo + 10;
     const rows = checkpoints.filter((s) => s.score >= lo && (s.score < hi || hi === 100 && s.score <= 100));
-    const st = statsOf(rows.map(retOf));
+    const st = statsOf(valuesOf(rows, retOf));
     const mm = rows.map((s) => s.maxMult).sort((a, b) => a - b);
     buckets.push({ lo, hi, n: st.n, winRate: st.winRate, winLo: st.winLo, winHi: st.winHi, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, medMaxMult: quantile(mm, 0.5) });
   }
   const sigAbove = signals.filter((s) => s.score >= settings.minScore);
-  const signalStats = statsOf(sigAbove.map(retOf));
+  const signalStats = statsOf(valuesOf(sigAbove, retOf));
   const entries = samples.filter((s) => s.kind === "entry");
   const thresholdSource = entries.length >= 200 ? "entries" : "checkpoints";
   const atLevel = (min) => thresholdSource === "entries" ? entries.filter((s) => s.tag === `x${min}`) : checkpoints.filter((s) => s.score >= min);
   const thresholds = [];
   for (let min = 50; min <= 95; min += 5) {
     const rows = atLevel(min);
-    const st = statsOf(rows.map(retOf));
+    const st = statsOf(valuesOf(rows, retOf));
     const tokens = new Set(rows.map((s) => s.mint)).size;
     thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
   }
@@ -4727,8 +4732,7 @@ function buildReport(samples, settings, model, closed, now) {
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid = GRID.map((g, i) => {
-    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x) => Number.isFinite(x));
-    const st = statsOf(rets);
+    const st = statsOf(valuesOf(pool, (s) => gridOf(s)?.[i]));
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
   const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
@@ -4745,7 +4749,7 @@ function buildReport(samples, settings, model, closed, now) {
     gate = {
       pass: false,
       verdict: signalStats.avgRet > 0 ? "Positive but not proven" : "Losing at these settings",
-      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%) after fees, delay and slippage. The low end must clear +2% before risking real money.`
+      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%, counting coins bought in the same hour as one piece of evidence) after fees, delay and slippage. The low end must clear +2% before risking real money.`
     };
   } else {
     gate = {
@@ -4755,26 +4759,26 @@ function buildReport(samples, settings, model, closed, now) {
     };
   }
   let suggestion = null;
-  const zBound = (xs, z) => {
-    const m = meanCI(xs);
-    return Number.isFinite(m.lo) ? m.mean - (m.mean - m.lo) / 1.96 * z : -Infinity;
-  };
-  const cur = pool.map(retOf);
-  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
+  const strict = 1 - 0.1 / (10 * GRID.length);
+  const bound = (x, level2) => x.v.length >= 2 ? clusteredMeanCI(x.v, x.h, level2).lo : -Infinity;
+  const cur = valuesOf(pool, retOf);
+  let bestLo = cur.v.length >= 30 ? bound(cur, strict) : -Infinity;
   const mid = t0 + (t1 - t0) / 2;
   for (let min = 50; min <= 95; min += 5) {
     const rows = atLevel(min);
     if (rows.length < 150) continue;
+    const older = rows.filter((s) => s.ts < mid);
+    const newer = rows.filter((s) => s.ts >= mid);
     GRID.forEach((g, i) => {
       const val = (s) => gridOf(s)?.[i];
-      const all = rows.map(val).filter((x) => Number.isFinite(x));
-      if (all.length < 150) return;
-      const lo = zBound(all, 3.5);
+      const all = valuesOf(rows, val);
+      if (all.v.length < 150) return;
+      const lo = bound(all, strict);
       if (!(lo > 0) || lo <= bestLo + 5e-3) return;
-      const older = rows.filter((s) => s.ts < mid).map(val).filter((x) => Number.isFinite(x));
-      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x) => Number.isFinite(x));
-      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
-      const m = meanCI(all);
+      const o = valuesOf(older, val);
+      const nw = valuesOf(newer, val);
+      if (o.v.length < 50 || nw.v.length < 50 || !(bound(o, 0.95) > 0) || !(bound(nw, 0.95) > 0)) return;
+      const m = clusteredMeanCI(all.v, all.h);
       bestLo = lo;
       suggestion = {
         minScore: min,
@@ -4782,8 +4786,8 @@ function buildReport(samples, settings, model, closed, now) {
         slPct: g.sl,
         avgRet: m.mean,
         retLo: lo,
-        n: all.length,
-        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
+        n: all.v.length,
+        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.v.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`
       };
     });
   }

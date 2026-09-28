@@ -6,7 +6,7 @@ import { breakEvenP, type ModelSpec } from "./model.js";
 import { ENTRY_LEVELS, GRID, type Sample } from "./outcomes.js";
 import type { Position } from "./positions.js";
 import type { Settings } from "./settings.js";
-import { meanCI, quantile, wilson } from "./util.js";
+import { clusteredMeanCI, hourOf, quantile, wilson } from "./util.js";
 
 export interface BucketRow {
   lo: number;
@@ -86,11 +86,25 @@ export function sampleReturn(s: Sample, tp: number, sl: number): { ret: number; 
   return { ret: g?.[nearestGrid(tp, sl)] ?? s.ret, exact: false };
 }
 
-function statsOf(rets: number[]) {
-  const wins = rets.filter((r) => r > 0).length;
-  const w = wilson(wins, rets.length);
-  const m = meanCI(rets);
-  return { n: rets.length, winRate: rets.length ? wins / rets.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
+/** Values of `rows` (skipping missing ones) with the hour each one's coin was bought. */
+function valuesOf(rows: Sample[], val: (s: Sample) => number | undefined): { v: number[]; h: number[] } {
+  const v: number[] = [];
+  const h: number[] = [];
+  for (const s of rows) {
+    const x = val(s);
+    if (x === undefined || !Number.isFinite(x)) continue;
+    v.push(x);
+    h.push(hourOf(s.ts));
+  }
+  return { v, h };
+}
+
+/** Win rate and average return with 95% ranges; the return's range counts evidence per hour (util clusteredMeanCI). */
+function statsOf({ v, h }: { v: number[]; h: number[] }) {
+  const wins = v.filter((r) => r > 0).length;
+  const w = wilson(wins, v.length);
+  const m = clusteredMeanCI(v, h);
+  return { n: v.length, winRate: v.length ? wins / v.length : NaN, winLo: w.lo, winHi: w.hi, avgRet: m.mean, retLo: m.lo, retHi: m.hi };
 }
 
 export function paperStats(closed: Position[]) {
@@ -132,13 +146,13 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
   for (let lo = 0; lo < 100; lo += 10) {
     const hi = lo + 10;
     const rows = checkpoints.filter((s) => s.score >= lo && (s.score < hi || (hi === 100 && s.score <= 100)));
-    const st = statsOf(rows.map(retOf));
+    const st = statsOf(valuesOf(rows, retOf));
     const mm = rows.map((s) => s.maxMult).sort((a, b) => a - b);
     buckets.push({ lo, hi, n: st.n, winRate: st.winRate, winLo: st.winLo, winHi: st.winHi, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, medMaxMult: quantile(mm, 0.5) });
   }
 
   const sigAbove = signals.filter((s) => s.score >= settings.minScore);
-  const signalStats = statsOf(sigAbove.map(retOf));
+  const signalStats = statsOf(valuesOf(sigAbove, retOf));
 
   // Threshold comparison: prefer first-crossing entry outcomes. Snapshots of coins that are
   // above a score are kinder than buying the moment a coin reaches it (the crossing often
@@ -149,7 +163,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
   const thresholds = [];
   for (let min = 50; min <= 95; min += 5) {
     const rows = atLevel(min);
-    const st = statsOf(rows.map(retOf));
+    const st = statsOf(valuesOf(rows, retOf));
     const tokens = new Set(rows.map((s) => s.mint)).size;
     thresholds.push({ min, n: st.n, tokensPerHour: spanHours > 0 ? tokens / spanHours : NaN, winRate: st.winRate, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi });
   }
@@ -171,8 +185,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     pool = [...sigAbove, ...checkpoints.filter((s) => s.score >= settings.minScore)];
   }
   const grid: GridCell[] = GRID.map((g, i) => {
-    const rets = pool.map((s) => gridOf(s)?.[i]).filter((x): x is number => Number.isFinite(x));
-    const st = statsOf(rets);
+    const st = statsOf(valuesOf(pool, (s) => gridOf(s)?.[i]));
     return { tp: g.tp, sl: g.sl, n: st.n, avgRet: st.avgRet, retLo: st.retLo, retHi: st.retHi, winRate: st.winRate };
   });
   const credible = grid.filter((c) => c.n >= 50 && Number.isFinite(c.retLo));
@@ -190,7 +203,7 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     gate = {
       pass: false,
       verdict: signalStats.avgRet > 0 ? "Positive but not proven" : "Losing at these settings",
-      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%) after fees, delay and slippage. The low end must clear +2% before risking real money.`,
+      detail: `Average ${(signalStats.avgRet * 100).toFixed(1)}% per trade (95% range ${(signalStats.retLo * 100).toFixed(1)}% to ${(signalStats.retHi * 100).toFixed(1)}%, counting coins bought in the same hour as one piece of evidence) after fees, delay and slippage. The low end must clear +2% before risking real money.`,
     };
   } else {
     gate = {
@@ -200,31 +213,32 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
     };
   }
 
-  // Suggestion: search 10 thresholds × 20 exit combos (200 hypotheses) for settings that beat
-  // the current ones. To avoid crowning a lucky winner: a multiple-comparison-corrected bound
-  // (z = 3.5 instead of 1.96) must be positive, and the result must hold separately in the
-  // older and the newer half of the data (walk-forward stability).
+  // Suggestion: search 10 thresholds × 48 exits (480 hypotheses) for settings that beat the
+  // current ones. To avoid crowning a lucky winner: the lower bound, corrected for all 480
+  // (one-sided 0.05/480), must be positive and beat the current settings' bound, and the result
+  // must hold separately in the older and the newer half of the data. Every bound counts coins
+  // bought in the same hour as one piece of evidence (a hot hour lifts them all).
   let suggestion: LearnReport["suggestion"] = null;
-  const zBound = (xs: number[], z: number) => {
-    const m = meanCI(xs);
-    return Number.isFinite(m.lo) ? m.mean - ((m.mean - m.lo) / 1.96) * z : -Infinity;
-  };
-  const cur = pool.map(retOf);
-  let bestLo = cur.length >= 30 ? zBound(cur, 3.5) : -Infinity;
+  const strict = 1 - 0.1 / (10 * GRID.length);
+  const bound = (x: { v: number[]; h: number[] }, level: number) => (x.v.length >= 2 ? clusteredMeanCI(x.v, x.h, level).lo : -Infinity);
+  const cur = valuesOf(pool, retOf);
+  let bestLo = cur.v.length >= 30 ? bound(cur, strict) : -Infinity;
   const mid = t0 + (t1 - t0) / 2;
   for (let min = 50; min <= 95; min += 5) {
     const rows = atLevel(min);
     if (rows.length < 150) continue;
+    const older = rows.filter((s) => s.ts < mid);
+    const newer = rows.filter((s) => s.ts >= mid);
     GRID.forEach((g, i) => {
       const val = (s: Sample) => gridOf(s)?.[i];
-      const all = rows.map(val).filter((x): x is number => Number.isFinite(x));
-      if (all.length < 150) return;
-      const lo = zBound(all, 3.5);
+      const all = valuesOf(rows, val);
+      if (all.v.length < 150) return;
+      const lo = bound(all, strict);
       if (!(lo > 0) || lo <= bestLo + 0.005) return;
-      const older = rows.filter((s) => s.ts < mid).map(val).filter((x): x is number => Number.isFinite(x));
-      const newer = rows.filter((s) => s.ts >= mid).map(val).filter((x): x is number => Number.isFinite(x));
-      if (older.length < 50 || newer.length < 50 || !(zBound(older, 1.96) > 0) || !(zBound(newer, 1.96) > 0)) return;
-      const m = meanCI(all);
+      const o = valuesOf(older, val);
+      const nw = valuesOf(newer, val);
+      if (o.v.length < 50 || nw.v.length < 50 || !(bound(o, 0.95) > 0) || !(bound(nw, 0.95) > 0)) return;
+      const m = clusteredMeanCI(all.v, all.h);
       bestLo = lo;
       suggestion = {
         minScore: min,
@@ -232,8 +246,8 @@ export function buildReport(samples: Sample[], settings: Settings, model: ModelS
         slPct: g.sl,
         avgRet: m.mean,
         retLo: lo,
-        n: all.length,
-        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`,
+        n: all.v.length,
+        why: `${thresholdSource === "entries" ? "buying when coins first reached" : "coins scoring"} ${min}+ with TP ${g.tp}% / SL ${g.sl}% averaged ${(m.mean * 100).toFixed(1)}% per trade over ${all.v.length} outcomes, positive in both the older and newer half of the data (strict worst case ${(lo * 100).toFixed(1)}%)`,
       };
     });
   }

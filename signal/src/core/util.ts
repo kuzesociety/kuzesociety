@@ -240,6 +240,76 @@ export function meanCI(xs: number[]): { mean: number; lo: number; hi: number; n:
   return { mean: m, lo: m - 1.96 * se, hi: m + 1.96 * se, n };
 }
 
+/** The hour a moment falls in: coins bought in the same hour share the market's mood. */
+export const hourOf = (ts: number) => Math.floor(ts / 3_600_000);
+
+/**
+ * Mean with a two-sided range at `level`, counting the evidence per cluster (for outcomes: the
+ * hour the coin was bought — one hot hour of the market lifts every coin in it, so it is one
+ * piece of evidence, not dozens). The range is the wider of trade by trade (Student's t) and
+ * hour by hour (cluster-robust standard error, Student's t for the number of hours), so it is
+ * never more confident than either. Fewer than 2 clusters: no range.
+ */
+export function clusteredMeanCI(xs: ArrayLike<number>, cluster: ArrayLike<number>, level = 0.95): { mean: number; lo: number; hi: number; n: number; clusters: number } {
+  const n = xs.length;
+  if (n === 0) return { mean: NaN, lo: NaN, hi: NaN, n, clusters: 0 };
+  let sum = 0;
+  for (let i = 0; i < n; i++) sum += xs[i]!;
+  const m = sum / n;
+  const by = new Map<number, number>();
+  let sq = 0;
+  for (let i = 0; i < n; i++) {
+    const d = xs[i]! - m;
+    sq += d * d;
+    by.set(cluster[i]!, (by.get(cluster[i]!) ?? 0) + d);
+  }
+  const c = by.size;
+  if (n < 2 || c < 2) return { mean: m, lo: -Infinity, hi: Infinity, n, clusters: c };
+  const q = 1 - (1 - level) / 2;
+  let cs = 0;
+  for (const v of by.values()) cs += v * v;
+  const half = Math.max(tInv(q, n - 1) * Math.sqrt(sq / (n - 1) / n), tInv(q, c - 1) * Math.sqrt((cs / (n * n)) * (c / (c - 1))));
+  return { mean: m, lo: m - half, hi: m + half, n, clusters: c };
+}
+
+/** Standard normal quantile (Acklam's rational approximation, |error| < 1.2e-9). */
+export function normInv(p: number): number {
+  const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239];
+  const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
+  const c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
+  const d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416];
+  const q = Math.min(Math.max(p, 1e-12), 1 - 1e-12);
+  if (q < 0.02425) {
+    const t = Math.sqrt(-2 * Math.log(q));
+    return (((((c[0]! * t + c[1]!) * t + c[2]!) * t + c[3]!) * t + c[4]!) * t + c[5]!) / ((((d[0]! * t + d[1]!) * t + d[2]!) * t + d[3]!) * t + 1);
+  }
+  if (q > 1 - 0.02425) return -normInv(1 - q);
+  const t = q - 0.5;
+  const r = t * t;
+  return ((((((a[0]! * r + a[1]!) * r + a[2]!) * r + a[3]!) * r + a[4]!) * r + a[5]!) * t) / (((((b[0]! * r + b[1]!) * r + b[2]!) * r + b[3]!) * r + b[4]!) * r + 1);
+}
+
+/**
+ * Student's t quantile for `df` degrees of freedom and p ≥ 0.5: exact for 1 and 2, otherwise the
+ * Cornish–Fisher expansion around the normal quantile (within 0.5% from 4 degrees of freedom at
+ * the levels used here; at 3 it errs on the cautious side).
+ */
+export function tInv(p: number, df: number): number {
+  if (!(df >= 1)) return Infinity;
+  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
+  if (df === 2) {
+    const a = 2 * p - 1;
+    return a * Math.sqrt(2 / (1 - a * a));
+  }
+  const z = normInv(p);
+  const z2 = z * z;
+  const g1 = (z * (z2 + 1)) / 4;
+  const g2 = (z * ((5 * z2 + 16) * z2 + 3)) / 96;
+  const g3 = (z * (((3 * z2 + 19) * z2 + 17) * z2 - 15)) / 384;
+  const g4 = (z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945)) / 92_160;
+  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
+}
+
 /** Format lamports as SOL with sensible precision. */
 export function sol(lamports: number, digits = 3): string {
   return (lamports / 1e9).toFixed(digits);

@@ -12,7 +12,7 @@
  */
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "./outcomes.js";
 import { ENTRY_POINTS, type Settings } from "./settings.js";
-import { rng } from "./util.js";
+import { clusteredMeanCI, rng } from "./util.js";
 
 /** Time limits tried with every take-profit/stop-loss pair (minutes, 0 = none). */
 export const HOLDS_MIN = [0, 10, 30, 60] as const;
@@ -140,43 +140,7 @@ const DEFAULTS: Required<Omit<EdgeOptions, "now">> = {
   seed: 7,
 };
 
-/** Standard normal quantile (Acklam's rational approximation, |error| < 1.2e-9). */
-export function normInv(p: number): number {
-  const a = [-3.969683028665376e1, 2.209460984245205e2, -2.759285104469687e2, 1.38357751867269e2, -3.066479806614716e1, 2.506628277459239];
-  const b = [-5.447609879822406e1, 1.615858368580409e2, -1.556989798598866e2, 6.680131188771972e1, -1.328068155288572e1];
-  const c = [-7.784894002430293e-3, -3.223964580411365e-1, -2.400758277161838, -2.549732539343734, 4.374664141464968, 2.938163982698783];
-  const d = [7.784695709041462e-3, 3.224671290700398e-1, 2.445134137142996, 3.754408661907416];
-  const q = Math.min(Math.max(p, 1e-12), 1 - 1e-12);
-  if (q < 0.02425) {
-    const t = Math.sqrt(-2 * Math.log(q));
-    return (((((c[0]! * t + c[1]!) * t + c[2]!) * t + c[3]!) * t + c[4]!) * t + c[5]!) / ((((d[0]! * t + d[1]!) * t + d[2]!) * t + d[3]!) * t + 1);
-  }
-  if (q > 1 - 0.02425) return -normInv(1 - q);
-  const t = q - 0.5;
-  const r = t * t;
-  return ((((((a[0]! * r + a[1]!) * r + a[2]!) * r + a[3]!) * r + a[4]!) * r + a[5]!) * t) / (((((b[0]! * r + b[1]!) * r + b[2]!) * r + b[3]!) * r + b[4]!) * r + 1);
-}
-
-/**
- * Student's t quantile for `df` degrees of freedom and p ≥ 0.5: exact for 1 and 2, otherwise the
- * Cornish–Fisher expansion around the normal quantile (within 0.5% from 4 degrees of freedom at
- * the levels used here; at 3 it errs on the cautious side).
- */
-export function tInv(p: number, df: number): number {
-  if (!(df >= 1)) return Infinity;
-  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
-  if (df === 2) {
-    const a = 2 * p - 1;
-    return a * Math.sqrt(2 / (1 - a * a));
-  }
-  const z = normInv(p);
-  const z2 = z * z;
-  const g1 = (z * (z2 + 1)) / 4;
-  const g2 = (z * ((5 * z2 + 16) * z2 + 3)) / 96;
-  const g3 = (z * (((3 * z2 + 19) * z2 + 17) * z2 - 15)) / 384;
-  const g4 = (z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945)) / 92_160;
-  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
-}
+export { normInv, tInv } from "./util.js";
 
 /** Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h]. */
 function exitReturn(s: Sample, c: number, h: number): number {
@@ -262,32 +226,21 @@ function stats(d: Data, idx: Int32Array, e: number, z: number): EdgeStats {
 /**
  * Holdout statistics, at confidence 1 − 0.05/`tests` (corrected for the candidates checked at
  * once). Coins bought in the same hour share the market's mood — one hot hour lifts all of
- * them — so the uncertainty is also counted hour by hour (a cluster-robust standard error,
- * with Student's t for the number of hours), and the more cautious of the two bounds is kept:
- * a rule carried by one lucky hour does not pass as dozens of independent wins.
+ * them — so the bound counts the evidence hour by hour as well as trade by trade and keeps the
+ * more cautious one (util clusteredMeanCI): a rule carried by one lucky hour does not pass as
+ * dozens of independent wins.
  */
 function holdoutStats(d: Data, idx: Int32Array, e: number, tests: number): EdgeStats {
   const st = stats(d, idx, e, 0);
-  const n = st.n;
-  if (n < 2) return st;
-  const byHour = new Map<number, number>();
-  let sq = 0;
+  if (st.n < 2) return st;
+  const vals = new Float64Array(idx.length);
+  const hours = new Int32Array(idx.length);
   for (let k = 0; k < idx.length; k++) {
-    const v = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]! - st.mean;
-    sq += v * v;
-    const h = d.hour[idx[k]!]!;
-    byHour.set(h, (byHour.get(h) ?? 0) + v);
+    vals[k] = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]!;
+    hours[k] = d.hour[idx[k]!]!;
   }
-  const hours = byHour.size;
-  const q = 1 - 0.05 / Math.max(1, tests);
-  const seIid = Math.sqrt(sq / (n - 1) / n);
-  let lo = st.mean - tInv(q, n - 1) * seIid;
-  if (hours < 2) return { ...st, lo: -Infinity };
-  let cs = 0;
-  for (const v of byHour.values()) cs += v * v;
-  const seHour = Math.sqrt((cs / (n * n)) * (hours / (hours - 1)));
-  lo = Math.min(lo, st.mean - tInv(q, hours - 1) * seHour);
-  return { ...st, lo };
+  // one-sided at 0.05/tests = two-sided at 1 − 0.1/tests
+  return { ...st, lo: clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, tests)).lo };
 }
 
 interface SearchResult {
