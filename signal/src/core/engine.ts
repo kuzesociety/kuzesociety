@@ -42,6 +42,12 @@ export interface EngineConfig {
   rescoreMs: number;
   sweepMs: number;
   feedStaleMs: number;
+  /**
+   * the trade feed silent this long is an outage: open would-be trades are cut at its last message
+   * (what happened meanwhile was not seen). A reconnect of a few seconds is not one — the bot's
+   * own positions see the same short delay.
+   */
+  feedOutageMs: number;
   paperStartSol: number;
   outcomeLatencyMs: number;
   outcomeSizeSol: number;
@@ -64,6 +70,7 @@ export const DEFAULT_CONFIG: EngineConfig = {
   rescoreMs: 1_000,
   sweepMs: 5_000,
   feedStaleMs: 45_000,
+  feedOutageMs: 60_000,
   paperStartSol: 10,
   outcomeLatencyMs: 1_500,
   outcomeSizeSol: 0.1,
@@ -806,6 +813,16 @@ export class Engine {
     return !anyAlive;
   }
 
+  /** The last message from any trade feed the bot relies on. */
+  private feedLastMsgAt(): number {
+    return Math.max(0, ...[...this.feeds.values()].filter((f) => f.critical && f.status !== "off").map((f) => f.lastMsgAt));
+  }
+
+  /** Down and silent for `feedOutageMs` or more: an outage, not a reconnect of a few seconds. */
+  feedOutage(): boolean {
+    return this.feedDown() && this.now - this.feedLastMsgAt() >= this.cfg.feedOutageMs;
+  }
+
   setFeedHealth(h: FeedHealth) {
     this.feeds.set(h.name, h);
   }
@@ -1282,8 +1299,9 @@ export class Engine {
       const t = this.tokens.get(p.mint);
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
-    // the trade feed went quiet (network, a sleeping computer): what happened meanwhile was not seen
-    if (this.feedDown()) this.outcomes.blindAll(Math.max(0, ...[...this.feeds.values()].filter((f) => f.critical).map((f) => f.lastMsgAt)));
+    // the trade feed went quiet for a while (network, a sleeping computer): what happened meanwhile
+    // was not seen. A reconnect of a few seconds is not an outage — entries wait, recordings go on.
+    if (this.feedOutage()) this.outcomes.blindAll(this.feedLastMsgAt());
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
     const every = this.modelReady() ? 5 * 60_000 : 30_000;
     if (now - this.lastNormalize >= every) {

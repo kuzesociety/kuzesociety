@@ -7884,6 +7884,7 @@ var DEFAULT_CONFIG = {
   rescoreMs: 1e3,
   sweepMs: 5e3,
   feedStaleMs: 45e3,
+  feedOutageMs: 6e4,
   paperStartSol: 10,
   outcomeLatencyMs: 1500,
   outcomeSizeSol: 0.1,
@@ -8436,6 +8437,14 @@ var Engine = class {
     const anyAlive = critical.some((f2) => f2.status === "open" && this.now - f2.lastMsgAt < this.cfg.feedStaleMs);
     return !anyAlive;
   }
+  /** The last message from any trade feed the bot relies on. */
+  feedLastMsgAt() {
+    return Math.max(0, ...[...this.feeds.values()].filter((f2) => f2.critical && f2.status !== "off").map((f2) => f2.lastMsgAt));
+  }
+  /** Down and silent for `feedOutageMs` or more: an outage, not a reconnect of a few seconds. */
+  feedOutage() {
+    return this.feedDown() && this.now - this.feedLastMsgAt() >= this.cfg.feedOutageMs;
+  }
   setFeedHealth(h) {
     this.feeds.set(h.name, h);
   }
@@ -8878,7 +8887,7 @@ var Engine = class {
       const t = this.tokens.get(p.mint);
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
-    if (this.feedDown()) this.outcomes.blindAll(Math.max(0, ...[...this.feeds.values()].filter((f2) => f2.critical).map((f2) => f2.lastMsgAt)));
+    if (this.feedOutage()) this.outcomes.blindAll(this.feedLastMsgAt());
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
     const every = this.modelReady() ? 5 * 6e4 : 3e4;
     if (now - this.lastNormalize >= every) {
@@ -11728,7 +11737,7 @@ function decisions(st, now) {
 }
 function coverage(samples, now, feedDown) {
   const title = "The bot sees what it records";
-  if (feedDown) return { key: "coverage", status: "fail", title, detail: "The trade feed is down: no new entries, and nothing open is observed until it is back." };
+  if (feedDown) return { key: "coverage", status: "fail", title, detail: "No trade data for over a minute: no new entries, and nothing open is observed until it is back." };
   const day2 = samples.filter((s) => s.resolvedAt >= now - DAY2 && s.ov === 1);
   const amm = day2.filter((s) => s.stage === "amm");
   const ammBlind = amm.filter((s) => s.blind !== void 0 && s.blindBy !== "feed");
@@ -11738,7 +11747,7 @@ function coverage(samples, now, feedDown) {
     parts.push(
       `${Math.round(ammBlind.length / amm.length * 100)}% of graduated-coin recordings stopped being watched before they ended (the bot follows at most 40 pools). Those count only for rules whose time limit they were watched through, never by how they ended, so rules on graduated coins that hold long are judged by the bot's own trades`
     );
-  if (outage) parts.push(`${Math.round(outage / day2.length * 100)}% of all recordings were cut by times the trade feed was down`);
+  if (outage) parts.push(`${Math.round(outage / day2.length * 100)}% of all recordings were cut by trade-feed outages (a minute or more without data)`);
   if (!day2.length) return { key: "coverage", status: "info", title, detail: "No recordings finished in the last 24 h yet." };
   const status = outage / day2.length > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
   return { key: "coverage", status, title, detail: parts.length ? `Last 24 h: ${parts.join("; ")}.` : `Last 24 h: all ${day2.length} recordings were observed to the end.` };
@@ -12090,7 +12099,7 @@ ${next}`);
         autopilotOn: engine.settings.autopilot,
         autopilot: this.autopilot,
         learning: { everyHours: this.o.everyHours, lastRun: this.lastRun, lastError: this.lastError, edgesAt: this.lastEdges?.generatedAt ?? 0, startedAt: this.startedAt },
-        engine: { errors: engine.stats.errors, saveFailures: engine.saved.failures, saveError: engine.saved.error, feedDown: engine.feedDown() },
+        engine: { errors: engine.stats.errors, saveFailures: engine.saved.failures, saveError: engine.saved.error, feedDown: engine.feedOutage() },
         storage: this.o.storage?.()
       });
       if (samples) this.recordedCheck = checks.find((c) => c.key === "recorded") ?? null;

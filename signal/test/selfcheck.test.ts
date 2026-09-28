@@ -102,7 +102,7 @@ describe("self-check", () => {
     expect(c.detail).toMatch(/75% of graduated-coin recordings stopped being watched before they ended/);
     const outage = [...Array.from({ length: 5 }, () => s("curve", 60, "feed")), ...Array.from({ length: 20 }, () => s("curve"))];
     expect(coverage(outage, NOW, false).status).toBe("warn");
-    expect(coverage(outage, NOW, false).detail).toMatch(/20% of all recordings were cut by times the trade feed was down/);
+    expect(coverage(outage, NOW, false).detail).toMatch(/20% of all recordings were cut by trade-feed outages/);
     // coins bought on the curve whose pool was dropped after they graduated are not an outage
     const graduated = [...Array.from({ length: 5 }, () => s("curve", 900)), ...Array.from({ length: 20 }, () => s("curve"))];
     expect(coverage(graduated, NOW, false).status).toBe("ok");

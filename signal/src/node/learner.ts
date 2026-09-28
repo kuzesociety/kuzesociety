@@ -342,7 +342,7 @@ export class Learner {
         autopilotOn: engine.settings.autopilot,
         autopilot: this.autopilot,
         learning: { everyHours: this.o.everyHours, lastRun: this.lastRun, lastError: this.lastError, edgesAt: this.lastEdges?.generatedAt ?? 0, startedAt: this.startedAt },
-        engine: { errors: engine.stats.errors, saveFailures: engine.saved.failures, saveError: engine.saved.error, feedDown: engine.feedDown() },
+        engine: { errors: engine.stats.errors, saveFailures: engine.saved.failures, saveError: engine.saved.error, feedDown: engine.feedOutage() },
         storage: this.o.storage?.(),
       });
       if (samples) this.recordedCheck = checks.find((c) => c.key === "recorded") ?? null;

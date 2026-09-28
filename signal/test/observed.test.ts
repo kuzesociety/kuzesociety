@@ -74,7 +74,7 @@ describe("outcomes nobody observed", () => {
   });
 
   it("when the trade feed goes quiet, what happened meanwhile is not counted", () => {
-    const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN, feedStaleMs: 10_000 });
+    const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN, feedStaleMs: 10_000, feedOutageMs: 30_000 });
     const feed = { name: "rpc", status: "open" as const, lastMsgAt: s.now, msgs: 1, reconnects: 0, errors: 0, critical: true };
     s.engine.setFeedHealth(feed);
     const mint = key(81);
@@ -85,6 +85,7 @@ describe("outcomes nobody observed", () => {
     }
     const quietFrom = s.now;
     s.advance(60_000); // no messages for a minute (network down, the computer asleep)
+    expect(s.engine.feedOutage()).toBe(true);
     s.engine.setFeedHealth({ ...feed, lastMsgAt: s.now });
     s.advance(25 * MIN);
     const mine = s.engine.samples.toArray().filter((x) => x.mint === mint);
@@ -94,6 +95,33 @@ describe("outcomes nobody observed", () => {
       if (x.ts < quietFrom) expect(x.blind).toBeCloseTo((quietFrom - x.ts) / 1000, 0);
       else expect(x.blind).toBe(0);
     }
+  });
+
+  it("a reconnect of a few seconds is not an outage: nothing is cut, entries only wait meanwhile", () => {
+    const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN });
+    const feed = { name: "rpc", status: "open" as "open" | "connecting", lastMsgAt: s.now, msgs: 1, reconnects: 0, errors: 0, critical: true };
+    s.engine.setFeedHealth(feed);
+    const mint = key(83);
+    s.create(mint, key(84));
+    for (let i = 0; i < 6; i++) {
+      s.buy(mint, key(8400 + i), 0.3, 3000);
+      s.engine.setFeedHealth({ ...feed, lastMsgAt: s.now });
+    }
+    // the socket drops and is back 8 seconds later (the public feed does this now and then)
+    s.engine.setFeedHealth({ ...feed, status: "connecting", lastMsgAt: s.now });
+    expect(s.engine.feedDown()).toBe(true);
+    s.advance(8_000);
+    expect(s.engine.feedOutage()).toBe(false); // entries wait, but nothing is cut and the self-check raises no alarm
+    s.engine.setFeedHealth({ ...feed, status: "open", lastMsgAt: s.now });
+    expect(s.engine.feedDown()).toBe(false);
+    // …and carries on while the would-be trades finish
+    for (let t = 0; t < 25 * MIN; t += 20_000) {
+      s.advance(20_000);
+      s.engine.setFeedHealth({ ...feed, lastMsgAt: s.now });
+    }
+    const mine = s.engine.samples.toArray().filter((x) => x.mint === mint);
+    expect(mine.length).toBeGreaterThan(0);
+    for (const x of mine) expect(x.blind).toBeUndefined();
   });
 
   it("a recording counts for a rule only if it was watched for the rule's whole time, not by how early it ended", () => {

@@ -3499,6 +3499,7 @@ var DEFAULT_CONFIG = {
   rescoreMs: 1e3,
   sweepMs: 5e3,
   feedStaleMs: 45e3,
+  feedOutageMs: 6e4,
   paperStartSol: 10,
   outcomeLatencyMs: 1500,
   outcomeSizeSol: 0.1,
@@ -4051,6 +4052,14 @@ var Engine = class {
     const anyAlive = critical.some((f2) => f2.status === "open" && this.now - f2.lastMsgAt < this.cfg.feedStaleMs);
     return !anyAlive;
   }
+  /** The last message from any trade feed the bot relies on. */
+  feedLastMsgAt() {
+    return Math.max(0, ...[...this.feeds.values()].filter((f2) => f2.critical && f2.status !== "off").map((f2) => f2.lastMsgAt));
+  }
+  /** Down and silent for `feedOutageMs` or more: an outage, not a reconnect of a few seconds. */
+  feedOutage() {
+    return this.feedDown() && this.now - this.feedLastMsgAt() >= this.cfg.feedOutageMs;
+  }
   setFeedHealth(h) {
     this.feeds.set(h.name, h);
   }
@@ -4493,7 +4502,7 @@ var Engine = class {
       const t = this.tokens.get(p.mint);
       if (t && p.status === "open") this.evaluatePosition(p, t, now);
     }
-    if (this.feedDown()) this.outcomes.blindAll(Math.max(0, ...[...this.feeds.values()].filter((f2) => f2.critical).map((f2) => f2.lastMsgAt)));
+    if (this.feedOutage()) this.outcomes.blindAll(this.feedLastMsgAt());
     this.outcomes.sweep(now, (m) => this.tokens.get(m));
     const every = this.modelReady() ? 5 * 6e4 : 3e4;
     if (now - this.lastNormalize >= every) {
