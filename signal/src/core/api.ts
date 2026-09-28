@@ -19,6 +19,8 @@ export interface ApiContext {
   edgesRun: () => Promise<unknown>;
   /** what the scoring model learned (core/insight: LearningView) */
   learning?: () => unknown | Promise<unknown>;
+  /** the autopilot: rule in use, ranking, decisions (core/autopilot: AutopilotView) */
+  autopilot?: () => unknown;
   onSettingsChanged?: () => void;
 }
 
@@ -83,6 +85,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ report: ctx.edges() ?? null });
       case "/api/learning":
         return ok({ view: (await ctx.learning?.()) ?? null });
+      case "/api/autopilot":
+        return ok({ view: ctx.autopilot?.() ?? null });
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));

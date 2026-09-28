@@ -51,7 +51,7 @@ export function Learn() {
 
       <WhatItLearned />
 
-      <EdgeFinder mode={settings?.mode ?? "paper"} />
+      <EdgeFinder mode={settings?.mode ?? "paper"} autopilot={!!settings?.autopilot} />
 
       {r.suggestion && (
         <div class="card" style="margin-top:12px;border-color:var(--flare)">
@@ -220,7 +220,7 @@ export function Learn() {
 const hrs = (h: number) => (h >= 48 ? `${(h / 24).toFixed(1)} days` : `${h.toFixed(0)} h`);
 
 /** Rules the bot found on its own, and how they did on newer data the search never saw. */
-function EdgeFinder({ mode }: { mode: string }) {
+function EdgeFinder({ mode, autopilot }: { mode: string; autopilot: boolean }) {
   const [r, setR] = useState<(EdgeReport & { running?: boolean }) | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
@@ -247,7 +247,7 @@ function EdgeFinder({ mode }: { mode: string }) {
     try {
       await api("/api/settings", s.settings);
       setConfirm(null);
-      toast("Now trading this rule — score, exits, time limit and filters were replaced");
+      toast(`Now trading this rule — score, exits, time limit and filters were replaced${autopilot ? ". Autopilot is off now: you picked the rule" : ""}`);
     } catch (e) {
       toast(String((e as Error).message));
     }

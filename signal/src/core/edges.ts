@@ -89,6 +89,8 @@ export interface EdgeFound extends EdgeRule {
   /** holdout average for every coin at the same entry (score level or fixed point) with the same exit */
   baseline: number;
   tradesPerDay: number;
+  /** average minutes a trade of this rule stays open (holdout), which decides how many your open-position limit allows */
+  avgHoldMin?: number;
   /** settings that make the bot trade exactly this rule */
   settings: Partial<Settings>;
 }
@@ -155,6 +157,27 @@ export function normInv(p: number): number {
   return ((((((a[0]! * r + a[1]!) * r + a[2]!) * r + a[3]!) * r + a[4]!) * r + a[5]!) * t) / (((((b[0]! * r + b[1]!) * r + b[2]!) * r + b[3]!) * r + b[4]!) * r + 1);
 }
 
+/**
+ * Student's t quantile for `df` degrees of freedom and p ≥ 0.5: exact for 1 and 2, otherwise the
+ * Cornish–Fisher expansion around the normal quantile (within 0.5% from 4 degrees of freedom at
+ * the levels used here; at 3 it errs on the cautious side).
+ */
+export function tInv(p: number, df: number): number {
+  if (!(df >= 1)) return Infinity;
+  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
+  if (df === 2) {
+    const a = 2 * p - 1;
+    return a * Math.sqrt(2 / (1 - a * a));
+  }
+  const z = normInv(p);
+  const z2 = z * z;
+  const g1 = (z * (z2 + 1)) / 4;
+  const g2 = (z * ((5 * z2 + 16) * z2 + 3)) / 96;
+  const g3 = (z * (((3 * z2 + 19) * z2 + 17) * z2 - 15)) / 384;
+  const g4 = (z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945)) / 92_160;
+  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
+}
+
 /** Net return of a sample for grid combo `c` with time limit HOLDS_MIN[h]. */
 function exitReturn(s: Sample, c: number, h: number): number {
   const ret = s.grid[c]!;
@@ -172,14 +195,15 @@ function describe(r: EdgeRule): string {
   return `${entry}${when} · sell at +${r.tp}% or −${r.sl}%${time}`;
 }
 
-function settingsFor(r: EdgeRule): Partial<Settings> {
+/** Settings that trade the rule as it was tested: without a time limit, a trade was followed for `horizonMs`. */
+function settingsFor(r: EdgeRule, horizonMs: number): Partial<Settings> {
   const cond = CONDITIONS.find((c) => c.key === r.cond)!;
   const out: Partial<Settings> = {
     entryAt: r.at ?? "score",
     minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,
-    maxHoldMin: r.hold || 360,
+    maxHoldMin: r.hold || Math.round(horizonMs / 60_000),
     trailPct: 0,
     takeInitials: false,
     reentry: false,
@@ -213,6 +237,8 @@ interface Data {
   row: (i: number) => number;
   shift: Float64Array;
   wins: (v: number) => boolean;
+  /** the hour each entry happened in (counted from the first entry) */
+  hour: Int32Array;
 }
 
 function stats(d: Data, idx: Int32Array, e: number, z: number): EdgeStats {
@@ -231,6 +257,37 @@ function stats(d: Data, idx: Int32Array, e: number, z: number): EdgeStats {
   const mean = sum / n;
   const variance = Math.max(0, (sq - n * mean * mean) / (n - 1));
   return { n, mean, lo: mean - z * Math.sqrt(variance / n), winRate: w / n };
+}
+
+/**
+ * Holdout statistics, at confidence 1 − 0.05/`tests` (corrected for the candidates checked at
+ * once). Coins bought in the same hour share the market's mood — one hot hour lifts all of
+ * them — so the uncertainty is also counted hour by hour (a cluster-robust standard error,
+ * with Student's t for the number of hours), and the more cautious of the two bounds is kept:
+ * a rule carried by one lucky hour does not pass as dozens of independent wins.
+ */
+function holdoutStats(d: Data, idx: Int32Array, e: number, tests: number): EdgeStats {
+  const st = stats(d, idx, e, 0);
+  const n = st.n;
+  if (n < 2) return st;
+  const byHour = new Map<number, number>();
+  let sq = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = d.R[d.row(idx[k]!) * EXITS + e]! - d.shift[e]! - st.mean;
+    sq += v * v;
+    const h = d.hour[idx[k]!]!;
+    byHour.set(h, (byHour.get(h) ?? 0) + v);
+  }
+  const hours = byHour.size;
+  const q = 1 - 0.05 / Math.max(1, tests);
+  const seIid = Math.sqrt(sq / (n - 1) / n);
+  let lo = st.mean - tInv(q, n - 1) * seIid;
+  if (hours < 2) return { ...st, lo: -Infinity };
+  let cs = 0;
+  for (const v of byHour.values()) cs += v * v;
+  const seHour = Math.sqrt((cs / (n * n)) * (hours / (hours - 1)));
+  lo = Math.min(lo, st.mean - tInv(q, hours - 1) * seHour);
+  return { ...st, lo };
 }
 
 interface SearchResult {
@@ -258,8 +315,7 @@ function* search(d: Data, groups: Group[], o: Required<Omit<EdgeOptions, "now">>
   }
   best.sort((a, b) => b.disc.lo - a.disc.lo);
   const cands = best.slice(0, o.candidates);
-  const z = normInv(1 - 0.05 / Math.max(1, cands.length));
-  const checked = cands.map((c) => ({ c, hold: stats(d, c.g.hold, c.e, z) }));
+  const checked = cands.map((c) => ({ c, hold: holdoutStats(d, c.g.hold, c.e, cands.length) }));
   const passed = checked.filter((x) => x.hold.n >= o.minHoldout && wins(x.hold) >= o.minWins && x.hold.lo > 0);
   return { tested, cands: checked, passed };
 }
@@ -367,8 +423,11 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     });
   }
 
+  // the hour of every entry: coins bought in the same hour share the market's mood (holdoutStats)
+  const hour = new Int32Array(n);
+  for (let i = 0; i < n; i++) hour[i] = Math.floor((rows[i]!.ts - t0) / 3_600_000);
   const zero = new Float64Array(EXITS);
-  const real: Data = { R, row: (i) => i, shift: zero, wins: (v) => v > 0 };
+  const real: Data = { R, row: (i) => i, shift: zero, wins: (v) => v > 0, hour };
   const run = yield* search(real, groups, o);
 
   const toFound = (c: Scored, holdSt: EdgeStats): EdgeFound => {
@@ -376,6 +435,12 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
     const rule: EdgeRule = { level: c.g.level, cond: CONDITIONS[c.g.cond]!.key, tp: GRID[combo]!.tp, sl: GRID[combo]!.sl, hold: HOLDS_MIN[c.e % HOLDS_MIN.length]! };
     if (c.g.at) rule.at = c.g.at;
     const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0)!;
+    // time in the trade: until the target, the stop or the time limit, whichever came first
+    let held = 0;
+    for (const i of c.g.hold) {
+      const sec = rows[i]!.gridT?.[combo] ?? 0;
+      held += rule.hold ? Math.min(sec, rule.hold * 60) : sec;
+    }
     return {
       ...rule,
       text: describe(rule),
@@ -383,7 +448,8 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
       tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i]!.mint)).size / c.g.holdDays,
-      settings: settingsFor(rule),
+      avgHoldMin: c.g.hold.length ? held / c.g.hold.length / 60 : undefined,
+      settings: settingsFor(rule, o.horizonMs),
     };
   };
   const survivors = run.passed.map((x) => toFound(x.c, x.hold)).sort((a, b) => b.holdout.lo - a.holdout.lo);
@@ -407,7 +473,7 @@ function* steps(samples: Sample[], opts: EdgeOptions): Generator<void, EdgeRepor
       perm[i] = perm[j]!;
       perm[j] = t;
     }
-    counts.push((yield* search({ R, row: (i) => perm[i]!, shift: colMean, wins: (v) => v > 0 }, groups, o)).passed.length);
+    counts.push((yield* search({ R, row: (i) => perm[i]!, shift: colMean, wins: (v) => v > 0, hour }, groups, o)).passed.length);
   }
 
   const discHours = hours * (2 / 3);

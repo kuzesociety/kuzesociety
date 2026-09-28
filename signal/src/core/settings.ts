@@ -85,6 +85,13 @@ export interface Settings {
   paperLatencyMs: number;
   /** paper mode: let the learner switch TP/SL/score to the best-proven combination */
   autoTune: boolean;
+  /**
+   * Autopilot: trade the best rule the edge finder has proven on data it never saw, switch as
+   * soon as a clearly better one is proven, drop a rule that stops working in practice, and
+   * with real money wait until a rule meets the go-live bar (core/autopilot.ts). Changing the
+   * rule by hand turns it off.
+   */
+  autopilot: boolean;
   filters: Filters;
 }
 
@@ -137,6 +144,7 @@ export const DEFAULT_SETTINGS: Settings = {
   reentry: false,
   paperLatencyMs: 1500,
   autoTune: false,
+  autopilot: true,
   filters: {
     minMcapSol: 0,
     maxMcapSol: 0,
@@ -203,6 +211,7 @@ export function sanitizeSettings(input: unknown, base: Settings = DEFAULT_SETTIN
     reentry: bool(i.reentry, b.reentry),
     paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
     autoTune: bool(i.autoTune, b.autoTune),
+    autopilot: bool(i.autopilot, b.autopilot),
     filters: {
       minMcapSol: clamp(num(f.minMcapSol, bf.minMcapSol), 0, 1e7),
       maxMcapSol: clamp(num(f.maxMcapSol, bf.maxMcapSol), 0, 1e7),

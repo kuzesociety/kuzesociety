@@ -89,6 +89,7 @@ export class DashboardServer {
       edges: () => (ctx.learner.lastEdges ? { ...ctx.learner.lastEdges, running: ctx.learner.edgesRunning } : null),
       edgesRun: () => ctx.learner.findEdges(),
       learning: () => this.learning(),
+      autopilot: () => ctx.learner.autopilotView(),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;
         // the engine's onSettings hook already broadcasts the change to open dashboards

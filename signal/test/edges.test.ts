@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { CONDITIONS, findEdges, normInv } from "../src/core/edges.js";
+import { CONDITIONS, findEdges, normInv, tInv } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import { priorModel } from "../src/core/model.js";
 import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "../src/core/outcomes.js";
@@ -42,6 +42,13 @@ describe("edge finder", () => {
     expect(normInv(0.975)).toBeCloseTo(1.959964, 5);
     expect(normInv(0.5)).toBeCloseTo(0, 9);
     expect(normInv(1 - 0.05 / 20)).toBeCloseTo(2.807034, 5);
+    // Student's t (the holdout counts evidence per hour, often a few dozen hours)
+    expect(tInv(0.975, 10)).toBeCloseTo(2.228139, 3);
+    expect(tInv(0.9975, 15)).toBeCloseTo(3.286039, 3);
+    expect(tInv(0.9975, 5)).toBeCloseTo(4.773341, 1);
+    expect(tInv(0.9975, 2)).toBeCloseTo(14.08905, 3);
+    expect(tInv(0.9975, 3)).toBeGreaterThan(5.840909);
+    expect(tInv(0.9975, 5000)).toBeCloseTo(normInv(0.9975), 2);
   });
 
   it("finds a planted edge and checks it on data it never saw", () => {
@@ -58,6 +65,8 @@ describe("edge finder", () => {
     expect(top.level).toBeGreaterThanOrEqual(70);
     expect(top.holdout.lo).toBeGreaterThan(0);
     expect(top.holdout.mean).toBeGreaterThan(top.baseline);
+    // how long its trades last decides how many the open-position limit allows (autopilot)
+    expect(top.avgHoldMin).toBeGreaterThan(0);
     // the rule is directly runnable: graduated coins only, score-only (no filter needed)
     expect(top.settings).toMatchObject({ minScore: top.level, tpPct: 50, slPct: 20, tradeCurve: false, tradeAmm: true, scoreOnly: true });
     expect(rep.placebo.avgSurvivors).toBeLessThanOrEqual(1);
@@ -86,6 +95,37 @@ describe("edge finder", () => {
     expect(rep.status).toBe("ok");
     expect(rep.survivors).toHaveLength(0);
     expect(rep.placebo.maxSurvivors).toBeLessThanOrEqual(1);
+  });
+
+  it("a hot hour of the market is not an edge: evidence is counted hour by hour", () => {
+    // No rule has an edge (every exit breaks even), but the market has moods: in half the hours
+    // every coin wins more often, in the other half less. Counting trade by trade, the holdout
+    // "proved" 7 rules on this data (seed 6) and 1 on seed 3; hour by hour, none.
+    const moody = (seed: number) => {
+      const r = rng(seed);
+      const mood = Array.from({ length: 48 }, () => (r() < 0.5 ? -0.9 : 0.9));
+      const out: Sample[] = [];
+      for (let i = 0; i < 20_000; i++) {
+        const ts = T0 + r() * 2 * 86_400_000;
+        const h = Math.floor((ts - T0) / 3_600_000);
+        const level = ENTRY_LEVELS[Math.floor(r() * ENTRY_LEVELS.length)]!;
+        const s: Sample = {
+          id: `e${i}x${level}`, kind: "entry", tag: `x${level}`, mint: `m${i}`, symbol: "X", ts, stage: r() < 0.4 ? "amm" : "curve",
+          score: level, p: 0.1, x: [], entryMcap: 50, tp: 100, sl: 50, y: 0, ret: 0, exit: "timeout", grid: [], maxMult: 1, minMult: 1, secToMax: 0,
+          resolvedAt: ts + 3_600_000, gv: GRID_VERSION, gridT: [], path: PATH_MIN.map(() => -0.3 + r() * 0.4),
+          f: { mcap: 20 + r() * 600, age: 10 + r() * 1800, buyers: Math.floor(3 + r() * 300), top10: 0.1 + r() * 0.7, bundle: r() * 0.4, devShare: r() * 0.3, devSold: r() < 0.5 ? 0 : r(), socials: Math.floor(r() * 4), launches24h: 1 + Math.floor(r() * 6) },
+        };
+        for (const g of GRID) {
+          // break-even: a loss averages the stop + 5%
+          const pWin = Math.min(0.97, Math.max(0.01, ((g.sl + 5) / (g.tp + g.sl + 5)) * (1 + mood[h]!)));
+          s.grid.push(r() < pWin ? g.tp / 100 : -(g.sl / 100 + 0.1 * r()));
+          s.gridT!.push(30 + r() * 3000);
+        }
+        out.push(s);
+      }
+      return out;
+    };
+    for (const seed of [3, 6]) expect(findEdges(moody(seed), { now: T0 + 3 * 86_400_000, placeboRuns: 0 }).survivors).toHaveLength(0);
   });
 
   it("filter rules carry the exact filter, with every other filter open", () => {

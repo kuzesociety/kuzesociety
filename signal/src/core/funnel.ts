@@ -27,6 +27,7 @@ export interface SignalRecord {
 export const REASON_TEXT: Record<string, string> = {
   bot_off: "Auto-trading is paused",
   kill_switch: "Kill switch is on",
+  autopilot_hold: "Autopilot: no rule is proven enough for real money yet — new live entries wait (open positions are still managed)",
   stage_off: "This stage is turned off in settings",
   non_sol_quote: "Coin is not paired with SOL",
   already_traded: "Already traded this coin (re-entry off)",

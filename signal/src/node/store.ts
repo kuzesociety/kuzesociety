@@ -308,6 +308,21 @@ export class DataStore {
     }
   }
 
+  /** The autopilot's state: the rule in use, the user's own rule, benched rules, decisions. */
+  saveAutopilot(state: unknown) {
+    writeFileAtomic(join(this.dir, "autopilot.json"), JSON.stringify(state));
+  }
+
+  loadAutopilot(): unknown {
+    const p = join(this.dir, "autopilot.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
   /** What each training run tried and decided (the dashboard's learning history). */
   saveLearnHistory(runs: unknown[]) {
     writeFileAtomic(join(this.dir, "models", "history.json"), JSON.stringify(runs));

@@ -1,22 +1,29 @@
 /**
- * Periodic learning: retrain the scorer on the outcomes recorded on disk, compare it with the
- * current model on newer coins neither has seen, switch only when the new one wins there, and
- * keep a history of every run. Training pauses every few milliseconds, so trading never waits
- * for it. Between runs, the current model is checked on coins it has never seen; when the
- * score clearly stops working, it retrains early instead of waiting for the schedule.
+ * The bot's learning loop, every 2 hours (the first 20 minutes after start):
+ *   1. retrain the scorer on the outcomes recorded on disk (when due: LEARN_EVERY_HOURS) and
+ *      switch models only when the new one predicts coins neither has seen better;
+ *   2. search for rules that made money on data the search never saw (core/edges);
+ *   3. autopilot: trade the best proven rule, at once (core/autopilot) — and every 10 minutes,
+ *      check the rule in use against its own trades;
+ *   4. check the score on coins it has never seen, and retrain early if it clearly stopped working.
+ * Everything pauses every few milliseconds, so trading never waits for it.
  */
+import { type AutopilotState, autopilotView, decideAutopilot, emptyAutopilot } from "../core/autopilot.js";
 import { type EdgeReport, findEdgesAsync } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
 import { type FreshCheck, type LearnRun, adoptionNote, freshCheckAsync, learnRunOf } from "../core/insight.js";
 import { type TrainReport, trainAndSelectAsync, trainingRows } from "../core/learn.js";
 import type { ModelSpec } from "../core/model.js";
 import { buildReport } from "../core/report.js";
+import type { Settings } from "../core/settings.js";
 import type { Logger } from "../core/util.js";
 import type { DataStore } from "./store.js";
 
+const CYCLE_MS = 2 * 3_600_000;
+
 export class Learner {
   lastRun = 0;
-  /** when the next scheduled run starts (0 = learning is off) */
+  /** when the scorer next retrains (0 = learning is off) */
   nextRun = 0;
   lastReports: TrainReport[] = [];
   lastError = "";
@@ -27,10 +34,15 @@ export class Learner {
   history: LearnRun[] = [];
   /** the current model on finished outcomes of coins it has not seen */
   lastFresh: FreshCheck[] = [];
+  autopilot: AutopilotState = emptyAutopilot();
   private timer: NodeJS.Timeout | null = null;
-  private edgeTimer: NodeJS.Timeout | null = null;
+  /** the autopilot checks the rule in use against its own trades between searches too */
+  private watch: NodeJS.Timeout | null = null;
+  private nextCycle = 0;
   private driftNoted = "";
   private stopped = false;
+  private piloting = false;
+  private seen: Pick<Settings, "autopilot" | "mode"> | null = null;
 
   constructor(
     private o: {
@@ -45,43 +57,63 @@ export class Learner {
       onEdges?: (msg: string) => void;
       /** the score stopped working on new coins and an early retrain started */
       onDrift?: (msg: string) => void;
+      /** the autopilot switched rules, held or released live entries, or benched a rule */
+      onAutopilot?: (msg: string) => void;
     },
   ) {}
 
   start() {
     this.lastEdges = (this.o.store.loadEdges() as EdgeReport | null) ?? null;
     this.history = this.o.store.loadLearnHistory() as LearnRun[];
+    this.autopilot = { ...emptyAutopilot(), ...((this.o.store.loadAutopilot() as Partial<AutopilotState> | null) ?? {}) };
+    this.seen = { autopilot: this.o.engine().settings.autopilot, mode: this.o.engine().settings.mode };
+    // with real money and nothing proven, entries wait from the first second — not after the first search
+    this.pilot();
     if (this.o.everyHours <= 0) return;
-    // first attempt 20 minutes after start (enough fresh data to validate on)
-    this.schedule(20 * 60_000, "start");
-    // the edge search runs more often than learning: its answer is what people check
-    this.edgeTimer = setInterval(() => void this.periodic(), 2 * 3_600_000);
-    this.edgeTimer.unref?.();
+    this.schedule(20 * 60_000);
+    this.watch = setInterval(() => this.pilot(), 10 * 60_000);
+    this.watch.unref?.();
   }
 
   stop() {
     this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
-    if (this.edgeTimer) clearInterval(this.edgeTimer);
+    if (this.watch) clearInterval(this.watch);
     this.nextRun = 0;
   }
 
-  private schedule(ms: number, trigger: LearnRun["trigger"] = "schedule") {
+  private schedule(ms: number) {
     if (this.timer) clearTimeout(this.timer);
-    this.nextRun = Date.now() + ms;
-    this.timer = setTimeout(() => void this.run(trigger), ms);
+    this.nextCycle = Date.now() + ms;
+    this.nextRun = this.learnDueAfter(this.nextCycle);
+    this.timer = setTimeout(() => void this.cycle(), ms);
     this.timer.unref?.();
+  }
+
+  /** The first cycle at or after `from` at which the scorer is due to retrain. */
+  private learnDueAfter(from: number): number {
+    const due = this.lastRun ? this.lastRun + this.o.everyHours * 3_600_000 - 5 * 60_000 : 0;
+    let t = from;
+    while (t < due) t += CYCLE_MS;
+    return t;
   }
 
   private horizonMs() {
     return this.o.engine().cfg.outcomeHorizonMs;
   }
 
-  /** Every 2 hours: the edge search, then the check of the current model on coins it has not seen. */
-  private async periodic() {
-    const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
-    await this.findEdges(samples);
-    await this.checkDrift(samples);
+  /** One pass of the loop (see the top of the file). */
+  private async cycle() {
+    try {
+      const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
+      if (Date.now() >= this.learnDueAfter(Date.now() - 1)) await this.learn(samples, this.lastRun ? "schedule" : "start");
+      await this.findEdges(samples);
+      await this.checkDrift(samples);
+    } catch (e) {
+      this.o.log.error("learning cycle failed", { err: String(e) });
+    } finally {
+      if (!this.stopped) this.schedule(CYCLE_MS);
+    }
   }
 
   /** Retrains early when a trained model clearly stopped ranking new coins (once per model). */
@@ -98,24 +130,27 @@ export class Learner {
     const msg = `📉 The score ${bad.verdict === "lost" ? "stopped working" : "got clearly weaker"} on ${bad.n} ${where} coins it has not seen: it ranked winners above losers ${(bad.auc * 100).toFixed(0)}% of the time${was}. The market may have changed — retraining now instead of waiting for the schedule.`;
     this.o.log.warn(msg);
     this.o.onDrift?.(msg);
-    void this.run("drift");
+    await this.learn(samples, "drift");
+    await this.findEdges(samples);
   }
 
-  /** Searches the recorded outcomes for rules that made money on their own (see core/edges). */
+  /** Searches the recorded outcomes for rules that made money on their own (see core/edges), then lets the autopilot act on the answer. */
   async findEdges(samples?: ReturnType<DataStore["loadSamples"]>): Promise<EdgeReport | null> {
     if (this.edgesRunning) return this.lastEdges;
     this.edgesRunning = true;
     try {
-      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5 });
+      const rep = await findEdgesAsync(samples ?? (await this.o.store.loadSamplesAsync(this.o.sampleDays)), { placeboRuns: 5, horizonMs: this.horizonMs() });
       const before = new Set(this.lastEdges?.survivors.map((x) => x.text) ?? []);
       const fresh = rep.survivors.filter((x) => !before.has(x.text));
       this.lastEdges = rep;
       if (fresh.length) {
         const lines = fresh.slice(0, 3).map((x) => `• ${x.text}: ${(x.holdout.mean * 100).toFixed(1)}% per trade on unseen data (${x.holdout.n} trades)`);
-        this.o.onEdges?.(`🔎 Edge finder: ${fresh.length} new rule${fresh.length > 1 ? "s" : ""} held up on data the search never saw.\n${lines.join("\n")}\nPaper-trade it from the Learn tab.`);
+        const next = this.o.engine().settings.autopilot ? "The autopilot trades the best proven rule by itself." : "Paper-trade it from the Learn tab, or turn the autopilot on (Bot tab).";
+        this.o.onEdges?.(`🔎 Edge finder: ${fresh.length} new rule${fresh.length > 1 ? "s" : ""} held up on data the search never saw.\n${lines.join("\n")}\n${next}`);
       }
       this.o.store.saveEdges(rep);
       if (rep.survivors.length) this.o.log.info("edge search", { survivors: rep.survivors.map((x) => x.text), placebo: rep.placebo.avgSurvivors });
+      this.pilot();
       return rep;
     } catch (e) {
       this.o.log.error("edge search failed", { err: String(e) });
@@ -125,11 +160,52 @@ export class Learner {
     }
   }
 
-  /** Paper mode + autoTune: adopt a robustly better TP/SL/score combination. */
+  /** The autopilot's decision for this moment, applied (after every search, every 10 minutes, at start, and when the mode or the autopilot switch changes). */
+  pilot() {
+    if (this.piloting) return;
+    this.piloting = true;
+    try {
+      const engine = this.o.engine();
+      const d = decideAutopilot({ report: this.lastEdges, settings: engine.settings, state: this.autopilot, closed: engine.closed.toArray(), now: Date.now() });
+      this.autopilot = d.state;
+      if (d.settings) {
+        engine.updateSettings(d.settings, "autopilot");
+        engine.persistNow();
+      }
+      engine.autoHold = d.state.holding ? d.state.holdReason || "no rule proven for real money" : null;
+      if (d.note) {
+        this.o.log.info(`autopilot: ${d.note}`);
+        this.o.onAutopilot?.(`🤖 Autopilot: ${d.note}`);
+      }
+      if (d.note || d.action !== "none") {
+        try {
+          this.o.store.saveAutopilot(this.autopilot);
+        } catch (e) {
+          this.o.log.warn("autopilot state save failed", { err: String(e) });
+        }
+      }
+    } finally {
+      this.piloting = false;
+    }
+  }
+
+  /** The engine's settings changed: turning the autopilot on or off, or a new mode, is acted on at once. */
+  onSettings(s: Settings) {
+    const was = this.seen;
+    this.seen = { autopilot: s.autopilot, mode: s.mode };
+    if (!was || was.autopilot !== s.autopilot || was.mode !== s.mode) this.pilot();
+  }
+
+  /** What the dashboard shows about the autopilot. */
+  autopilotView() {
+    return autopilotView({ report: this.lastEdges, settings: this.o.engine().settings, state: this.autopilot, now: Date.now() });
+  }
+
+  /** Paper mode + autoTune (and the autopilot off): adopt a robustly better TP/SL/score combination. */
   autoTune(samples: ReturnType<DataStore["loadSamples"]>) {
     const engine = this.o.engine();
     const s = engine.settings;
-    if (!s.autoTune || s.mode !== "paper") return;
+    if (!s.autoTune || s.mode !== "paper" || s.autopilot) return;
     const r = buildReport(samples, s, engine.model, engine.closed.toArray(), Date.now());
     if (!r.suggestion) return;
     const g = r.suggestion;
@@ -141,13 +217,22 @@ export class Learner {
     this.o.onTune?.(msg);
   }
 
+  /** Retrain now (the dashboard's button), then search for rules and let the autopilot act. */
   async run(trigger: LearnRun["trigger"] = "manual"): Promise<TrainReport[]> {
+    if (this.running) return this.lastReports;
+    const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
+    const reports = await this.learn(samples, trigger);
+    void this.findEdges(samples);
+    return reports;
+  }
+
+  /** Retrains the scorer on `samples` and switches models when the new one wins on coins neither has seen. */
+  private async learn(samples: ReturnType<DataStore["loadSamples"]>, trigger: LearnRun["trigger"]): Promise<TrainReport[]> {
     if (this.running) return this.lastReports;
     this.running = true;
     const started = Date.now();
     try {
       const engine = this.o.engine();
-      const samples = await this.o.store.loadSamplesAsync(this.o.sampleDays);
       const current = engine.model;
       const rows = trainingRows(samples, current.target, { horizonMs: this.horizonMs() });
       const { model, reports } = await trainAndSelectAsync(current, rows, { now: Date.now() });
@@ -174,7 +259,6 @@ export class Learner {
         this.o.log.warn("learning history save failed", { err: String(e) });
       }
       this.autoTune(samples);
-      void this.findEdges(samples);
       return reports;
     } catch (e) {
       this.lastError = String(e);
@@ -182,7 +266,7 @@ export class Learner {
       return [];
     } finally {
       this.running = false;
-      if (this.o.everyHours > 0 && !this.stopped) this.schedule(this.o.everyHours * 3_600_000);
+      if (this.nextCycle) this.nextRun = this.learnDueAfter(this.nextCycle);
     }
   }
 }

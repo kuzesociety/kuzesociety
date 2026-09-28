@@ -774,6 +774,7 @@ var DEFAULT_SETTINGS = {
   reentry: false,
   paperLatencyMs: 1500,
   autoTune: false,
+  autopilot: true,
   filters: {
     minMcapSol: 0,
     maxMcapSol: 0,
@@ -835,6 +836,7 @@ function sanitizeSettings(input, base = DEFAULT_SETTINGS) {
     reentry: bool(i.reentry, b.reentry),
     paperLatencyMs: clamp(num(i.paperLatencyMs, b.paperLatencyMs), ...LIMITS.paperLatencyMs),
     autoTune: bool(i.autoTune, b.autoTune),
+    autopilot: bool(i.autopilot, b.autopilot),
     filters: {
       minMcapSol: clamp(num(f2.minMcapSol, bf.minMcapSol), 0, 1e7),
       maxMcapSol: clamp(num(f2.maxMcapSol, bf.maxMcapSol), 0, 1e7),
@@ -923,6 +925,21 @@ function normInv(p) {
   const r = t * t;
   return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * t / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1);
 }
+function tInv(p, df) {
+  if (!(df >= 1)) return Infinity;
+  if (df === 1) return Math.tan(Math.PI * (p - 0.5));
+  if (df === 2) {
+    const a = 2 * p - 1;
+    return a * Math.sqrt(2 / (1 - a * a));
+  }
+  const z = normInv(p);
+  const z2 = z * z;
+  const g1 = z * (z2 + 1) / 4;
+  const g2 = z * ((5 * z2 + 16) * z2 + 3) / 96;
+  const g3 = z * (((3 * z2 + 19) * z2 + 17) * z2 - 15) / 384;
+  const g4 = z * ((((79 * z2 + 776) * z2 + 1482) * z2 - 1920) * z2 - 945) / 92160;
+  return z + g1 / df + g2 / df ** 2 + g3 / df ** 3 + g4 / df ** 4;
+}
 function exitReturn(s, c, h) {
   const ret = s.grid[c];
   const hold = HOLDS_MIN[h];
@@ -937,14 +954,14 @@ function describe(r) {
   const entry = r.at ? `Buy every coin ${ENTRY_POINTS[r.at] ?? r.at}` : `Buy when a coin first reaches ${r.level}`;
   return `${entry}${when} \xB7 sell at +${r.tp}% or \u2212${r.sl}%${time}`;
 }
-function settingsFor(r) {
+function settingsFor(r, horizonMs) {
   const cond = CONDITIONS.find((c) => c.key === r.cond);
   const out = {
     entryAt: r.at ?? "score",
     minScore: r.at ? 0 : r.level,
     tpPct: r.tp,
     slPct: r.sl,
-    maxHoldMin: r.hold || 360,
+    maxHoldMin: r.hold || Math.round(horizonMs / 6e4),
     trailPct: 0,
     takeInitials: false,
     reentry: false,
@@ -972,6 +989,29 @@ function stats(d, idx, e, z) {
   const variance = Math.max(0, (sq - n * mean2 * mean2) / (n - 1));
   return { n, mean: mean2, lo: mean2 - z * Math.sqrt(variance / n), winRate: w / n };
 }
+function holdoutStats(d, idx, e, tests) {
+  const st = stats(d, idx, e, 0);
+  const n = st.n;
+  if (n < 2) return st;
+  const byHour = /* @__PURE__ */ new Map();
+  let sq = 0;
+  for (let k = 0; k < idx.length; k++) {
+    const v = d.R[d.row(idx[k]) * EXITS + e] - d.shift[e] - st.mean;
+    sq += v * v;
+    const h = d.hour[idx[k]];
+    byHour.set(h, (byHour.get(h) ?? 0) + v);
+  }
+  const hours = byHour.size;
+  const q = 1 - 0.05 / Math.max(1, tests);
+  const seIid = Math.sqrt(sq / (n - 1) / n);
+  let lo = st.mean - tInv(q, n - 1) * seIid;
+  if (hours < 2) return { ...st, lo: -Infinity };
+  let cs = 0;
+  for (const v of byHour.values()) cs += v * v;
+  const seHour = Math.sqrt(cs / (n * n) * (hours / (hours - 1)));
+  lo = Math.min(lo, st.mean - tInv(q, hours - 1) * seHour);
+  return { ...st, lo };
+}
 var wins = (st) => Math.round(st.winRate * st.n);
 function* search(d, groups, o) {
   let tested = 0;
@@ -990,8 +1030,7 @@ function* search(d, groups, o) {
   }
   best.sort((a, b) => b.disc.lo - a.disc.lo);
   const cands = best.slice(0, o.candidates);
-  const z = normInv(1 - 0.05 / Math.max(1, cands.length));
-  const checked = cands.map((c) => ({ c, hold: stats(d, c.g.hold, c.e, z) }));
+  const checked = cands.map((c) => ({ c, hold: holdoutStats(d, c.g.hold, c.e, cands.length) }));
   const passed = checked.filter((x) => x.hold.n >= o.minHoldout && wins(x.hold) >= o.minWins && x.hold.lo > 0);
   return { tested, cands: checked, passed };
 }
@@ -1067,14 +1106,21 @@ function* steps(samples, opts) {
       groups.push({ level: fam.level, at: fam.at, cond: ci, disc: Int32Array.from(disc), hold: Int32Array.from(hold), holdDays });
     });
   }
+  const hour2 = new Int32Array(n);
+  for (let i = 0; i < n; i++) hour2[i] = Math.floor((rows[i].ts - t0) / 36e5);
   const zero = new Float64Array(EXITS);
-  const real = { R, row: (i) => i, shift: zero, wins: (v) => v > 0 };
+  const real = { R, row: (i) => i, shift: zero, wins: (v) => v > 0, hour: hour2 };
   const run = yield* search(real, groups, o);
   const toFound = (c, holdSt) => {
     const combo = Math.floor(c.e / HOLDS_MIN.length);
     const rule = { level: c.g.level, cond: CONDITIONS[c.g.cond].key, tp: GRID[combo].tp, sl: GRID[combo].sl, hold: HOLDS_MIN[c.e % HOLDS_MIN.length] };
     if (c.g.at) rule.at = c.g.at;
     const all = groups.find((g) => g.level === c.g.level && g.at === c.g.at && g.cond === 0);
+    let held = 0;
+    for (const i of c.g.hold) {
+      const sec = rows[i].gridT?.[combo] ?? 0;
+      held += rule.hold ? Math.min(sec, rule.hold * 60) : sec;
+    }
     return {
       ...rule,
       text: describe(rule),
@@ -1082,7 +1128,8 @@ function* steps(samples, opts) {
       holdout: holdSt,
       baseline: stats(real, all.hold, c.e, 0).mean,
       tradesPerDay: new Set(Array.from(c.g.hold, (i) => rows[i].mint)).size / c.g.holdDays,
-      settings: settingsFor(rule)
+      avgHoldMin: c.g.hold.length ? held / c.g.hold.length / 60 : void 0,
+      settings: settingsFor(rule, o.horizonMs)
     };
   };
   const survivors = run.passed.map((x) => toFound(x.c, x.hold)).sort((a, b) => b.holdout.lo - a.holdout.lo);
@@ -1101,7 +1148,7 @@ function* steps(samples, opts) {
       perm[i] = perm[j];
       perm[j] = t;
     }
-    counts.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0 }, groups, o)).passed.length);
+    counts.push((yield* search({ R, row: (i) => perm[i], shift: colMean, wins: (v) => v > 0, hour: hour2 }, groups, o)).passed.length);
   }
   const discHours = hours * (2 / 3);
   return {
@@ -2396,6 +2443,7 @@ function ammPostReserves(s, reservesArePreTrade = true) {
 var REASON_TEXT = {
   bot_off: "Auto-trading is paused",
   kill_switch: "Kill switch is on",
+  autopilot_hold: "Autopilot: no rule is proven enough for real money yet \u2014 new live entries wait (open positions are still managed)",
   stage_off: "This stage is turned off in settings",
   non_sol_quote: "Coin is not paired with SOL",
   already_traded: "Already traded this coin (re-entry off)",
@@ -2687,6 +2735,51 @@ var NarrativeIndex = class {
     return this.launches.length;
   }
 };
+
+// src/core/presets.ts
+var BASE = { entryAt: "score", trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+var PRESETS = [
+  {
+    key: "plan",
+    name: "Your plan",
+    note: "Buy when a coin reaches 75 \xB7 sell at 2\xD7 or \u221250% \xB7 time limit 4 hours. Score only.",
+    proof: "yours",
+    settings: { ...BASE, minScore: 75, tpPct: 100, slPct: 50, maxHoldMin: 240 }
+  },
+  {
+    key: "sim-momentum",
+    name: "Simulator finding: fast momentum",
+    note: "Buy when a coin reaches 95 \xB7 sell at +500% or \u221220%, or after 10 minutes. It won in the simulator, which has more momentum than pump.fun \u2014 paper-test it before trusting it.",
+    proof: "unproven",
+    settings: { ...BASE, minScore: 95, tpPct: 500, slPct: 20, maxHoldMin: 10 }
+  }
+];
+
+// src/core/autopilot.ts
+var HOUR2 = 36e5;
+var RULE_KEYS = ["entryAt", "minScore", "tpPct", "slPct", "maxHoldMin", "trailPct", "takeInitials", "reentry", "tradeCurve", "tradeAmm", "scoreOnly", "filters"];
+var AUTOPILOT = {
+  /** an edge-finder answer older than this switches nothing */
+  freshMs: 6 * HOUR2,
+  /** a new rule replaces one that still holds up only when it earns this much more per day */
+  better: 1.25,
+  /** real money: the go-live bar */
+  liveMinTrades: 100,
+  liveMinLo: 0.02,
+  /** the search is trusted only while it "finds" at most this many rules per run on shuffled data (1 in 5 runs) */
+  maxPlacebo: 0.2,
+  /** trades of the rule in use before its own results are judged */
+  checkAfter: 30,
+  benchMs: 24 * HOUR2
+};
+function ruleOf(s) {
+  const out = {};
+  for (const k of RULE_KEYS) out[k] = k === "filters" ? { ...s.filters } : s[k];
+  return out;
+}
+function ruleChanged(a, b) {
+  return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
+}
 
 // src/core/token.ts
 var BUCKET_MS = 5e3;
@@ -3242,6 +3335,8 @@ var Engine = class {
   stats;
   paperBalance;
   killed = false;
+  /** the autopilot holds new entries (real money, no rule proven at the go-live bar); exits go on */
+  autoHold = null;
   executor;
   solUsd = 0;
   log;
@@ -3694,6 +3789,7 @@ var Engine = class {
     const s = this.settings;
     if (!s.enabled) return "bot_off";
     if (this.killed) return "kill_switch";
+    if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
     if (t.stage === "curve" && !s.tradeCurve || t.stage === "amm" && !s.tradeAmm) return "stage_off";
     if (t.stage === "migrating") return "migrating";
@@ -4055,9 +4151,19 @@ var Engine = class {
   // -------------------------------------------------------------------------
   // Controls
   // -------------------------------------------------------------------------
-  updateSettings(patch) {
+  /**
+   * Apply a settings change. `by`: who made it — a change to the rule (entry, coins, exits) made
+   * by the user turns the autopilot off, so it never undoes what the user just chose.
+   */
+  updateSettings(patch, by = "user") {
     const prev = this.settings;
     const next = sanitizeSettings(patch, prev);
+    const p = patch && typeof patch === "object" ? patch : {};
+    if (by === "user" && prev.autopilot && next.autopilot && p.autopilot !== true && ruleChanged(prev, next)) {
+      next.autopilot = false;
+      this.journal({ type: "autopilot_off", why: "rule changed by hand" });
+    }
+    if (!next.autopilot) this.autoHold = null;
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
     this.outcomes.setOptions({ latencyMs: next.paperLatencyMs, costs: this.costs });
@@ -4305,6 +4411,7 @@ var Engine = class {
   restore(s) {
     if (!s || s.v !== 1) return;
     this.settings = sanitizeSettings(s.settings ?? {}, DEFAULT_SETTINGS);
+    if (s.settings && typeof s.settings === "object" && !("autopilot" in s.settings) && this.settings.mode === "live") this.settings.autopilot = false;
     this.costs = { ...this.costs, priorityFeeSol: this.settings.priorityFeeSol, platformFeePct: this.settings.platformFeePct };
     this.paperBalance = Number.isFinite(s.paperBalance) ? s.paperBalance : this.paperBalance;
     this.killed = !!s.killed;
@@ -5390,6 +5497,19 @@ var DataStore = class {
     try {
       const m = JSON.parse(readFileSync(p, "utf8"));
       return validateModel(m) ? m : null;
+    } catch {
+      return null;
+    }
+  }
+  /** The autopilot's state: the rule in use, the user's own rule, benched rules, decisions. */
+  saveAutopilot(state) {
+    writeFileAtomic(join(this.dir, "autopilot.json"), JSON.stringify(state));
+  }
+  loadAutopilot() {
+    const p = join(this.dir, "autopilot.json");
+    if (!existsSync(p)) return null;
+    try {
+      return JSON.parse(readFileSync(p, "utf8"));
     } catch {
       return null;
     }

@@ -27,6 +27,7 @@ import {
   quoteBuy,
   quoteSell,
 } from "./positions.js";
+import { ruleChanged } from "./autopilot.js";
 import { DEFAULT_SETTINGS, type Settings, exitPlanFrom, sanitizeSettings } from "./settings.js";
 import { type TokenState, TokenState as Token } from "./token.js";
 import type { AmmSwap, MarketEvent, TradeEvent } from "./types.js";
@@ -258,6 +259,8 @@ export class Engine {
   stats: EngineStats;
   paperBalance: number;
   killed = false;
+  /** the autopilot holds new entries (real money, no rule proven at the go-live bar); exits go on */
+  autoHold: string | null = null;
   executor?: Executor;
   solUsd = 0;
   log: Logger;
@@ -743,6 +746,7 @@ export class Engine {
     const s = this.settings;
     if (!s.enabled) return "bot_off";
     if (this.killed) return "kill_switch";
+    if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
     if ((t.stage === "curve" && !s.tradeCurve) || (t.stage === "amm" && !s.tradeAmm)) return "stage_off";
     if (t.stage === "migrating") return "migrating";
@@ -1129,9 +1133,19 @@ export class Engine {
   // Controls
   // -------------------------------------------------------------------------
 
-  updateSettings(patch: unknown): Settings {
+  /**
+   * Apply a settings change. `by`: who made it — a change to the rule (entry, coins, exits) made
+   * by the user turns the autopilot off, so it never undoes what the user just chose.
+   */
+  updateSettings(patch: unknown, by: "user" | "autopilot" = "user"): Settings {
     const prev = this.settings;
     const next = sanitizeSettings(patch, prev);
+    const p = (patch && typeof patch === "object" ? patch : {}) as Record<string, unknown>;
+    if (by === "user" && prev.autopilot && next.autopilot && p.autopilot !== true && ruleChanged(prev, next)) {
+      next.autopilot = false;
+      this.journal({ type: "autopilot_off", why: "rule changed by hand" });
+    }
+    if (!next.autopilot) this.autoHold = null;
     this.settings = next;
     this.costs = { ...this.costs, priorityFeeSol: next.priorityFeeSol, platformFeePct: next.platformFeePct };
     this.outcomes.setOptions({ latencyMs: next.paperLatencyMs, costs: this.costs });
@@ -1396,6 +1410,8 @@ export class Engine {
   restore(s: PersistedState) {
     if (!s || s.v !== 1) return;
     this.settings = sanitizeSettings(s.settings ?? {}, DEFAULT_SETTINGS);
+    // saved before the autopilot existed: real money keeps its own rule until the owner turns it on (with the live confirmation)
+    if (s.settings && typeof s.settings === "object" && !("autopilot" in s.settings) && this.settings.mode === "live") this.settings.autopilot = false;
     this.costs = { ...this.costs, priorityFeeSol: this.settings.priorityFeeSol, platformFeePct: this.settings.platformFeePct };
     this.paperBalance = Number.isFinite(s.paperBalance) ? s.paperBalance : this.paperBalance;
     this.killed = !!s.killed;

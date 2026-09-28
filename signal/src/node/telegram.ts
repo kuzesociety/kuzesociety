@@ -5,9 +5,11 @@
  */
 import type { EdgeReport } from "../core/edges.js";
 import type { Engine } from "../core/engine.js";
+import type { AutopilotView } from "../core/autopilot.js";
 import type { LearningView } from "../core/insight.js";
 import type { Position } from "../core/positions.js";
 import { type Preset, followsPreset, ruleSummary } from "../core/presets.js";
+import type { Settings } from "../core/settings.js";
 import type { Logger } from "../core/util.js";
 import { getJson, postJson } from "./http.js";
 
@@ -43,6 +45,8 @@ export class Telegram {
       edges?: () => { report: EdgeReport | null; running: boolean };
       /** what the scoring model learned */
       learning?: () => Promise<LearningView | null> | LearningView | null;
+      /** the autopilot's state */
+      autopilot?: () => AutopilotView | null;
     },
   ) {}
 
@@ -166,6 +170,12 @@ export class Telegram {
     const e = this.o.engine();
     const [cmd, arg, extra] = text.split(/\s+/) as [string, string | undefined, string | undefined];
     const n = arg !== undefined ? Number(arg) : NaN;
+    /** A rule change by hand; says so when it turned the autopilot off. */
+    const byHand = (patch: Partial<Settings>): string => {
+      const was = e.settings.autopilot;
+      e.updateSettings(patch);
+      return was && !e.settings.autopilot ? "\n🤖 Autopilot off: you picked the rule. /autopilot on hands it back." : "";
+    };
     switch (cmd.toLowerCase().replace(/@.*/, "")) {
       case "/start":
       case "/help":
@@ -175,6 +185,7 @@ export class Telegram {
           "/strategy — list the strategies · /strategy 2 — switch to one",
           "/edges — has the bot found an edge? (checked every 2 h)",
           "/learn — what the score learned, and is it still working?",
+          "/autopilot on|off — trade the best proven rule by itself",
           "/positions — open trades",
           "/pause · /resume — auto-trading off/on",
           "/score 75 — minimum score",
@@ -198,6 +209,7 @@ export class Telegram {
         return [
           `<b>${s.enabled ? "▶️ Trading" : "⏸ Paused"}</b> · ${s.mode.toUpperCase()}${e.killed ? " · KILL SWITCH" : ""}`,
           `Score ≥ ${s.minScore}${s.scoreOnly ? " (score only)" : ""} · TP ${s.tpPct}% · SL ${s.slPct}% · ${s.maxHoldMin > 0 ? `sell after ${s.maxHoldMin} min` : "no time limit"} · ${s.positionSol} SOL`,
+          autopilotLine(this.o.autopilot?.() ?? null, s.autopilot),
           `Today ${sol(a.dayPnl)} SOL · total ${sol(a.realized)} SOL · ${a.wins}W/${a.losses}L`,
           `Open ${a.open.length}/${s.maxOpen}`,
           data,
@@ -205,6 +217,18 @@ export class Telegram {
         ]
           .filter(Boolean)
           .join("\n");
+      }
+      case "/autopilot": {
+        const want = arg?.toLowerCase();
+        if (want === "on" || want === "off") {
+          if (e.settings.mode === "live" && want === "on" && extra?.toLowerCase() !== "yes")
+            return "You are trading LIVE. The autopilot switches the rule by itself (never the size or the limits) and waits while no rule is proven for real money. Send /autopilot on yes to turn it on.";
+          e.updateSettings({ autopilot: want === "on" });
+          return want === "on"
+            ? "🤖 Autopilot is on: it trades the best rule proven on data the search never saw, and switches when a clearly better one is proven."
+            : "Autopilot is off: the rule stays as it is now. Change it with /strategy or in the Bot tab.";
+        }
+        return autopilotMessage(this.o.autopilot?.() ?? null, e.settings.autopilot);
       }
       case "/strategy":
       case "/strategies": {
@@ -223,8 +247,8 @@ export class Telegram {
         if (!Number.isInteger(pick) || pick < 1 || pick > list.length) return `Send a number from 1 to ${list.length}, or /strategy to see them.`;
         const p = list[pick - 1]!;
         if (e.settings.mode === "live" && extra?.toLowerCase() !== "yes") return `You are trading LIVE. Send /strategy ${pick} yes to switch to ${esc(p.name)}.`;
-        e.updateSettings(p.settings);
-        return `${e.settings.enabled ? "▶️ Now trading" : "Strategy set (auto-trading is paused — /resume to start)"}: <b>${esc(p.name)}</b> · ${ruleSummary(e.settings)}`;
+        const off = byHand(p.settings);
+        return `${e.settings.enabled ? "▶️ Now trading" : "Strategy set (auto-trading is paused — /resume to start)"}: <b>${esc(p.name)}</b> · ${ruleSummary(e.settings)}${off}`;
       }
       case "/edges": {
         const x = this.o.edges?.();
@@ -246,30 +270,34 @@ export class Telegram {
       case "/resume":
         e.updateSettings({ enabled: true });
         return `▶️ Auto-trading on · score ≥ ${e.settings.minScore}`;
-      case "/score":
+      case "/score": {
         if (!Number.isFinite(n)) return "Usage: /score 75";
-        e.updateSettings({ minScore: n });
-        return `Minimum score set to ${e.settings.minScore}.`;
-      case "/tp":
+        const off = byHand({ minScore: n });
+        return `Minimum score set to ${e.settings.minScore}.${off}`;
+      }
+      case "/tp": {
         if (!Number.isFinite(n)) return "Usage: /tp 100";
-        e.updateSettings({ tpPct: n });
-        return `Take profit ${e.settings.tpPct}% (new positions).`;
-      case "/sl":
+        const off = byHand({ tpPct: n });
+        return `Take profit ${e.settings.tpPct}% (new positions).${off}`;
+      }
+      case "/sl": {
         if (!Number.isFinite(n)) return "Usage: /sl 50";
-        e.updateSettings({ slPct: n });
-        return `Stop loss ${e.settings.slPct}% (new positions).`;
-      case "/hold":
+        const off = byHand({ slPct: n });
+        return `Stop loss ${e.settings.slPct}% (new positions).${off}`;
+      }
+      case "/hold": {
         if (!Number.isFinite(n)) return "Usage: /hold 10 (minutes, 0 = no limit)";
-        e.updateSettings({ maxHoldMin: n });
-        return e.settings.maxHoldMin > 0 ? `New positions sell after ${e.settings.maxHoldMin} min if neither TP nor SL was hit.` : "No time limit for new positions.";
+        const off = byHand({ maxHoldMin: n });
+        return `${e.settings.maxHoldMin > 0 ? `New positions sell after ${e.settings.maxHoldMin} min if neither TP nor SL was hit.` : "No time limit for new positions."}${off}`;
+      }
       case "/size":
         if (!Number.isFinite(n)) return "Usage: /size 0.1";
         e.updateSettings({ positionSol: n });
         return `Position size ${e.settings.positionSol} SOL.`;
       case "/scoreonly": {
         const on = arg === "on" || arg === "1" || arg === "true";
-        e.updateSettings({ scoreOnly: on });
-        return on ? "Score only: ON — filters ignored, account limits still apply." : "Score only: OFF — filters active.";
+        const off = byHand({ scoreOnly: on });
+        return `${on ? "Score only: ON — filters ignored, account limits still apply." : "Score only: OFF — filters active."}${off}`;
       }
       case "/kill":
         e.setKill(true, true);
@@ -366,5 +394,32 @@ export function learningMessage(v: LearningView, now = Date.now()): string {
   if (last) lines.push(`Last learning run ${agoText(last.at, now)}: ${last.adopted ? "switched to a better score" : esc(last.stages.map((s) => s.reason).find(Boolean) ?? "kept the current score")}.`);
   if (v.status.running) lines.push("Learning right now…");
   else if (v.status.nextRun > now) lines.push(`Next run in ${Math.max(1, Math.round((v.status.nextRun - now) / 60_000))} min.`);
+  return lines.join("\n");
+}
+
+/** One line for /status. */
+function autopilotLine(v: AutopilotView | null, on: boolean): string {
+  if (!on) return "🤖 Autopilot off (/autopilot on)";
+  if (!v) return "🤖 Autopilot on";
+  if (v.holding) return `🤖 Autopilot: holding new live entries — ${esc(v.holdReason)}`;
+  return v.active ? "🤖 Autopilot: trading the best proven rule" : "🤖 Autopilot: on your own rule until one is proven";
+}
+
+/** The autopilot, for the phone. */
+export function autopilotMessage(v: AutopilotView | null, on: boolean, now = Date.now()): string {
+  if (!on) return "🤖 Autopilot is off. Send /autopilot on to let the bot trade the best proven rule by itself.";
+  if (!v) return "🤖 Autopilot is on.";
+  const lines = ["🤖 <b>Autopilot is on</b>"];
+  if (v.holding) lines.push(`⏸ New live entries wait: ${esc(v.holdReason)}. Open positions are still managed.`);
+  else if (v.active && v.proof)
+    lines.push(
+      `Trading since ${agoText(v.since, now)}: ${esc(v.active)}`,
+      `It showed ${signedPct(v.proof.mean)} per trade on ${v.proof.n} trades the search never saw (worst case ${signedPct(v.proof.lo)}).`,
+    );
+  else lines.push(`On your own rule (${esc(v.rule)}) until a rule is proven on unseen data.`);
+  const top = v.ranking.filter((r) => !r.active).slice(0, 2);
+  if (top.length) lines.push("Next best:", ...top.map((r) => `• ${esc(r.text)} — worst case ~${r.worstSolPerDay.toFixed(2)} SOL/day at your limits`));
+  const last = v.log[0];
+  if (last) lines.push(`Last decision ${agoText(last.at, now)}: ${esc(last.what)}`);
   return lines.join("\n");
 }

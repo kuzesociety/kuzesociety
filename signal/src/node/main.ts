@@ -89,6 +89,7 @@ export async function main() {
 
   const model = store.loadModel() ?? priorModel(Date.now());
   let server: DashboardServer | null = null;
+  let learner: Learner | null = null;
   let telegram: Telegram | null = null;
   let live: LiveExecutor | null = null;
   let pumpportal: PumpPortalFeed | null = null;
@@ -111,7 +112,10 @@ export async function main() {
       journal: (j) => store.journal(j),
       onSample: (s) => store.sample(s),
       onSignal: (rec) => server?.broadcast("signal", rec),
-      onSettings: (s) => server?.broadcast("settings", s),
+      onSettings: (s) => {
+        server?.broadcast("settings", s);
+        learner?.onSettings(s);
+      },
       onModel: (m) => {
         try {
           store.saveModel(m);
@@ -290,7 +294,7 @@ export async function main() {
   store.cleanup(config.recordDays, config.sampleDays);
   store.backupState();
 
-  const learner = new Learner({
+  learner = new Learner({
     store,
     engine: () => engine,
     log,
@@ -300,6 +304,7 @@ export async function main() {
     onTune: (m) => telegram?.send(m),
     onEdges: (m) => telegram?.send(m),
     onDrift: (m) => telegram?.send(m),
+    onAutopilot: (m) => telegram?.send(m),
   });
   learner.start();
 
@@ -319,6 +324,7 @@ export async function main() {
       strategies: () => strategyList(learner.lastEdges),
       edges: () => ({ report: learner.lastEdges, running: learner.edgesRunning }),
       learning: () => server?.learning() ?? null,
+      autopilot: () => learner?.autopilotView() ?? null,
       links: () => {
         const out: { label: string; url: string }[] = [];
         const lanIp = lanAddress();

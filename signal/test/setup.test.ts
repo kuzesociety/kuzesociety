@@ -108,8 +108,17 @@ describe("setup from the dashboard", () => {
     expect(list).toContain("1. ");
     expect(list).toContain("3. ");
     expect(list).toContain("Found in your data");
-    expect(t.command("/strategy 3")).toContain("score ≥ 90 · +300% / −30% · 20 min");
-    expect(e.settings).toMatchObject({ minScore: 90, tpPct: 300, slPct: 30, maxHoldMin: 20 });
+    // picking a rule by hand hands it back from the autopilot, and says so once
+    expect(e.settings.autopilot).toBe(true);
+    const picked = t.command("/strategy 3");
+    expect(picked).toContain("score ≥ 90 · +300% / −30% · 20 min");
+    expect(picked).toMatch(/Autopilot off/);
+    expect(e.settings).toMatchObject({ minScore: 90, tpPct: 300, slPct: 30, maxHoldMin: 20, autopilot: false });
+    expect(t.command("/tp 300")).not.toMatch(/Autopilot/);
+    expect(t.command("/autopilot on")).toMatch(/Autopilot is on/);
+    expect(t.command("/size 0.2")).not.toMatch(/Autopilot/);
+    expect(t.command("/score 91")).toMatch(/Autopilot off/);
+    expect(t.command("/score 90")).not.toMatch(/Autopilot/);
     expect(t.command("/strategy")).toContain("3. ✅");
     expect(t.command("/strategy 9")).toMatch(/number from 1 to 3/);
     // live: a switch needs a second word

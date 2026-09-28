@@ -113,7 +113,7 @@ export function loadConfig(env = process.env, argv = process.argv): Config {
     record: env.RECORD !== "0" && env.RECORD !== "false",
     recordDays: n(env.RECORD_DAYS, 5),
     sampleDays: n(env.SAMPLE_DAYS, 30),
-    learnEveryHours: n(env.LEARN_EVERY_HOURS, 6),
+    learnEveryHours: n(env.LEARN_EVERY_HOURS, 2),
     simSpeed: n(env.SIM_SPEED, 1),
     simPredictability: n(env.SIM_PREDICTABILITY, 0.7),
     githubToken: env.GITHUB_TOKEN ?? "",

@@ -54,7 +54,7 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 - **Scale.** The score ranks coins by their odds of hitting your target before your stop (higher is always better odds) on a fixed scale: **50 is a typical coin moment and 75 the top 5%** of moments. The starting model is scaled that way from the live market in its first minutes. A trained model is anchored the same way each time it learns, so a sharper model makes the bot pickier within the same share of coins, rather than letting more coins past your minimum score. How *often* coins reach 75 still moves with the market. Once trained, each coin also shows its win chance, P(win), in **Why this score**.
 - **Inputs (36 features).** Buyer inflow and acceleration, distinct buyers, buy/sell mix, whale share, dev holdings and dev selling, launch-block bundles, sniper supply, top-10 concentration, drawdown from peak, smart wallets (learned from the order flow), fresh-wallet share, socials, tweet links, narrative clusters (copycats versus the leader), serial launchers, market heat, liquidity, and time since graduation. **Why this score** on each coin shows the top reasons in points.
-- **Learning.** Every eligible coin is followed as if bought with your size and delay, until the target or the stop is hit: from fixed checkpoints in its life, and from the moment it first reaches each score level, which is exactly when the bot buys. Every few hours (`LEARN_EVERY_HOURS`) the score is refitted on these finished outcomes in two ways:
+- **Learning.** Every eligible coin is followed as if bought with your size and delay, until the target or the stop is hit: from fixed checkpoints in its life, and from the moment it first reaches each score level, which is exactly when the bot buys. Every 2 hours (`LEARN_EVERY_HOURS`) the score is refitted on these finished outcomes in two ways:
   - as a weighted sum of the inputs;
   - as the weighted sum plus small decision trees, which learn combinations a sum cannot ("heavy buying, *but* the dev already sold").
 
@@ -63,7 +63,18 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 ## 4. Bot settings (Bot tab or Telegram)
 
-**Strategy** (top of the Bot tab): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
+**Autopilot** (top of the Bot tab, on by default; Telegram `/autopilot on|off`): the bot picks its own rule. Every 2 hours it retrains the score (keeping the new one only if it predicts coins neither model has seen better) and the edge finder searches your recorded market for rules that made money on data the search never saw (section 5). The autopilot then switches, at once, to the rule that earns the most per day at your trade size and limits, counted from its *worst case* on that unseen data. It changes only the rule — entry score or moment, which coins, take profit, stop loss, time limit — never your trade size, limits or mode. Picking a strategy or changing the rule by hand turns it off.
+
+It is built not to fool itself:
+- It acts only on a fresh search (under 6 hours old) whose luck check stayed clean: the same search on shuffled outcomes, where no rule can work, may "find" at most 1 rule in 5 runs. Coins bought in the same hour count as one piece of evidence, so a hot hour of the market is not taken for an edge.
+- A new rule replaces the one in use only if it earns at least 25% more, so it does not flip-flop on noise.
+- The rule in use is judged on its own trades. After 30, if it is clearly worse than it had shown (the top of its 95% range below the worst case it promised), it is benched for a day and the next best rule, or your own, takes over.
+- **Real money:** turning it on asks for a second tap (`/autopilot on yes`), and it uses only rules at the go-live bar (at least 100 unseen trades and a worst case above +2% per trade). Until one exists, **new live entries wait**; open positions are still managed. A bot already trading live before this update keeps its own rule until you turn the autopilot on.
+- In paper mode, while nothing is proven, it trades your own rule.
+
+Every decision, with its numbers, is listed on the Autopilot card and sent to Telegram.
+
+**Strategy** (under the Autopilot): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
 
 
 | Setting | Meaning |
@@ -80,7 +91,7 @@ Set `SIM=1` (or run `npm run build && node dist/engine.mjs --sim`). A simulated 
 
 **Why no trade?** The Bot tab shows, for the last hour, how many coins were scored, how many reached your score, what was bought, and exactly why the rest were blocked.
 
-Telegram commands: `/status /positions /pause /resume /strategy /edges /learn /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
+Telegram commands: `/status /positions /pause /resume /autopilot /strategy /edges /learn /score 75 /tp 100 /sl 50 /hold 10 /size 0.1 /scoreonly on|off /kill /unkill /update /link`. `/autopilot` shows the rule in use and why; `/autopilot on|off` switches it. `/strategy` lists the ready-made rules and the ones the edge finder proved; `/strategy 2` switches the whole rule. `/edges` shows the edge finder's latest answer (every 2 hours once there is a day of data). `/link` sends the dashboard links that open on the phone: home Wi-Fi, and anywhere once [Tailscale](https://tailscale.com/download) (free) runs on the computer and the phone with the same account.
 
 ## 5. Is it making money?
 
@@ -94,7 +105,7 @@ The **Learn** tab answers this with your own data:
 - a take-profit × stop-loss heat map for coins above your score
 - your paper-trading results (profit factor, drawdown)
 - the **go-live check**: it passes only with ≥150 resolved signals at your settings *and* a 95% lower bound on average net return above +2%
-- the **edge finder**: independently of your settings, it searches 23 kinds of entry — the first time a coin reaches one of 10 score levels, or every coin at one of 13 fixed points in its life (20 s–12 min after launch; a quarter, half or three quarters of the way to graduation; 1, 5, 15 or 60 min after graduating) — × 22 coin conditions (stage, market cap, age, bundles, holders, buyers, socials, dev behaviour) × 192 exits (take profit 25–500%, stop loss 10–70%, optional 10/30/60-minute time limit) for rules that made money after every cost. It ranks them on the older two thirds of the data, re-checks the best 20 on the newest third (which the search never saw) with a bound corrected for testing 20 at once, and repeats everything on shuffled data to show how often the search fools itself. Every rule it reports is one the bot can run: **Paper-trade this rule** switches your settings to it
+- the **edge finder**: independently of your settings, it searches 23 kinds of entry — the first time a coin reaches one of 10 score levels, or every coin at one of 13 fixed points in its life (20 s–12 min after launch; a quarter, half or three quarters of the way to graduation; 1, 5, 15 or 60 min after graduating) — × 22 coin conditions (stage, market cap, age, bundles, holders, buyers, socials, dev behaviour) × 192 exits (take profit 25–500%, stop loss 10–70%, optional 10/30/60-minute time limit) for rules that made money after every cost. It ranks them on the older two thirds of the data, re-checks the best 20 on the newest third (which the search never saw) with a bound corrected for testing 20 at once — counting coins bought in the same hour as one piece of evidence, since a hot hour lifts them all — and repeats everything on shuffled data to show how often the search fools itself. Every rule it reports is one the bot can run: the autopilot trades the best one by itself, or **Paper-trade this rule** switches your settings to it
 
 Exact replays on recorded data are available through the research CLI:
 ```bash
@@ -127,13 +138,13 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 103 tests: exact curve math vs the official SDK, decoders, engine, learning, feeds, live signing, memory, end-to-end
+npm test          # 113 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```
 
 Layout:
-- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning (`learn.ts`, boosted trees in `boost.ts`, what it learned in `insight.ts`), positions, outcomes, funnel
+- `src/core`: platform-independent engine: curve math, decoders, token state, wallets, narratives, features, model, learning (`learn.ts`, boosted trees in `boost.ts`, what it learned in `insight.ts`), the edge finder (`edges.ts`) and the autopilot (`autopilot.ts`), positions, outcomes, funnel
 - `src/node`: server: feeds, websocket reconnects, storage, HTTP/SSE API, Telegram, live executor
 - `src/web`: dashboard (Preact, bundled into one HTML file)
 - `src/companion`: the demo page: the same dashboard and engine running on a simulated market in the browser, plus research and a setup wizard

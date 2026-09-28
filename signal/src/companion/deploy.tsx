@@ -71,7 +71,7 @@ export function Deploy() {
         "TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN",
         "TELEGRAM_CHAT_ID=YOUR_CHAT_ID",
       );
-    lines.push(`PAPER_START_SOL=${paper}`, "LEARN_EVERY_HOURS=6");
+    lines.push(`PAPER_START_SOL=${paper}`, "LEARN_EVERY_HOURS=2");
     return lines.join("\n");
   }, [token, paper, tg]);
 

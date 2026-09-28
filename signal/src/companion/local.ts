@@ -71,7 +71,8 @@ export function createLocalEngine(o: DemoOptions) {
     now: t0,
     model: priorModel(t0),
     log,
-    settings: { ...DEMO_DEFAULTS, ...loadSaved(), mode: "paper" },
+    // the autopilot runs with the server's learning loop; this page has none
+    settings: { ...DEMO_DEFAULTS, ...loadSaved(), mode: "paper", autopilot: false },
     config: { maxWallets: 40_000, outcomeMaxOpen: 8_000, maxSamplesInMemory: 8_000 },
     hooks: {
       onSignal: (rec) => emit("signal", rec),

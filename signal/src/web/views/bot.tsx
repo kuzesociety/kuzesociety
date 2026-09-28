@@ -5,6 +5,7 @@ import { ENTRY_POINTS, type Settings, rebaseSettings, settingsChanges } from "..
 import { ext } from "../ext";
 import { api, refreshState, toast, useApp } from "../store";
 import { Field, Hist, NumInput, Switch, Tag } from "../ui";
+import { Autopilot } from "./autopilot";
 
 type Filters = Settings["filters"];
 
@@ -72,7 +73,8 @@ export function Bot() {
         setDraft(r.settings);
         setDirty(false);
       }
-      toast(patch ? "Updated" : "Saved — applies to new trades");
+      const off = settings.autopilot && !r.settings.autopilot && !(patch && "autopilot" in patch) ? " · Autopilot is off now: you picked the rule" : "";
+      toast(`${patch ? "Updated" : "Saved — applies to new trades"}${off}`);
       void refreshState();
     } catch (e) {
       toast(String((e as Error).message));
@@ -103,6 +105,8 @@ export function Bot() {
         </div>
         <Tag tone={settings.mode === "live" ? "bad" : "flare"}>{settings.mode === "live" ? "LIVE" : "PAPER"}</Tag>
       </div>
+
+      <Autopilot settings={settings} />
 
       <Strategies settings={settings} onApplied={() => void refreshState()} />
 
@@ -268,7 +272,7 @@ export function Bot() {
           >
             <Switch id="reentry" checked={draft.reentry} label="Re-entry" onChange={(v) => set("reentry", v)} />
           </Field>
-          <Field label="Auto-tune (paper only)" htmlFor="autotune" help="After each learning run, switch score/TP/SL to the combination with the best proven results (95% worst case must beat the current one). Never touches live settings.">
+          <Field label="Auto-tune (paper only)" htmlFor="autotune" help="After each learning run, switch score/TP/SL to the combination with the best proven results (95% worst case must beat the current one). Never touches live settings, and rests while the autopilot is on (it picks the whole rule).">
             <Switch id="autotune" checked={draft.autoTune} label="Auto-tune" onChange={(v) => set("autoTune", v)} />
           </Field>
           <Field label="Paper delay" htmlFor="lat" help="Simulated time from decision to landing on-chain. Honest paper results need a realistic delay.">
@@ -295,6 +299,12 @@ export function Bot() {
                 ? `Live trading halted: ${health.live.halted}.`
                 : "Live is locked. It unlocks only when the server owner sets LIVE_TRADING and a dedicated wallet — see Setup."}
           </p>
+          {liveAllowed && settings.autopilot && (
+            <p class="faint" style="font-size:12.5px">
+              Autopilot is on: with real money it trades only a rule proven at the real-money bar (100+ unseen trades, worst case above +2% per trade). Until one exists, new live
+              entries wait.
+            </p>
+          )}
           {health?.live?.halted && (
             <button class="btn sm" onClick={() => api("/api/live/resume", {}).then(() => toast("Live resumed"))}>
               Resume live
@@ -434,7 +444,8 @@ function Strategies({ settings, onApplied }: { settings: Settings; onApplied: ()
     setBusy(p.key);
     try {
       await api("/api/settings", p.settings);
-      toast(settings.enabled ? `Now trading: ${p.name}` : `Strategy set: ${p.name}. Switch Auto-trading on to start.`);
+      const off = settings.autopilot ? " Autopilot is off now: you picked the rule." : "";
+      toast(settings.enabled ? `Now trading: ${p.name}.${off}` : `Strategy set: ${p.name}. Switch Auto-trading on to start.${off}`);
       setConfirm(null);
       onApplied();
     } catch (e) {
@@ -449,6 +460,7 @@ function Strategies({ settings, onApplied }: { settings: Settings; onApplied: ()
       <h2>Strategy</h2>
       <p class="faint" style="margin:0 0 4px;font-size:12.5px">
         One tap sets the whole rule — entry score, which coins, take profit, stop loss and time limit. Fine-tune it below afterwards.
+        {settings.autopilot && " The autopilot is choosing the rule now: picking one here, or changing the rule below, turns it off."}
       </p>
       {custom && (
         <div class="strat active">
