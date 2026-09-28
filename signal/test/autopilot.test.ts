@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { AUTOPILOT, type AutopilotState, RULE_KEYS, decideAutopilot, emptyAutopilot, worstPerDay } from "../src/core/autopilot.js";
+import { AUTOPILOT, type AutopilotState, RULE_KEYS, decideAutopilot, emptyAutopilot, ruleKey, worstPerDay } from "../src/core/autopilot.js";
 import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "../src/core/edges.js";
 import { Engine } from "../src/core/engine.js";
 import type { Position } from "../src/core/positions.js";
@@ -183,6 +183,27 @@ describe("autopilot", () => {
     expect(sw.action).toBe("switch");
     expect(sw.state.rule?.text).toBe("D");
     expect(sw.state.proofTo).toBeGreaterThan(0);
+  });
+
+  it("keeps your own rule when its own trades already do better than the best proven rule would", () => {
+    const s = settings();
+    const mine = (n: number, pnlPct: (i: number) => number, rule = ruleKey(s)) =>
+      Array.from({ length: n }, (_, i) => ({ id: `o${i}`, status: "closed", mode: "paper", rule, openedAt: NOW - 20 * HOUR + i * 20 * 60_000, pnlPct: pnlPct(i), pnl: 0 }) as unknown as Position);
+    const weaker = rule("weaker", { lo: 0.05, perDay: 40 }); // ≈ 2 stakes a day at worst
+    // your rule: 60 trades in 20 h (≈ 72 a day) at +30% each → far more than 2 stakes a day
+    const good = mine(60, (i) => (i % 2 ? 80 : -20));
+    const kept = decideAutopilot({ report: report([weaker]), settings: s, state: emptyAutopilot(), closed: good, now: NOW });
+    expect(kept.action).toBe("none");
+    expect(kept.note).toMatch(/Kept your own rule: its 60 trades/);
+    // said once, not at every search
+    expect(decideAutopilot({ report: report([weaker]), settings: s, state: kept.state, closed: good, now: NOW + HOUR }).note).toBe("");
+    // a rule clearly better than even that is switched in
+    const much = rule("much better", { lo: 0.6, perDay: 200, holdMin: 10 });
+    expect(decideAutopilot({ report: report([weaker, much]), settings: s, state: kept.state, closed: good, now: NOW }).rule?.text).toBe("much better");
+    // too few trades to count on, a losing record, or trades of another rule: the proven rule wins
+    expect(decideAutopilot({ report: report([weaker]), settings: s, state: emptyAutopilot(), closed: good.slice(0, 20), now: NOW }).action).toBe("switch");
+    expect(decideAutopilot({ report: report([weaker]), settings: s, state: emptyAutopilot(), closed: mine(60, (i) => (i % 2 ? 20 : -40)), now: NOW }).action).toBe("switch");
+    expect(decideAutopilot({ report: report([weaker]), settings: s, state: emptyAutopilot(), closed: mine(60, () => 30, "another rule"), now: NOW }).action).toBe("switch");
   });
 
   it("with real money a rule in use must meet the go-live bar too", () => {

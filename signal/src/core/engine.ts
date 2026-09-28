@@ -27,7 +27,7 @@ import {
   quoteBuy,
   quoteSell,
 } from "./positions.js";
-import { ruleChanged } from "./autopilot.js";
+import { ruleChanged, ruleKey } from "./autopilot.js";
 import { DEFAULT_SETTINGS, type Settings, exitPlanFrom, sanitizeSettings } from "./settings.js";
 import { type TokenState, TokenState as Token } from "./token.js";
 import type { AmmSwap, MarketEvent, TradeEvent } from "./types.js";
@@ -829,6 +829,7 @@ export class Engine {
       signalMcapSol: t.mcapSol,
       openedAt: now,
       plan: exitPlanFrom(s),
+      rule: ruleKey(s),
       cost: 0,
       tokens: 0,
       tokensLeft: 0,

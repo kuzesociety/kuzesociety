@@ -2840,6 +2840,8 @@ var AUTOPILOT = {
   checkAfter: 30,
   /** coins that qualified after it was proven, before its forward test is judged */
   forwardMin: 40,
+  /** trades of the user's own rule before its track record counts against a proven rule */
+  trackMin: 30,
   benchMs: 24 * HOUR2
 };
 function ruleOf(s) {
@@ -2849,6 +2851,15 @@ function ruleOf(s) {
 }
 function ruleChanged(a, b) {
   return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
+}
+function ruleKey(s) {
+  const text = JSON.stringify(ruleOf(s));
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
 }
 
 // src/core/token.ts
@@ -3936,6 +3947,7 @@ var Engine = class {
       signalMcapSol: t.mcapSol,
       openedAt: now,
       plan: exitPlanFrom(s),
+      rule: ruleKey(s),
       cost: 0,
       tokens: 0,
       tokensLeft: 0,

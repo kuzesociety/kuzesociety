@@ -29,7 +29,7 @@ import { EDGE_METHOD, type EdgeFound, type EdgeReport } from "./edges.js";
 import type { Position } from "./positions.js";
 import { ruleSummary } from "./presets.js";
 import type { Settings } from "./settings.js";
-import { meanCI } from "./util.js";
+import { clusteredMeanCI, hourOf, meanCI } from "./util.js";
 
 const HOUR = 3_600_000;
 
@@ -50,6 +50,8 @@ export const AUTOPILOT = {
   checkAfter: 30,
   /** coins that qualified after it was proven, before its forward test is judged */
   forwardMin: 40,
+  /** trades of the user's own rule before its track record counts against a proven rule */
+  trackMin: 30,
   benchMs: 24 * HOUR,
 };
 
@@ -73,6 +75,8 @@ export interface AutopilotState {
   rule?: EdgeFound | null;
   /** the newest would-be entry its proof used; the coins after it are its forward test */
   proofTo?: number;
+  /** the proven rule last declined because the user's own rule did better (noted once) */
+  keptOwnOver?: string;
 }
 
 export function emptyAutopilot(): AutopilotState {
@@ -116,6 +120,36 @@ export function touchesRule(patch: Record<string, unknown>): boolean {
 /** Whether the rule (entry, coins, exits) differs between two settings. */
 export function ruleChanged(a: Settings, b: Settings): boolean {
   return JSON.stringify(ruleOf(a)) !== JSON.stringify(ruleOf(b));
+}
+
+/** A short fingerprint of the rule (entry, coins, exits): trades opened under it are its track record. */
+export function ruleKey(s: Settings): string {
+  const text = JSON.stringify(ruleOf(s));
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/**
+ * What the rule in `s` has actually made, per day and at its worst case, from its own trades
+ * (the last 3 days, same mode): the lower end of the 95% range per trade (counted per hour) ×
+ * its trades a day. Null until it has AUTOPILOT.trackMin trades — too few to count on.
+ */
+export function trackRecord(s: Settings, closed: Position[], now: number): { n: number; mean: number; lo: number; perDay: number; v: number } | null {
+  const key = ruleKey(s);
+  const from = now - 3 * 24 * HOUR;
+  const mine = closed.filter((p) => p.status === "closed" && p.mode === s.mode && p.rule === key && p.openedAt >= from && Number.isFinite(p.pnlPct));
+  if (mine.length < AUTOPILOT.trackMin) return null;
+  const m = clusteredMeanCI(
+    mine.map((p) => (p.pnlPct ?? 0) / 100),
+    mine.map((p) => hourOf(p.openedAt)),
+  );
+  const first = Math.min(...mine.map((p) => p.openedAt));
+  const perDay = mine.length / Math.max(1 / 24, (now - first) / (24 * HOUR));
+  return { n: mine.length, mean: m.mean, lo: m.lo, perDay, v: Math.max(0, m.lo) * perDay };
 }
 
 const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
@@ -214,6 +248,21 @@ export function decideAutopilot(o: { report: EdgeReport | null; settings: Settin
     const curV = listed?.v ?? (st.rule ? worstPerDay(st.rule, s) : 0);
     if (!best || best.r.text === st.active || best.v < curV * AUTOPILOT.better) {
       if (st.holding) Object.assign(st, { holding: false, holdReason: "" });
+      return done("none");
+    }
+  }
+
+  // your own rule, with a track record of its own trades, is replaced only by a rule proven to
+  // do clearly better than it has actually been doing (both counted at their worst case, per day)
+  if (best && !stands && st.active === null && !live) {
+    const own = trackRecord(s, o.closed, now);
+    if (own && best.v < own.v * AUTOPILOT.better) {
+      if (st.keptOwnOver !== best.r.text) {
+        st.keptOwnOver = best.r.text;
+        notes.push(
+          `Kept your own rule: its ${own.n} trades made ${pct(own.mean)} each (at least ${pct(own.lo)}), about ${own.perDay.toFixed(0)} a day — at your size at least ~${(own.v * s.positionSol).toFixed(2)} SOL a day, more than the best proven rule ("${best.r.text}", at least ~${(best.v * s.positionSol).toFixed(2)} SOL a day) would add.`,
+        );
+      }
       return done("none");
     }
   }

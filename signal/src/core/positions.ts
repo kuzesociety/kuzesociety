@@ -37,6 +37,8 @@ export interface Position {
   signalMcapSol: number;
   openedAt: number;
   plan: ExitPlan;
+  /** the rule it was opened under (autopilot ruleKey: entry, coins, exits) — its track record */
+  rule?: string;
   /** lamports committed (all-in cost of the entry) */
   cost: number;
   tokens: number;

@@ -63,7 +63,7 @@ describe("self-check", () => {
     expect(recordedVsReal(rosy.closed.slice(0, SELFCHECK.minPairs - 1), rosy.samples, NOW).status).toBe("info");
     // an exit the recording did not observe is not compared at all
     const unseen = pairs(60, () => [-0.5, 0.9], { blind: 300, recAt: 900 });
-    expect(recordedVsReal(unseen.closed, unseen.samples, NOW).detail).toMatch(/0 of 20/);
+    expect(recordedVsReal(unseen.closed, unseen.samples, NOW).detail).toMatch(/0 of 20 needed \(60 trades closed/);
     // with a time limit the recording's value at that time counts (here half its result)
     const timed = pairs(60, () => [0.2, 0.4], { maxHoldMin: 30, recAt: 3600 });
     const t = recordedVsReal(timed.closed, timed.samples, NOW);

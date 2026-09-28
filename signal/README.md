@@ -71,7 +71,7 @@ It is built not to fool itself:
 - The rule in use is judged on its own trades (after 30) and on every coin that qualified for it after it was proven (after 40, the trades it could not take included). If either is clearly worse than it had shown (the top of its 95% range below the worst case it promised), it is benched for a day and the next best rule, or your own, takes over.
 - Only what was actually seen counts. The bot follows at most 40 PumpSwap pools at once, so a graduated coin's price stops reaching it after a while; from then on its would-be trades are marked unobserved, and a stop-loss nobody saw is never counted as a trade that held its value. The same goes for anything open while the trade feed was down (for example a sleeping computer). Graduated-coin outcomes recorded before this rule existed are not trusted at all, so after updating, rules about graduated coins need about a day of new recordings to be proven again.
 - **Real money:** turning it on asks for a second tap (`/autopilot on yes`), and it uses only rules at the go-live bar (at least 100 unseen trades and a worst case above +2% per trade). Until one exists, **new live entries wait**; open positions are still managed. A bot already trading live before this update keeps its own rule until you turn the autopilot on.
-- In paper mode, while nothing is proven, it trades your own rule.
+- In paper mode, while nothing is proven, it trades your own rule. Every trade records which rule it was made under, so your own rule builds a track record: once it has 30 trades, a proven rule replaces it only if it would make at least 25% more a day than your rule actually has (both counted at their worst case).
 
 Every decision, with its numbers, is listed on the Autopilot card and sent to Telegram.
 
@@ -151,7 +151,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 127 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 128 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```

@@ -104,9 +104,17 @@ export interface SelfCheckInput {
 /** 1. Recorded vs real. */
 export function recordedVsReal(closed: Position[], samples: Sample[], now: number): Check {
   const title = "Recordings match real trades";
-  const pairs = pairTrades(closed, samples, now - SELFCHECK.windowMs);
-  if (pairs.length < SELFCHECK.minPairs)
-    return { key: "recorded", status: "info", title, detail: `Not enough trades to compare yet: ${pairs.length} of ${SELFCHECK.minPairs} closed trades (last 7 days) paired with the recording of the same moment.` };
+  const from = now - SELFCHECK.windowMs;
+  const pairs = pairTrades(closed, samples, from);
+  if (pairs.length < SELFCHECK.minPairs) {
+    const done = closed.filter((p) => p.status === "closed" && (p.closedAt ?? 0) >= from).length;
+    return {
+      key: "recorded",
+      status: "info",
+      title,
+      detail: `Not enough trades to compare yet: ${pairs.length} of ${SELFCHECK.minPairs} needed (${done} trades closed in the last 7 days). A trade is compared once the recording of its own moment has finished (up to 6 h), under the same exits, as far as it was observed; recordings of graduated coins from before this version are not trusted.`,
+    };
+  }
   const d = clusteredMeanCI(
     pairs.map((x) => x.rec - x.real),
     pairs.map((x) => x.hour),
