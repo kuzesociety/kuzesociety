@@ -270,8 +270,21 @@ export function decideAutopilot(o: {
   // bad hours is not mistaken for a bad rule), real money stops going into new entries. Open
   // positions are still managed, and paper keeps trading: there the evidence costs nothing and
   // is worth having.
-  const ownDead = st.active === null ? (trackRecord(s, o.closed, now) ?? null) : null;
-  const losing = ownDead && ownDead.hi < 0 ? ownDead : null;
+  // Its own trades first; failing that, the same measurement the search checks its candidates
+  // with — your exact rule on the newest third of its entry's recordings, counted per hour
+  // (`measured`, measureRule). A rule that has only just been picked has few trades of its own but
+  // can already have hundreds of coins behind it: on this bot the rule in use measured −21.6% per
+  // trade over 285 coins, range −27.1% to −16.1%, while it had 12 trades. Waiting for 30 trades
+  // before believing that would be throwing away the better evidence.
+  const mine = st.active === null ? trackRecord(s, o.closed, now) : null;
+  const seen = st.active === null && o.measured?.ok && o.measured.key === ruleKey(s) && now - o.measured.at <= AUTOPILOT.freshMs ? o.measured : null;
+  const losing: { n: number; mean: number; hi: number; from: "trades" | "recordings" } | null =
+    mine && mine.hi < 0
+      ? { n: mine.n, mean: mine.mean, hi: mine.hi, from: "trades" }
+      : !mine && seen && seen.hi < 0
+        ? { n: seen.n, mean: seen.mean, hi: seen.hi, from: "recordings" }
+        : null;
+  const losingWhere = (l: NonNullable<typeof losing>) => (l.from === "trades" ? `its last ${l.n} trades` : `the ${l.n} coins that qualified for it on the newest recordings`);
 
   // 2. what the latest search proved
   const { fresh, trusted } = evidenceOf(report, now);
@@ -345,12 +358,12 @@ export function decideAutopilot(o: {
 
   const none = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) + (o.extra?.length ?? 0) > 0);
   const why = losing
-    ? `the rule you picked has lost money on its own trades — ${pct(losing.mean)} each over its last ${losing.n}, and at best ${pct(losing.hi)} — and ${none}`
+    ? `the rule you picked loses money — ${pct(losing.mean)} per trade over ${losingWhere(losing)}, and at best ${pct(losing.hi)} — and ${none}`
     : none;
   if (!live && losing && !st.saidLosing) {
     st.saidLosing = true;
     notes.push(
-      `The rule you picked is losing: its last ${losing.n} trades made ${pct(losing.mean)} each, and the top of their range is ${pct(losing.hi)}, so that is not a bad run. Paper keeps trading it — the evidence costs nothing — but with real money new entries would wait until a rule is proven, or you pick another.`,
+      `The rule you picked is losing: ${losingWhere(losing)} made ${pct(losing.mean)} per trade, and the top of their range is ${pct(losing.hi)}, so that is not a bad run. Paper keeps trading it — the evidence costs nothing — but with real money new entries would wait until a rule is proven, or you pick another.`,
     );
     named.push({ text: `your own rule (${ruleSummary(s)})`, settings: ruleOf(s) });
   }
@@ -360,7 +373,7 @@ export function decideAutopilot(o: {
       st.holdReason = why;
       return done("none");
     }
-    if (losing) notes.push(`The rule you picked has lost money on its own trades (${pct(losing.mean)} each over its last ${losing.n}, at best ${pct(losing.hi)}).`);
+    if (losing) notes.push(`The rule you picked loses money: ${pct(losing.mean)} per trade over ${losingWhere(losing)}, at best ${pct(losing.hi)}.`);
     Object.assign(st, { active: null, proof: null, rule: null, holding: true, holdReason: why });
     notes.push(`Holding new live entries: ${why}. Open positions are still managed.`);
     return done("hold");

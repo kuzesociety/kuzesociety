@@ -420,7 +420,7 @@ describe("a rule that loses money on its own trades", () => {
     const d = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: losing, now: NOW });
     expect(d.action).toBe("hold");
     expect(d.state.holding).toBe(true);
-    expect(d.state.holdReason).toMatch(/lost money on its own trades/);
+    expect(d.state.holdReason).toMatch(/loses money — .* per trade over its last 60 trades/);
   });
 
   it("leaves a rule alone while its trades could still be a bad run, or are winning", () => {
@@ -428,15 +428,33 @@ describe("a rule that loses money on its own trades", () => {
     // clearly losing on average, but swinging enough that the top of the range is above zero
     const noisy = under(40, (i) => (i % 3 === 0 ? 180 : -60), "live");
     const d1 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: noisy, now: NOW });
-    expect(d1.state.holdReason).not.toMatch(/lost money on its own trades/);
+    expect(d1.state.holdReason).not.toMatch(/loses money/);
     // and a winning rule is never called losing
     const winning = under(60, (i) => (i % 2 ? 40 : -10), "live");
     const d2 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: winning, now: NOW });
-    expect(d2.state.holdReason).not.toMatch(/lost money on its own trades/);
+    expect(d2.state.holdReason).not.toMatch(/loses money/);
     // too few trades to judge: left alone
     const few = under(AUTOPILOT.trackMin - 1, () => -14, "live");
     const d3 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: few, now: NOW });
-    expect(d3.state.holdReason).not.toMatch(/lost money on its own trades/);
+    expect(d3.state.holdReason).not.toMatch(/loses money/);
+  });
+
+
+  it("acts on the recordings when the rule is too new to have trades of its own", () => {
+    const live = { ...s, mode: "live" } as Settings;
+    // the shape this bot was in: 12 trades under the rule, but 285 coins measured at -21.6%
+    const few = under(12, () => 20, "live");
+    const measured: OwnMeasure = { key: ruleKey(live), ok: true, n: 285, mean: -0.216, lo: -0.271, hi: -0.161, coinsPerDay: 316, avgHoldMin: 40, at: NOW };
+    const d = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: few, now: NOW, measured });
+    expect(d.action).toBe("hold");
+    expect(d.state.holdReason).toMatch(/285 coins that qualified for it on the newest recordings/);
+    // once it has trades of its own, those decide instead
+    const winning = under(AUTOPILOT.trackMin + 10, (i) => (i % 2 ? 60 : -10), "live");
+    const w = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: winning, now: NOW, measured });
+    expect(w.state.holdReason).not.toMatch(/loses money/);
+    // a stale measurement is not acted on
+    const stale = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: few, now: NOW, measured: { ...measured, at: NOW - 7 * HOUR } });
+    expect(stale.state.holdReason).not.toMatch(/loses money/);
   });
 
   it("does not touch a proven rule the autopilot switched in: that one answers to its own promise", () => {
