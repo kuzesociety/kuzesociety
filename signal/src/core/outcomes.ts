@@ -9,12 +9,17 @@
  * tables. Checkpoints sample tokens regardless of score, so the calibration by score
  * bucket is not biased by the bot's own choices.
  */
-import { LAMPORTS_PER_SOL } from "./curve.js";
+import { LAMPORTS_PER_SOL, ammFeesForMcapSol } from "./curve.js";
 import { type CostModel, quoteBuy } from "./positions.js";
 import type { TokenState } from "./token.js";
 import { newId } from "./util.js";
 
 /** Exit alternatives every would-be trade is followed for (take profit × stop loss, %). */
+/** A PumpSwap fee tier as a fraction (creator + protocol + LP, in basis points). */
+function sumBps(f: { creator: number; protocol: number; lp: number }): number {
+  return (f.creator + f.protocol + f.lp) / 10_000;
+}
+
 export const GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500] as const;
 export const GRID_SL = [10, 20, 30, 40, 50, 70] as const;
 export const GRID: ReadonlyArray<{ tp: number; sl: number }> = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
@@ -364,7 +369,13 @@ export class OutcomeTracker {
     h.entered = true;
     h.entryMcap = t.mcapSol;
     // Net liquidation multiple is ~linear in market cap: mult = a·mcap − b
-    const sellFee = (t.stage === "amm" ? 0.0125 : 0.0125) + this.opts.costs.platformFeePct / 100;
+    // PumpSwap charges by market cap — 1.25% a side under 420 SOL, falling to 0.30% above
+    // ~98,000 (AMM_FEE_TIERS, matched to the official SDK). The buy side already pays the right
+    // tier, because it is priced through poolBuyQuote; the sell side used to assume 1.25% for
+    // every graduated coin, so every recording of a large one was up to 0.95 points too harsh.
+    // On the curve the fee really is a flat 1.25%.
+    const venueFee = t.stage === "amm" ? sumBps(ammFeesForMcapSol(t.mcapSol)) : 0.0125;
+    const sellFee = venueFee + this.opts.costs.platformFeePct / 100;
     const tokensUi = q.tokens / 1e6;
     const pricePerMcap = 1e6 / t.supply; // SOL per whole token per 1 SOL of mcap
     h.a = (tokensUi * pricePerMcap * (1 - sellFee)) / this.opts.sizeSol;

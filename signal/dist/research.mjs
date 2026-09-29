@@ -506,6 +506,9 @@ var silentLogger = { debug() {
 } };
 
 // src/core/outcomes.ts
+function sumBps(f2) {
+  return (f2.creator + f2.protocol + f2.lp) / 1e4;
+}
 var GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500];
 var GRID_SL = [10, 20, 30, 40, 50, 70];
 var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
@@ -672,7 +675,8 @@ var OutcomeTracker = class {
     }
     h.entered = true;
     h.entryMcap = t.mcapSol;
-    const sellFee = (t.stage === "amm" ? 0.0125 : 0.0125) + this.opts.costs.platformFeePct / 100;
+    const venueFee = t.stage === "amm" ? sumBps(ammFeesForMcapSol(t.mcapSol)) : 0.0125;
+    const sellFee = venueFee + this.opts.costs.platformFeePct / 100;
     const tokensUi = q.tokens / 1e6;
     const pricePerMcap = 1e6 / t.supply;
     h.a = tokensUi * pricePerMcap * (1 - sellFee) / this.opts.sizeSol;
