@@ -418,6 +418,11 @@ export class Engine {
           if (!t && this.isWatched(ev.mint)) t = this.ensureToken(ev.mint, ts, true);
           if (t) {
             t.applyQuote(ev);
+            // A coin priced only by quotes whose pool has been drained has no price we could sell
+            // at any more. Freezing its last good one would pretend a position could still be got
+            // out at that price, so its would-be trades stop being watched here, exactly as when a
+            // followed pool is dropped: every exit after this moment is unknown, not a result.
+            if (t.tradeCount === 0 && t.quoteUntradable) this.outcomes.blindMint(t.mint, ts);
             if (t.tradeCount === 0) this.onPrice(t);
             this.dirty.add(t.mint);
           }
@@ -781,6 +786,8 @@ export class Engine {
     if (this.killed) return "kill_switch";
     if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
+    // priced only by off-chain quotes, and the pool behind the newest one is drained: nothing to buy into
+    if (t.tradeCount === 0 && t.quoteUntradable) return "pool_drained";
     if ((t.stage === "curve" && !s.tradeCurve) || (t.stage === "amm" && !s.tradeAmm)) return "stage_off";
     if (t.stage === "migrating") return "migrating";
     // a rule the Lab proved holds only for coins that met its conditions at this moment, as recorded

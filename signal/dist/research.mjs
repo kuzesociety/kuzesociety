@@ -2719,6 +2719,7 @@ var REASON_TEXT = {
   autopilot_hold: "Autopilot: no rule is proven enough for real money yet \u2014 new live entries wait (open positions are still managed)",
   stage_off: "This stage is turned off in settings",
   non_sol_quote: "Coin is not paired with SOL",
+  pool_drained: "Its pool has been drained \u2014 the quoted price cannot be sold into",
   already_traded: "Already traded this coin (re-entry off)",
   max_open: "Max open positions reached",
   pending: "An order for this coin is already in flight",
@@ -3015,6 +3016,15 @@ var NarrativeIndex = class {
 var BUCKET_MS = 5e3;
 var BUCKETS = 144;
 var MAX_HOLDERS_TRACKED = 6e3;
+var MIN_QUOTE_LIQ_SOL = 1;
+function quoteLiquiditySol(ev) {
+  if (ev.liqUsd === void 0 || !ev.priceUsd || !ev.priceSol) return null;
+  return ev.liqUsd * ev.priceSol / ev.priceUsd;
+}
+function quoteTradable(ev) {
+  const liq = quoteLiquiditySol(ev);
+  return liq === null || liq >= MIN_QUOTE_LIQ_SOL;
+}
 var TokenState = class _TokenState {
   mint;
   name = "";
@@ -3037,6 +3047,8 @@ var TokenState = class _TokenState {
   poolQuote = 0;
   mcapSol = 0;
   priceSol = 0;
+  /** the newest off-chain quote had no pool behind it to sell into, so its price was not used */
+  quoteUntradable = false;
   firstMcapSol = 0;
   athMcapSol = 0;
   athAt = 0;
@@ -3261,7 +3273,8 @@ var TokenState = class _TokenState {
     if (!this.name && ev.name) this.name = ev.name;
     if (!this.symbol && ev.symbol) this.symbol = ev.symbol;
     this.lastEventAt = Math.max(this.lastEventAt, ev.ts);
-    if (ev.priceSol && ev.priceSol > 0 && this.tradeCount === 0) {
+    this.quoteUntradable = !quoteTradable(ev);
+    if (ev.priceSol && ev.priceSol > 0 && this.tradeCount === 0 && !this.quoteUntradable) {
       this.priceSol = ev.priceSol;
       this.mcapSol = ev.priceSol * this.supply / 1e6;
       if (this.firstMcapSol === 0) this.firstMcapSol = this.mcapSol;
@@ -3710,6 +3723,7 @@ var Engine = class {
           if (!t && this.isWatched(ev.mint)) t = this.ensureToken(ev.mint, ts, true);
           if (t) {
             t.applyQuote(ev);
+            if (t.tradeCount === 0 && t.quoteUntradable) this.outcomes.blindMint(t.mint, ts);
             if (t.tradeCount === 0) this.onPrice(t);
             this.dirty.add(t.mint);
           }
@@ -4043,6 +4057,7 @@ var Engine = class {
     if (this.killed) return "kill_switch";
     if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
+    if (t.tradeCount === 0 && t.quoteUntradable) return "pool_drained";
     if (t.stage === "curve" && !s.tradeCurve || t.stage === "amm" && !s.tradeAmm) return "stage_off";
     if (t.stage === "migrating") return "migrating";
     if (s.conds.length && !condsHold(s.conds, e.x)) return "rule_conditions";

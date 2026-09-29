@@ -57,6 +57,35 @@ export interface TokenMeta {
   fetchedAt?: number;
 }
 
+/**
+ * The least liquidity, in SOL, a quoted price needs behind it to be a price at all.
+ *
+ * Off-chain quotes are the only price the bot has for a graduated coin whose pool it does not
+ * follow. When such a pool is drained the quotes do not stop — they turn to nonsense. On
+ * 2026-09-29 DexScreener quoted one pump.fun coin at 66.97 SOL a token, a market cap of 7.9
+ * trillion dollars, on 7.92 dollars of liquidity; taken at face value it resolved every exit of
+ * every would-be trade on that coin at +7,941,470%, and that one tick became the best-looking
+ * entry on the dashboard (+17,661% per trade for "15 min after graduating"). A price you cannot
+ * sell into is not a price. Over 39,691 recorded quotes the liquidity behind them is either under
+ * 0.4 SOL (5%: the drained pools) or above 18 SOL, so a 1 SOL floor sits in the gap between them.
+ */
+export const MIN_QUOTE_LIQ_SOL = 1;
+
+/**
+ * The liquidity behind a quote, in SOL (its USD liquidity at the quote's own SOL price), or null
+ * when the quote does not say. `priceUsd / priceSol` is that moment's SOL price.
+ */
+export function quoteLiquiditySol(ev: Pick<QuoteEvent, "liqUsd" | "priceUsd" | "priceSol">): number | null {
+  if (ev.liqUsd === undefined || !ev.priceUsd || !ev.priceSol) return null;
+  return (ev.liqUsd * ev.priceSol) / ev.priceUsd;
+}
+
+/** Whether a quote's price could be sold into: a pool of at least MIN_QUOTE_LIQ_SOL behind it. */
+export function quoteTradable(ev: Pick<QuoteEvent, "liqUsd" | "priceUsd" | "priceSol">): boolean {
+  const liq = quoteLiquiditySol(ev);
+  return liq === null || liq >= MIN_QUOTE_LIQ_SOL;
+}
+
 export class TokenState {
   readonly mint: string;
   name = "";
@@ -81,6 +110,8 @@ export class TokenState {
 
   mcapSol = 0;
   priceSol = 0;
+  /** the newest off-chain quote had no pool behind it to sell into, so its price was not used */
+  quoteUntradable = false;
   firstMcapSol = 0;
   athMcapSol = 0;
   athAt = 0;
@@ -332,8 +363,10 @@ export class TokenState {
     if (!this.name && ev.name) this.name = ev.name;
     if (!this.symbol && ev.symbol) this.symbol = ev.symbol;
     this.lastEventAt = Math.max(this.lastEventAt, ev.ts);
-    // Off-chain quotes only drive price when no on-chain stream covers this token.
-    if (ev.priceSol && ev.priceSol > 0 && this.tradeCount === 0) {
+    // Off-chain quotes only drive price when no on-chain stream covers this token, and only
+    // while there is a pool behind them deep enough to sell into (quoteTradable).
+    this.quoteUntradable = !quoteTradable(ev);
+    if (ev.priceSol && ev.priceSol > 0 && this.tradeCount === 0 && !this.quoteUntradable) {
       this.priceSol = ev.priceSol;
       this.mcapSol = (ev.priceSol * this.supply) / 1e6;
       if (this.firstMcapSol === 0) this.firstMcapSol = this.mcapSol;
