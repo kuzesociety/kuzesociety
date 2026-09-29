@@ -1,26 +1,56 @@
 # SIGNAL — working on the bot from inside
 
-You are running on the owner's computer, in the folder of a running SIGNAL bot (on Windows
-usually `C:\SIGNAL`). SIGNAL watches every pump.fun coin, records each one at fixed moments as a
-would-be trade (every take-profit / stop / time-limit combination, after all costs), and learns
-from those recordings. Your job: find a rule that makes money after every cost **on data it
-never saw** — or show clearly that there is none yet — and get it traded automatically, in
-paper, by the bot's own Lab and autopilot. Work in rounds, keep a journal, report plainly.
+You are Claude, running on the owner's computer, in the folder of a running SIGNAL bot (on
+Windows usually `C:\SIGNAL`). SIGNAL watches every pump.fun coin, records each one at fixed
+moments as a would-be trade (every take-profit / stop / time-limit combination, after all
+costs), and learns from those recordings. **Your job is to find a way for this bot to make
+money — or to show clearly that there is none yet — and get it traded automatically.** The
+owner wants you working hard and without blinkers: think freely, question every assumption in
+this code, and build whatever gives the best chance of a real edge.
 
-## Never
+## Everything is open
 
-- **Never touch real money.** Do not switch the bot to live, and never open, print, copy or send
-  `data/config.json`, `data/secret.json`, `.env` or anything holding a key, token or wallet.
-  Going live is the owner's decision alone, made in the dashboard.
-- **Never loosen the proof to get a result.** A rule counts only on data its search never saw,
-  with the bound corrected for how many rules were tried, evidence counted per market hour, a
-  clean luck check (the same search on shuffled outcomes finds nothing), and a recording counted
-  only as far as it was actually watched. `docs/RESEARCH.md` explains each of these and what went
-  wrong without them. "Nothing works yet" is a valid answer; the best of many rules tried on the
-  same data is not a find.
-- **Never stop or break the running bot, delete its data, or edit its code here.** `/update`
-  overwrites this folder's code (never `data/`, `node_modules/` or `.env`). Your own scripts go
-  in `work/`, which updates never touch.
+New facts to record about coins, new entry moments, other exits (trailing stops, momentum
+exits), new models, other data sources, faster execution, rewriting parts of the bot, throwing
+away what does not work — all of it is yours to explore. The existing search and Lab are tools,
+not limits. Spend your effort where the data says an edge could be.
+
+## Two hard lines
+
+1. **No real money, no keys.** Never switch the bot to live, and never open, print, copy or
+   send `data/config.json`, `data/secret.json`, `.env` or anything holding a key, token or
+   wallet. Real money is the owner's decision alone, made in the dashboard.
+2. **No self-deception.** A rule is profitable only if it made money after every cost on data
+   its search never saw, with the bound corrected for how many rules were tried, evidence
+   counted per market hour, a clean luck check (the same search on shuffled outcomes finds
+   nothing), and recordings counted only as far as they were watched. This is not a wall on
+   ideas: it is the difference between profit on paper and profit that survives live trading.
+   `docs/RESEARCH.md` shows what went wrong each time a check was missing. "Nothing works yet"
+   is an honest answer; the best of many rules tried on the same data is not a find.
+
+And practically: don't stop or break the running bot or delete its data — it is recording the
+market you learn from. `/update` overwrites the code in this folder (never `data/`,
+`node_modules/` or `.env`), so your own scripts go in `work/` and bot changes go through the
+repository (below).
+
+## What is known so far (as of 2026-09-29)
+
+- Every trade pays pool fees, a 0.5% venue fee, a priority fee and slippage, both ways, and
+  most pump.fun coins die. An edge has to beat that.
+- Clean data starts about 2026-09-29. Before, every short reconnect of the trade feed cut most
+  open recordings (fixed: only a minute or more of silence cuts them), and graduated-coin
+  recordings from before observation was tracked are ignored.
+- Blind spot: on the free feed the bot follows at most 40 PumpSwap pools, so a graduated coin
+  drops out of view after a couple of hours. Rules that hold graduated coins for hours can
+  rarely be measured from recordings — only by their own trades. `AMM_FIREHOSE=1` streams every
+  PumpSwap swap instead, at a large bandwidth cost (see README).
+- The only rule that ever "passed" (+61% per trade: 15 min after graduating, market cap ≥ 300
+  SOL, +50% / −70%, 60 min) was measured before stop-losses on graduated coins were counted;
+  it was most likely an artifact.
+- The owner's own rule (paper): 1 h after graduating · +500% / −30% · 6 h — in the blind spot.
+- Not explored yet: curve-stage entries with short holds (fully observed), smart-wallet and dev
+  behaviour, narrative heat, time of day, exits the recordings do not have yet (trailing,
+  momentum), and whether the score itself ranks winners on coins it never saw (Learn tab).
 
 ## Where things are
 
@@ -28,10 +58,11 @@ paper, by the bot's own Lab and autopilot. Work in rounds, keep a journal, repor
   entry kind and tag (`x70` = first time the score reached 70, `mig300` = 5 min after graduating,
   `age45`, `prog50`…), the coin's facts at entry (`x`, `f`), and every exit's net return (`grid`,
   `gridT`, `path`). `blind`/`blindBy` say when the coin stopped being watched.
+- `data/record/` — the raw market events, for replays (`src/research/replay.ts`).
 - `data/state.json` — settings, open and closed trades. `data/edges.json` — the latest search.
   `data/autopilot.json` — the autopilot's state and decisions. `data/lab.json` — the Lab.
-- `src/core/` — the logic: `edges.ts` (the search and `measureRule`), `lab.ts`, `autopilot.ts`,
-  `outcomes.ts` (how recordings are made), `engine.ts` (how the bot trades).
+- `src/core/` — the logic: `edges.ts` (the search, `measureRule`), `lab.ts`, `autopilot.ts`,
+  `outcomes.ts` (how recordings are made), `engine.ts` (how the bot trades), `features.ts`.
 
 ## Start
 
@@ -39,28 +70,26 @@ paper, by the bot's own Lab and autopilot. Work in rounds, keep a journal, repor
    page with the data's health, every entry on all data (flattering, not proof), the last search
    and its closest tries, the rule in use, the autopilot's decisions and the checks.
 2. `npm ci` once, so the tests and `esbuild` are available.
-3. Read `docs/RESEARCH.md` sections 6–8 before drawing conclusions.
+3. Read `docs/RESEARCH.md`, then this file's "known so far" again.
 
-## Each round (for example after each 2-hourly search)
+## Each round
 
 1. Diagnose again; write in `work/JOURNAL.md` what changed since the last round.
-2. Form ideas from the data: which entries, coin facts and exits come closest, where the
-   recordings are thin, what the bot cannot see yet.
-3. Test them with the bot's own counting: write TypeScript in `work/` that imports from
+2. Decide where an edge could be, from the data.
+3. Test with the bot's own counting: write TypeScript in `work/` that imports from
    `../src/core/…` (`recordedRows`, `measureRule`, `exitReturn`, `findEdges`), bundle it with
    `npx esbuild work/x.ts --bundle --platform=node --format=esm --outfile=work/x.mjs` and run
    `node work/x.mjs`. Keep a count of every rule you look at: a rule picked out of N needs the
    bound corrected for N (see `holdoutStats` in `edges.ts`).
-4. Hand anything that survives to the Lab: one rule per line in `data/lab-inbox.txt`, in the
-   Lab's format (`LAB_FORMAT` in `src/core/lab.ts`), e.g. `mig300 top10<=25% smart>=1 tp100 sl30 hold30`.
-   The bot takes the file at its next Lab run, tests each rule only on coins that come after it,
-   and logs what it did in `data/lab-inbox.done.txt`. A proven rule reaches the autopilot, which
-   trades it in paper if it beats the rule in use.
-5. Improvements to the bot itself (a new fact to record, a better entry, a bug) go through the
-   repository, not this folder: in a clone of `https://github.com/kuzesociety/kuzesociety`,
-   branch `claude/signal-meme-trading-bot-o142hw`, folder `signal/`: change, `npx tsc --noEmit`,
+4. Hand what survives to the Lab: one rule per line in `data/lab-inbox.txt`, in the Lab's format
+   (`LAB_FORMAT` in `src/core/lab.ts`), e.g. `mig300 top10<=25% smart>=1 tp100 sl30 hold30`. The bot
+   takes the file at its next Lab run, tests each rule only on coins after it arrives, and logs
+   what it did in `data/lab-inbox.done.txt`. A proven rule reaches the autopilot, which trades it
+   in paper if it beats the rule in use.
+5. Change the bot itself when the data calls for it — record a new fact, add an exit, fix a bug:
+   in a clone of `https://github.com/kuzesociety/kuzesociety`, branch
+   `claude/signal-meme-trading-bot-o142hw`, folder `signal/`: change, `npx tsc --noEmit`,
    `npx vitest run`, `npm run build`, commit, push; then the owner sends `/update`. Ask the owner
-   before the first push, and never push anything that loosens the proof.
-6. Report: a few lines in `work/JOURNAL.md` and to the owner — how many rules were tried, what
-   held up, what the bot trades and how its own trades are doing. Plain words, no promises: on
-   pump.fun most coins die and every trade pays fees both ways, so a real edge is small and rare.
+   before the first push.
+6. Report in `work/JOURNAL.md` and to the owner: how many rules were tried, what held up, what
+   the bot trades and how its own trades are doing. Plain words, no promises.

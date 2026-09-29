@@ -60,15 +60,6 @@ await build({
 });
 console.log("dist/engine.mjs      server bundle");
 
-// the same inputs build the same bundle, so the version changes exactly when the bot or its
-// starters change
-const fingerprint = createHash("sha256");
-for (const f of ["dist/engine.mjs", "start-windows.bat", "start-mac.command", "autostart-windows.bat"]) {
-  if (existsSync(join(root, f))) fingerprint.update(readFileSync(join(root, f)));
-}
-const version = fingerprint.digest("hex").slice(0, 12);
-writeFileSync(join(dist, "version.json"), `${JSON.stringify({ version })}\n`);
-console.log(`dist/version.json    ${version}`);
 
 await build({
   entryPoints: [join(root, "src/research/cli.ts")],
@@ -83,6 +74,16 @@ await build({
   logLevel: "warning",
 });
 console.log("dist/research.mjs    research CLI");
+
+// the same inputs build the same bundle, so the version changes exactly when the bot, its
+// starters, its research tools or the notes a local Claude session reads change
+const fingerprint = createHash("sha256");
+for (const f of ["dist/engine.mjs", "dist/research.mjs", "start-windows.bat", "start-mac.command", "autostart-windows.bat", "CLAUDE.md"]) {
+  if (existsSync(join(root, f))) fingerprint.update(readFileSync(join(root, f)));
+}
+const version = fingerprint.digest("hex").slice(0, 12);
+writeFileSync(join(dist, "version.json"), `${JSON.stringify({ version })}\n`);
+console.log(`dist/version.json    ${version}`);
 
 if (existsSync(join(root, "src/companion/main.tsx"))) {
   const companion = await bundleWeb("src/companion/main.tsx", "src/companion/index.html", "companion.html");
