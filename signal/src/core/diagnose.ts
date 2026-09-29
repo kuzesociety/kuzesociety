@@ -110,7 +110,7 @@ function* steps(i: DiagnosisInput): Generator<void, string> {
     yield;
 
     // 2. every entry on all finished data, before any proof
-    out.push("", "ENTRIES ON ALL FINISHED DATA (not proof: the best of 192 exits on everything recorded flatters every entry)");
+    out.push("", "ENTRIES ON ALL FINISHED DATA (not proof: the best of 192 exits on everything recorded flatters every entry; each average leaves out its single largest recording, so no one coin can be the headline)");
     const byTag = new Map<string, Sample[]>();
     for (const x of rows) {
       let l = byTag.get(x.tag);
@@ -122,23 +122,34 @@ function* steps(i: DiagnosisInput): Generator<void, string> {
       if (list.length < 30) continue;
       const sum = new Float64Array(EXITS);
       const cnt = new Float64Array(EXITS);
+      // the biggest single return each exit has, so no one recording can define an entry's number
+      const top = new Float64Array(EXITS).fill(-Infinity);
       for (let k = 0; k < list.length; k++) {
         for (let e = 0; e < EXITS; e++) {
           const v = exitReturn(list[k]!, Math.floor(e / HOLDS_MIN.length), e % HOLDS_MIN.length);
           if (Number.isNaN(v)) continue;
           sum[e] += v;
           cnt[e]++;
+          if (v > top[e]!) top[e] = v;
         }
         if (k % 1_000 === 999) yield;
       }
+      /** the average without the single largest recording: what the entry is worth without its luckiest coin */
+      const less = (e: number) => (cnt[e]! > 1 ? (sum[e]! - top[e]!) / (cnt[e]! - 1) : sum[e]! / cnt[e]!);
+      // Chosen on that average, not the plain one. One bad price print used to choose the exit and
+      // then be the headline: a single tick on one coin made "15 min after graduating" read
+      // +17,661% per trade, when the same entry without that one coin is −38%.
       let best = -1;
-      for (let e = 0; e < EXITS; e++) if (cnt[e]! >= 30 && (best < 0 || sum[e]! / cnt[e]! > sum[best]! / cnt[best]!)) best = e;
+      for (let e = 0; e < EXITS; e++) if (cnt[e]! >= 30 && (best < 0 || less(e) > less(best))) best = e;
       const span = Math.max(1 / 24, (list[list.length - 1]!.ts - list[0]!.ts) / (24 * HOUR));
       const coins = new Set(list.map((x) => x.mint)).size;
       if (best < 0) lines.push({ v: -Infinity, text: `- ${entryName(tag)} · ${(coins / span).toFixed(0)}/day · too few watched to the end` });
       else {
         const mean = sum[best]! / cnt[best]!;
-        lines.push({ v: mean, text: `- ${entryName(tag)} · ${(coins / span).toFixed(0)}/day · best: ${exitName(best)} → ${p1(mean)} per trade on ${n0(cnt[best]!)}` });
+        const trimmed = less(best);
+        // when one recording moves the average by more than 5 points, the reader is told
+        const carried = Math.abs(mean - trimmed) > 0.05 ? ` — but ${p1(mean)} with its best single recording, which one coin carries` : "";
+        lines.push({ v: trimmed, text: `- ${entryName(tag)} · ${(coins / span).toFixed(0)}/day · best: ${exitName(best)} → ${p1(trimmed)} per trade on ${n0(cnt[best]!)}${carried}` });
       }
     }
     lines.sort((a, b) => b.v - a.v);

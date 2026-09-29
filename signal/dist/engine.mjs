@@ -13348,7 +13348,7 @@ function* steps2(i) {
     out.push("- by day (UTC): recordings \xB7 graduated ones cut by pools \xB7 all cut by feed outages");
     for (const [d, r2] of [...days].sort().slice(-8)) out.push(`  ${d} \xB7 ${n0(r2.n)} \xB7 ${share(r2.pool, r2.amm)} \xB7 ${share(r2.feed, r2.n)}`);
     yield;
-    out.push("", "ENTRIES ON ALL FINISHED DATA (not proof: the best of 192 exits on everything recorded flatters every entry)");
+    out.push("", "ENTRIES ON ALL FINISHED DATA (not proof: the best of 192 exits on everything recorded flatters every entry; each average leaves out its single largest recording, so no one coin can be the headline)");
     const byTag = /* @__PURE__ */ new Map();
     for (const x of rows) {
       let l = byTag.get(x.tag);
@@ -13360,23 +13360,28 @@ function* steps2(i) {
       if (list.length < 30) continue;
       const sum = new Float64Array(EXITS);
       const cnt = new Float64Array(EXITS);
+      const top = new Float64Array(EXITS).fill(-Infinity);
       for (let k = 0; k < list.length; k++) {
         for (let e = 0; e < EXITS; e++) {
           const v = exitReturn(list[k], Math.floor(e / HOLDS_MIN.length), e % HOLDS_MIN.length);
           if (Number.isNaN(v)) continue;
           sum[e] += v;
           cnt[e]++;
+          if (v > top[e]) top[e] = v;
         }
         if (k % 1e3 === 999) yield;
       }
+      const less = (e) => cnt[e] > 1 ? (sum[e] - top[e]) / (cnt[e] - 1) : sum[e] / cnt[e];
       let best = -1;
-      for (let e = 0; e < EXITS; e++) if (cnt[e] >= 30 && (best < 0 || sum[e] / cnt[e] > sum[best] / cnt[best])) best = e;
+      for (let e = 0; e < EXITS; e++) if (cnt[e] >= 30 && (best < 0 || less(e) > less(best))) best = e;
       const span = Math.max(1 / 24, (list[list.length - 1].ts - list[0].ts) / (24 * HOUR4));
       const coins = new Set(list.map((x) => x.mint)).size;
       if (best < 0) lines.push({ v: -Infinity, text: `- ${entryName(tag)} \xB7 ${(coins / span).toFixed(0)}/day \xB7 too few watched to the end` });
       else {
         const mean2 = sum[best] / cnt[best];
-        lines.push({ v: mean2, text: `- ${entryName(tag)} \xB7 ${(coins / span).toFixed(0)}/day \xB7 best: ${exitName(best)} \u2192 ${p1(mean2)} per trade on ${n0(cnt[best])}` });
+        const trimmed = less(best);
+        const carried = Math.abs(mean2 - trimmed) > 0.05 ? ` \u2014 but ${p1(mean2)} with its best single recording, which one coin carries` : "";
+        lines.push({ v: trimmed, text: `- ${entryName(tag)} \xB7 ${(coins / span).toFixed(0)}/day \xB7 best: ${exitName(best)} \u2192 ${p1(trimmed)} per trade on ${n0(cnt[best])}${carried}` });
       }
     }
     lines.sort((a, b) => b.v - a.v);

@@ -52,3 +52,22 @@ describe("the diagnosis", () => {
     expect(text).toMatch(/all paper trades: none/);
   });
 });
+
+describe("one coin cannot be an entry's headline", () => {
+  it("picks the best exit, and reports it, without its single largest recording", () => {
+    const settings = sanitizeSettings({ entryAt: "mig300", tpPct: 50, slPct: 20, maxHoldMin: 30, scoreOnly: true });
+    const call = (samples: Sample[]) => diagnosis({ samples, settings, closed: [], autopilot: null, report: null, now: NOW, horizonMs: 6 * HOUR });
+    const plain = call(recordings());
+    // one coin gets an impossible price print, the way a drained pool's quote used to give one
+    const spiked = recordings();
+    spiked[1] = { ...spiked[1]!, grid: spiked[1]!.grid.map(() => 79_415), maxMult: 79_416 } as Sample; // index 1: index 0 stopped being watched, so it counts for nothing
+    const withSpike = call(spiked);
+    const line = (t: string) => t.split(String.fromCharCode(10)).find((l) => l.includes("5 min after graduating") && l.includes("best:"))!;
+    const num = (t: string) => /→ ([+-]?[\d.,]+)%/.exec(line(t))![1];
+    // the printed number is unmoved by the spike: it is the average without the largest recording
+    expect(num(withSpike)).toBe(num(plain));
+    // and the reader is told the plain average is carried by one coin
+    expect(line(withSpike)).toMatch(/with its best single recording, which one coin carries/);
+    expect(line(plain)).not.toMatch(/one coin carries/);
+  });
+});
