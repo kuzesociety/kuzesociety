@@ -2,13 +2,28 @@ import { spawn } from "node:child_process";
 import { copyFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { deflateRawSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
+import { momentTag } from "../src/core/settings.js";
 import { silentLogger } from "../src/core/util.js";
-import { Updater, botFiles, crc32, installFiles, readVersion, unzip } from "../src/node/update.js";
+import {
+  Updater,
+  backupFiles,
+  badVersions,
+  bootCheck,
+  botFiles,
+  crc32,
+  guardStartup,
+  installFiles,
+  readVersion,
+  restoreBackup,
+  takeRollbackNote,
+  unzip,
+} from "../src/node/update.js";
+import { Scenario, key } from "./helpers.js";
 
 interface ZipFile {
   name: string;
@@ -268,24 +283,16 @@ describe("the built bot updates itself", () => {
         SIGNAL_SELF_UPDATE: "1",
         SIGNAL_UPDATE_ZIP_URL: `${base}/z`,
         SIGNAL_UPDATE_VERSION_URL: `${base}/v`,
+        AUTO_UPDATE: "0",
       },
       stdio: "ignore",
     });
     const exited = new Promise<number | null>((r) => proc.on("exit", (code) => r(code)));
     try {
-      const t0 = Date.now();
-      for (;;) {
-        try {
-          if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) break;
-        } catch {
-          /* not up yet */
-        }
-        if (Date.now() - t0 > 30_000) throw new Error("server did not start");
-        await new Promise((r) => setTimeout(r, 200));
-      }
+      await up(port);
       const local = { "x-signal": "1", "content-type": "application/json" }; // same computer: no token needed
       const st = await (await fetch(`http://127.0.0.1:${port}/api/setup`)).json();
-      expect(st.update).toMatchObject({ can: true, available: false });
+      expect(st.update).toMatchObject({ can: true, available: false, auto: false });
       const check = await (await fetch(`http://127.0.0.1:${port}/api/setup/update-check`, { method: "POST", headers: local, body: "{}" })).json();
       expect(check.update).toMatchObject({ available: true, latest: "cccccccccccc" });
       const res = await fetch(`http://127.0.0.1:${port}/api/setup/update`, { method: "POST", headers: local, body: "{}" });
@@ -295,8 +302,291 @@ describe("the built bot updates itself", () => {
       expect(readFileSync(join(dir, "docs/NEW.md"), "utf8")).toBe("new");
       expect(readFileSync(join(dir, "data/config.json"), "utf8")).toBe('{"TELEGRAM_CHAT_ID":"none"}');
       expect(existsSync(join(dir, "data/state.json"))).toBe(true);
+      // on trial until it has run a while: the version before is kept
+      expect(JSON.parse(readFileSync(join(dir, "data/update-pending.json"), "utf8"))).toMatchObject({ from: expect.any(String), to: "cccccccccccc", starts: 0, auto: false });
     } finally {
       proc.kill("SIGKILL");
     }
+  }, 60_000);
+
+  it("installs a new version by itself, test-starts it first, and the restarted bot keeps it on trial", async () => {
+    const ROOT = join(__dirname, "..");
+    const dir = mkdtempSync(join(tmpdir(), "signal-autoupdate-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "dist"));
+    for (const f of ["dist/engine.mjs", "dist/version.json", "package.json", "start-windows.bat"]) copyFileSync(join(ROOT, f), join(dir, f));
+    mkdirSync(join(dir, "data"));
+    writeFileSync(join(dir, "data/config.json"), '{"TELEGRAM_CHAT_ID":"none"}');
+    const before = readVersion(dir);
+    const zip = makeZip([
+      { name: `${TOP}signal/dist/engine.mjs`, data: readFileSync(join(ROOT, "dist/engine.mjs"), "utf8") },
+      { name: `${TOP}signal/dist/version.json`, data: JSON.stringify({ version: "dddddddddddd" }) },
+      { name: `${TOP}signal/package.json`, data: readFileSync(join(ROOT, "package.json"), "utf8") },
+      { name: `${TOP}signal/start-windows.bat`, data: readFileSync(join(ROOT, "start-windows.bat"), "utf8") },
+      { name: `${TOP}signal/docs/NEW.md`, data: "new" },
+    ]);
+    const { base } = await serve({
+      "/v": () => ({ status: 200, body: JSON.stringify({ version: "dddddddddddd" }) }),
+      "/z": () => ({ status: 200, body: zip }),
+    });
+    const port = 20000 + Math.floor(Math.random() * 20000);
+    const start = () => {
+      const proc = spawn(process.execPath, [join(dir, "dist/engine.mjs")], {
+        cwd: dir,
+        env: {
+          ...process.env,
+          SIM: "1",
+          DATA_DIR: join(dir, "data"),
+          PORT: String(port),
+          HOST: "127.0.0.1",
+          LEARN_EVERY_HOURS: "0",
+          SIGNAL_SUPERVISED: "1",
+          SIGNAL_SELF_UPDATE: "1",
+          SIGNAL_UPDATE_ZIP_URL: `${base}/z`,
+          SIGNAL_UPDATE_VERSION_URL: `${base}/v`,
+        },
+        stdio: "ignore",
+      });
+      return { proc, exited: new Promise<number | null>((r) => proc.on("exit", (code) => r(code))) };
+    };
+    const first = start();
+    let second: ReturnType<typeof start> | null = null;
+    try {
+      await up(port);
+      const local = { "x-signal": "1", "content-type": "application/json" };
+      expect((await (await fetch(`http://127.0.0.1:${port}/api/setup`)).json()).update).toMatchObject({ can: true, auto: true, current: before });
+      // a check finds it; nothing is in the middle of an order, so it installs, test-starts and restarts
+      await fetch(`http://127.0.0.1:${port}/api/setup/update-check`, { method: "POST", headers: local, body: "{}" });
+      expect(await first.exited).toBe(75);
+      expect(readVersion(dir)).toBe("dddddddddddd");
+      expect(readFileSync(join(dir, "docs/NEW.md"), "utf8")).toBe("new");
+      expect(JSON.parse(readFileSync(join(dir, "data/update-pending.json"), "utf8"))).toMatchObject({ from: before, to: "dddddddddddd", starts: 0, auto: true });
+      expect(JSON.parse(readFileSync(join(dir, "data/update-backup/backup.json"), "utf8"))).toMatchObject({ from: before, to: "dddddddddddd", added: ["docs/NEW.md"] });
+      expect(badVersions(join(dir, "data"))).toEqual([]);
+      // the starter starts it again: the new version runs, on trial
+      second = start();
+      await up(port);
+      expect((await (await fetch(`http://127.0.0.1:${port}/api/setup`)).json()).update).toMatchObject({ current: "dddddddddddd", available: false });
+      expect(JSON.parse(readFileSync(join(dir, "data/update-pending.json"), "utf8"))).toMatchObject({ starts: 1 });
+    } finally {
+      first.proc.kill("SIGKILL");
+      second?.proc.kill("SIGKILL");
+    }
+  }, 90_000);
+});
+
+/** Waits until a bot answers on `port`. */
+async function up(port: number) {
+  const t0 = Date.now();
+  for (;;) {
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/healthz`)).ok) return;
+    } catch {
+      /* not up yet */
+    }
+    if (Date.now() - t0 > 30_000) throw new Error("server did not start");
+    await new Promise((r) => setTimeout(r, 200));
+  }
+}
+
+const until = async (ok: () => boolean, ms = 5_000) => {
+  const t0 = Date.now();
+  while (!ok()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
+describe("installing by itself", () => {
+  const auto = async (o: { zip?: () => { status: number; body: Buffer | string }; boots?: () => boolean; ready?: () => boolean } = {}) => {
+    const dir = oldInstall();
+    const zip = release("bbbbbbbbbbbb");
+    const { base, hits } = await serve({
+      "/version.json": () => ({ status: 200, body: JSON.stringify({ version: "bbbbbbbbbbbb" }) }),
+      "/bot.zip": o.zip ?? (() => ({ status: 200, body: zip })),
+    });
+    const seen = { restarts: 0, waited: [] as number[], updated: [] as string[], failed: [] as [string, string, boolean][] };
+    const u = new Updater({
+      installDir: dir,
+      selfUpdate: true,
+      log: silentLogger,
+      restart: () => ++seen.restarts > 0,
+      zipUrl: `${base}/bot.zip`,
+      versionUrl: `${base}/version.json`,
+      auto: true,
+      waitMs: 5,
+      ready: (w) => {
+        seen.waited.push(w);
+        return o.ready?.() ?? true;
+      },
+      bootCheck: async () => o.boots?.() ?? true,
+      onAutoUpdated: (from, to) => seen.updated.push(`${from}→${to}`),
+      onFailed: (v, why, again) => seen.failed.push([v, why, again]),
+    });
+    const zips = () => hits.filter((h) => h === "/bot.zip").length;
+    return { dir, u, seen, zips };
+  };
+
+  it("waits while an order is being placed or sold, then installs, keeping what it replaced", async () => {
+    let busy = true;
+    const { dir, u, seen } = await auto({ ready: () => !busy });
+    await u.check();
+    await until(() => seen.waited.length >= 3);
+    expect(seen.restarts).toBe(0);
+    expect(readVersion(dir)).toBe("aaaaaaaaaaaa");
+    busy = false;
+    await until(() => seen.updated.length > 0);
+    expect(seen.updated).toEqual(["aaaaaaaaaaaa→bbbbbbbbbbbb"]);
+    expect(seen.restarts).toBe(1);
+    expect(seen.waited[1]).toBeGreaterThanOrEqual(0);
+    expect(readVersion(dir)).toBe("bbbbbbbbbbbb");
+    expect(JSON.parse(readFileSync(join(dir, "data/update-pending.json"), "utf8"))).toMatchObject({ from: "aaaaaaaaaaaa", to: "bbbbbbbbbbbb", starts: 0, auto: true });
+    // the version before can be put back exactly
+    expect(readFileSync(join(dir, "data/update-backup/files/dist/engine.mjs"), "utf8")).toBe("// bot old");
+    expect(readFileSync(join(dir, "data/config.json"), "utf8")).toBe('{"RPC_URL":"https://secret"}');
+  });
+
+  it("puts the running version back at once when the new one does not start, says so once, and never installs it by itself again", async () => {
+    const { dir, u, seen, zips } = await auto({ boots: () => false });
+    await u.check();
+    await until(() => seen.failed.length > 0);
+    expect(seen.restarts).toBe(0);
+    expect(seen.failed).toEqual([["bbbbbbbbbbbb", expect.stringMatching(/did not start .*put back/), false]]);
+    expect(readFileSync(join(dir, "dist/engine.mjs"), "utf8")).toBe("// bot old");
+    expect(readVersion(dir)).toBe("aaaaaaaaaaaa");
+    expect(existsSync(join(dir, "docs/SETUP-WINDOWS.md"))).toBe(false); // added by the bad version: gone again
+    expect(existsSync(join(dir, "start-mac.command"))).toBe(false);
+    expect(readFileSync(join(dir, "data/config.json"), "utf8")).toBe('{"RPC_URL":"https://secret"}');
+    expect(readFileSync(join(dir, ".env"), "utf8")).toBe("DASHBOARD_TOKEN=mine");
+    expect(badVersions(join(dir, "data"))).toEqual(["bbbbbbbbbbbb"]);
+    expect(existsSync(join(dir, "data/update-pending.json"))).toBe(false);
+    const downloads = zips();
+    await u.check();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(zips()).toBe(downloads);
+    expect(seen.failed).toHaveLength(1);
+  });
+
+  it("tries a download that failed again at the next check, and says so only once", async () => {
+    const { dir, u, seen, zips } = await auto({ zip: () => ({ status: 502, body: "bad gateway" }) });
+    await u.check();
+    await until(() => seen.failed.length > 0);
+    expect(seen.failed[0]).toEqual(["bbbbbbbbbbbb", expect.stringMatching(/502/), true]);
+    await u.check();
+    await until(() => zips() >= 2);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(seen.failed).toHaveLength(1);
+    expect(readVersion(dir)).toBe("aaaaaaaaaaaa");
+    expect(badVersions(join(dir, "data"))).toEqual([]);
+  });
+
+  it("stays quiet when it cannot update itself", async () => {
+    const dir = oldInstall();
+    const u = new Updater({ installDir: dir, selfUpdate: false, log: silentLogger, restart: () => true, auto: true });
+    expect(u.status()).toMatchObject({ can: false, auto: false });
+  });
+});
+
+describe("a new version that keeps stopping", () => {
+  /** An install just updated from aaaa to bbbb, the way apply leaves it. */
+  async function updated() {
+    const dir = oldInstall();
+    const data = join(dir, "data");
+    const files = botFiles(unzip(release("bbbbbbbbbbbb")));
+    backupFiles(dir, files, join(data, "update-backup"), "aaaaaaaaaaaa", "bbbbbbbbbbbb");
+    await installFiles(dir, files);
+    writeFileSync(join(data, "update-pending.json"), JSON.stringify({ from: "aaaaaaaaaaaa", to: "bbbbbbbbbbbb", at: 1_000, starts: 0, auto: true }));
+    return { dir, data };
+  }
+
+  it("is put back after its fourth start within half an hour, marked, and said once by the version put back", async () => {
+    const { dir, data } = await updated();
+    for (let i = 1; i <= 3; i++) expect(guardStartup(dir, data, 1_000 + i * 60_000)).toMatchObject({ state: "trying", starts: i, from: "aaaaaaaaaaaa", to: "bbbbbbbbbbbb", auto: true });
+    expect(readVersion(dir)).toBe("bbbbbbbbbbbb");
+    expect(guardStartup(dir, data, 1_000 + 4 * 60_000)).toMatchObject({ state: "rolledBack", from: "bbbbbbbbbbbb", to: "aaaaaaaaaaaa" });
+    expect(readVersion(dir)).toBe("aaaaaaaaaaaa");
+    expect(readFileSync(join(dir, "dist/engine.mjs"), "utf8")).toBe("// bot old");
+    expect(existsSync(join(dir, "docs/SETUP-WINDOWS.md"))).toBe(false);
+    expect(readFileSync(join(dir, "data/config.json"), "utf8")).toBe('{"RPC_URL":"https://secret"}');
+    expect(badVersions(data)).toEqual(["bbbbbbbbbbbb"]);
+    // the version put back starts normally and says what happened, once
+    expect(guardStartup(dir, data, 1_000 + 5 * 60_000).state).toBe("none");
+    expect(takeRollbackNote(data)).toEqual({ from: "bbbbbbbbbbbb", to: "aaaaaaaaaaaa", at: expect.any(Number) });
+    expect(takeRollbackNote(data)).toBeNull();
+  });
+
+  it("is kept once it ran long enough, and restarts long after the update are not held against it", async () => {
+    const { dir, data } = await updated();
+    const t = guardStartup(dir, data, 2_000);
+    expect(t).toMatchObject({ state: "trying", starts: 1 });
+    t.confirm();
+    for (let i = 0; i < 6; i++) expect(guardStartup(dir, data, 3_000 + i).state).toBe("none");
+    expect(readVersion(dir)).toBe("bbbbbbbbbbbb");
+    // not confirmed, but the restarts come after the first half hour
+    const late = await updated();
+    for (let i = 1; i <= 6; i++) expect(guardStartup(late.dir, late.data, 1_000 + 31 * 60_000 + i).state).toBe("trying");
+    expect(readVersion(late.dir)).toBe("bbbbbbbbbbbb");
+  });
+
+  it("keeps the copy of the version before until all of it is back", async () => {
+    const dir = oldInstall();
+    const backup = join(dir, "data/update-backup");
+    const files = botFiles(unzip(release("bbbbbbbbbbbb")));
+    const b = backupFiles(dir, files, backup, "aaaaaaaaaaaa", "bbbbbbbbbbbb");
+    expect(b.replaced.sort()).toEqual(["dist/engine.mjs", "dist/version.json"]);
+    expect(b.added.sort()).toEqual(["docs/SETUP-WINDOWS.md", "start-mac.command"]);
+    await installFiles(dir, files);
+    expect(restoreBackup(dir, backup)).toMatchObject({ from: "aaaaaaaaaaaa", to: "bbbbbbbbbbbb" });
+    expect(readVersion(dir)).toBe("aaaaaaaaaaaa");
+    expect(existsSync(backup)).toBe(false);
+    expect(restoreBackup(dir, backup)).toBeNull();
+  });
+});
+
+describe("the test start of a new version", () => {
+  const ROOT = join(__dirname, "..");
+  function install(engine?: string) {
+    const dir = mkdtempSync(join(tmpdir(), "signal-boot-"));
+    dirs.push(dir);
+    mkdirSync(join(dir, "dist"));
+    if (engine === undefined) copyFileSync(join(ROOT, "dist/engine.mjs"), join(dir, "dist/engine.mjs"));
+    else writeFileSync(join(dir, "dist/engine.mjs"), engine);
+    writeFileSync(join(dir, "package.json"), "{}");
+    mkdirSync(join(dir, "data"));
+    return dir;
+  }
+  const snapshot = (d: string): string[] => {
+    const out: string[] = [];
+    const walk = (p: string) => {
+      for (const name of readdirSync(p)) {
+        const f = join(p, name);
+        const st = statSync(f);
+        if (st.isDirectory()) walk(f);
+        else out.push(`${f.slice(d.length)} ${st.size} ${st.mtimeMs}`);
+      }
+    };
+    walk(d);
+    return out.sort();
+  };
+
+  it("loads the saved settings and open trades of the running bot, and writes nothing", async () => {
+    const dir = install();
+    // a bot with an open paper trade, saved the way the running bot saves it
+    const s = new Scenario({ entryAt: momentTag("age", 30), scoreOnly: true }, { outcomeHorizonMs: 20 * 60_000 });
+    const mint = key(701);
+    s.create(mint, key(702));
+    s.crowd(mint, 30, 0.3, 6030, 1500);
+    s.advance(2_000);
+    expect(s.positions().length).toBeGreaterThan(0);
+    writeFileSync(join(dir, "data/state.json"), JSON.stringify(s.engine.exportState()));
+    writeFileSync(join(dir, "data/autopilot.json"), JSON.stringify({ active: null, log: [] }));
+    const before = snapshot(join(dir, "data"));
+    expect(await bootCheck(dir, { ...process.env, DATA_DIR: join(dir, "data") })).toBe(true);
+    expect(snapshot(join(dir, "data"))).toEqual(before);
+  }, 60_000);
+
+  it("fails for a version that does not load, or does not finish in time", async () => {
+    expect(await bootCheck(install("throw new Error('broken build');"), { ...process.env })).toBe(false);
+    expect(await bootCheck(install("setInterval(() => {}, 1000);"), { ...process.env }, 1_500)).toBe(false);
   }, 60_000);
 });

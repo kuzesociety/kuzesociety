@@ -192,7 +192,7 @@ export function App() {
       )}
       {!ext.demo && health?.update?.available && health.update.can && (
         <div class="banner info">
-          <span style="flex:1">A new version of SIGNAL is ready.</span>
+          <span style="flex:1">{health.update.auto ? "A new version of SIGNAL is being installed by itself — open trades stay open." : "A new version of SIGNAL is ready."}</span>
           <button class="btn sm" onClick={() => navigate("more", "setup")}>
             Update
           </button>

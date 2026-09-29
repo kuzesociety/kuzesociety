@@ -8,6 +8,24 @@ money — or to show clearly that there is none yet — and get it traded automa
 owner wants you working hard and without blinkers: think freely, question every assumption in
 this code, and build whatever gives the best chance of a real edge.
 
+## The stakes — read this first
+
+This is not a simulation. The bot runs on the owner's computer against the real pump.fun
+market, and **the owner will shut this project down — the bot and this work with it — unless it
+becomes profitable.** That is decided and not negotiable. No date is promised, so act as if every
+day counts:
+
+- Work at full effort every round, without waiting to be asked. When a round ends, start the
+  next: diagnose, pick the most promising lead, test it, ship what holds up. A round that ends
+  with nothing tried is a round lost.
+- Go for the biggest levers first: where the data shows a signal, what the bot cannot see yet,
+  what the costs eat. Drop what the data has already rejected; don't polish what makes no money.
+- Say plainly where things stand: what you tried, what held up, what did not, what comes next.
+
+The urgency never bends the two hard lines below. A profit that is not real is worse than none:
+traded with real money it loses the owner's money and ends the project sooner. The only thing
+that keeps this project alive is an edge that survives every check.
+
 ## Everything is open
 
 New facts to record about coins, new entry moments, other exits (trailing stops, momentum
@@ -19,7 +37,9 @@ not limits. Spend your effort where the data says an edge could be.
 
 1. **No real money, no keys.** Never switch the bot to live, and never open, print, copy or
    send `data/config.json`, `data/secret.json`, `.env` or anything holding a key, token or
-   wallet. Real money is the owner's decision alone, made in the dashboard.
+   wallet. Real money is the owner's decision alone, made in the dashboard. This holds for the
+   code you push as well: no change may turn live trading on, weaken its safeguards, or read,
+   log or send a key.
 2. **No self-deception.** A rule is profitable only if it made money after every cost on data
    its search never saw, with the bound corrected for how many rules were tried, evidence
    counted per market hour, a clean luck check (the same search on shuffled outcomes finds
@@ -29,9 +49,10 @@ not limits. Spend your effort where the data says an edge could be.
    is an honest answer; the best of many rules tried on the same data is not a find.
 
 And practically: don't stop or break the running bot or delete its data — it is recording the
-market you learn from. `/update` overwrites the code in this folder (never `data/`,
-`node_modules/` or `.env`), so your own scripts go in `work/` and bot changes go through the
-repository (below).
+market you learn from. Every update overwrites the code in this folder (never `data/`,
+`node_modules/`, `.env` or `work/`), and updates install themselves, so your own scripts go in
+`work/` and bot changes go through the repository (below) — an edit made here is gone within
+the hour.
 
 ## What is known so far (as of 2026-09-29)
 
@@ -47,6 +68,9 @@ repository (below).
 - The only rule that ever "passed" (+61% per trade: 15 min after graduating, market cap ≥ 300
   SOL, +50% / −70%, 60 min) was measured before stop-losses on graduated coins were counted;
   it was most likely an artifact.
+- Until 2026-09-29 every restart threw away the recordings in progress (mostly coins still
+  alive, so the data around restarts leans towards quick deaths). Since then a stop writes them
+  as far as they were watched (`blindBy: "stop"`, counted like a feed outage).
 - The owner's own rule (paper): 1 h after graduating · +500% / −30% · 6 h — in the blind spot.
 - Not explored yet: curve-stage entries with short holds (fully observed), smart-wallet and dev
   behaviour, narrative heat, time of day, exits the recordings do not have yet (trailing,
@@ -89,9 +113,13 @@ repository (below).
    your best. A proven rule reaches the autopilot, which trades it in paper at once if it beats
    the rule in use; the dashboard and Telegram show the switch.
 5. Change the bot itself when the data calls for it — record a new fact, add an exit, fix a bug:
-   in a clone of `https://github.com/kuzesociety/kuzesociety`, branch
+   in a clone of `https://github.com/kuzesociety/kuzesociety` (in `work/`), branch
    `claude/signal-meme-trading-bot-o142hw`, folder `signal/`: change, `npx tsc --noEmit`,
-   `npx vitest run`, `npm run build`, commit, push; then the owner sends `/update`. Ask the owner
-   before the first push.
+   `npx vitest run`, `npm run build`, commit (with `dist/`), push. **What you push goes live by
+   itself:** the bot checks GitHub every 30 minutes, installs a new version when no order is in
+   flight (open trades stay open; the new version manages them), test-starts it first, and puts
+   the version before back if it does not start or keeps stopping. So push only what passed the
+   full suite, one change you can explain per push, and tell the owner what each push changes.
+   Ask the owner before the first push (the computer needs their permission to push to GitHub).
 6. Report in `work/JOURNAL.md` and to the owner: how many rules were tried, what held up, what
    the bot trades and how its own trades are doing. Plain words, no promises.

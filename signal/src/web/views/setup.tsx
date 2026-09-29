@@ -28,7 +28,7 @@ interface SetupStatus {
   live: { enabled: boolean; pendingRestart: boolean; walletSet: boolean; address: string | null; maxPositionSol: number; maxDailyLossSol: number; ready: boolean };
   phoneUrl: string | null;
   anywhereUrl: string | null;
-  update: { current: string | null; latest: string | null; checkedAt: number; available: boolean; can: boolean; why: string | null; state: string; error: string | null } | null;
+  update: { current: string | null; latest: string | null; checkedAt: number; available: boolean; can: boolean; why: string | null; state: string; error: string | null; auto?: boolean } | null;
 }
 
 function ago(ts: number) {
@@ -144,7 +144,9 @@ export function SetupView() {
       {u.available && u.can && (
         <>
           <p class="muted" style="margin:0 0 8px">
-            One tap: the bot downloads it, restarts by itself in about a minute, and keeps your keys, settings, history and open trades.
+            {u.auto
+              ? "The bot installs it by itself within minutes (never in the middle of an order), test-starts it, restarts into it and keeps your keys, settings, history and open trades. Or now:"
+              : "One tap: the bot downloads it, restarts by itself in about a minute, and keeps your keys, settings, history and open trades."}
           </p>
           <button
             class="btn primary"
@@ -163,7 +165,9 @@ export function SetupView() {
       {!u.available && (
         <div class="row wrap" style="gap:8px">
           <span class="faint" style="flex:1">
-            {!u.can ? u.why : u.checkedAt ? `Checked ${ago(u.checkedAt)} · checks by itself every few hours.` : "Checks by itself every few hours."}
+            {!u.can
+              ? u.why
+              : `${u.checkedAt ? `Checked ${ago(u.checkedAt)} · ` : ""}${u.auto ? "installs new versions by itself (checks every 30 min); open trades stay open, and a version that does not run is put back." : "checks by itself every few hours."}`}
           </span>
           {u.can && (
             <button

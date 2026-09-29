@@ -28,7 +28,7 @@ import { DashboardServer } from "./server.js";
 import { type SetupKey, SetupStore, lanAddress, openBrowser, tailscaleAddress } from "./setup.js";
 import { DataStore, autoDataMaxMb, sampleLimits, sampleScale } from "./store.js";
 import { Telegram } from "./telegram.js";
-import { Updater, findInstallDir, readVersion } from "./update.js";
+import { Updater, findInstallDir, guardStartup, readVersion, takeRollbackNote } from "./update.js";
 import { strategyList } from "../core/presets.js";
 
 declare const __DASHBOARD_HTML__: string | undefined;
@@ -40,6 +40,16 @@ function dashboardHtml(): string {
     if (existsSync(p)) return readFileSync(p, "utf8");
   }
   return "<!doctype html><title>SIGNAL</title><p>Dashboard not built. Run <code>npm run build</code>.</p>";
+}
+
+/** An update kept stopping after it was installed and the version before was put back: start again, into it. */
+export class RolledBack extends Error {
+  constructor(
+    readonly from: string,
+    readonly to: string | null,
+  ) {
+    super(`Version ${from} kept stopping after it was installed, so the version before${to ? ` (${to})` : ""} was put back.`);
+  }
 }
 
 /** Another SIGNAL already answers on this computer's port. */
@@ -78,6 +88,11 @@ export async function main() {
   // one bot per computer: a second copy (say, one started with Windows and minimized, and one
   // started by hand) would stream everything twice and fight over the same files
   if (await answersAsSignal(config.port)) throw new AlreadyRunning(config.port, config.dataDir);
+  // after an update: a new version that keeps stopping is put back (update.ts guardStartup)
+  const installDir = findInstallDir(dirname(fileURLToPath(import.meta.url)));
+  const selfUpdate = process.env.SIGNAL_SELF_UPDATE === "1" && process.env.SIGNAL_SUPERVISED === "1";
+  const trial = installDir && selfUpdate ? guardStartup(installDir, config.dataDir) : null;
+  if (trial?.state === "rolledBack") throw new RolledBack(trial.from ?? "?", trial.to ?? null);
   const log = new ServerLog(config.logLevel);
   const store = new DataStore(config.dataDir, log);
 
@@ -388,6 +403,27 @@ export async function main() {
   };
   startTelegram();
 
+  // what the last update did, said once by the version that runs now
+  const open = () => engine.positions.size;
+  const tell = (html: string) => telegram?.send(html);
+  const back = takeRollbackNote(config.dataDir);
+  if (back) {
+    log.warn(`update put back: version ${back.from} kept stopping, running ${back.to ?? "the version before"} again`);
+    tell(
+      `↩️ <b>Update put back.</b> Version ${back.from.slice(0, 7)} kept stopping after it was installed, so SIGNAL went back to ${back.to ? `version ${back.to.slice(0, 7)}` : "the version before"}. Open trades: ${open()}, still managed. That version is not installed by itself again; the next one is.`,
+    );
+  }
+  if (trial?.state === "trying") {
+    // kept once it has run for 10 minutes; until then, stopping again and again puts the version before back
+    setTimeout(() => trial.confirm(), 10 * 60_000).unref();
+    if (trial.starts === 1) {
+      log.info(`running the update just installed (${trial.to}); the version before is kept until this one has run for 10 minutes`);
+      tell(
+        `${trial.auto ? "🔄 <b>SIGNAL updated itself</b>" : "✅ <b>Update installed</b>"} · v ${String(trial.to).slice(0, 7)}${trial.from ? ` (was ${trial.from.slice(0, 7)})` : ""}. Open trades kept: ${open()}, managed by the new version. If it keeps stopping, the version before is put back by itself.`,
+      );
+    }
+  }
+
   // Changing the data feed or the wallet restarts the bot (state is saved first). Only done
   // under a supervisor that starts it again: the Windows/Mac starters, Docker, systemd.
   let shutdownRef: (code: number) => void = () => {};
@@ -397,18 +433,30 @@ export async function main() {
     return true;
   };
 
-  // one-tap updates for copies installed from the ZIP download (the Windows and Mac starters)
+  // updates for copies installed from the ZIP download (the Windows and Mac starters): by
+  // themselves unless AUTO_UPDATE=0, or with one tap. Open trades stay open across the restart.
+  const autoUpdate = process.env.AUTO_UPDATE !== "0";
   updater = new Updater({
-    installDir: findInstallDir(dirname(fileURLToPath(import.meta.url))),
-    selfUpdate: process.env.SIGNAL_SELF_UPDATE === "1" && process.env.SIGNAL_SUPERVISED === "1",
+    installDir,
+    selfUpdate,
     log,
     restart,
     notedFile: join(config.dataDir, "update-noted"),
     // the official download unless overridden (tests)
     zipUrl: process.env.SIGNAL_UPDATE_ZIP_URL || undefined,
     versionUrl: process.env.SIGNAL_UPDATE_VERSION_URL || undefined,
-    onAvailable: () =>
-      telegram?.send("⬆️ <b>A SIGNAL update is ready.</b>\nSend /update to install it, or tap Update in the dashboard (More → Setup). The bot restarts by itself in about a minute."),
+    auto: autoUpdate,
+    dataDir: config.dataDir,
+    // never in the middle of placing or selling an order; a learning run gets up to 2 hours to finish
+    ready: (waitedMs) => ![...engine.positions.values()].some((p) => p.status === "opening" || p.status === "closing") && (!learner?.busy || waitedMs > 2 * 3_600_000),
+    onAutoUpdated: (from, to) => log.info("installed an update by itself — restarting into it", { from, to, open: engine.positions.size }),
+    onFailed: (v, why, again) =>
+      telegram?.send(
+        `⚠️ SIGNAL could not install update ${v.slice(0, 7)} by itself: ${why}. It keeps running the version it has${again ? " and tries again at the next check (every 30 min)" : "; that version is not tried again, the next one is"}.`,
+      ),
+    onAvailable: autoUpdate
+      ? undefined
+      : () => telegram?.send("⬆️ <b>A SIGNAL update is ready.</b>\nSend /update to install it, or tap Update in the dashboard (More → Setup). The bot restarts by itself in about a minute."),
   });
   updater.start();
 
@@ -436,7 +484,7 @@ export async function main() {
       pools: pools ? { resolved: pools.resolved } : null,
       simulated: config.feeds.has("sim"),
       dataDir: config.dataDir,
-      update: updater ? { current: updater.current, available: updater.available, can: updater.can } : null,
+      update: updater ? { current: updater.current, available: updater.available, can: updater.can, auto: updater.status().auto } : null,
       storage,
     }),
   });
@@ -475,6 +523,12 @@ export async function main() {
     process.exitCode = code;
     log.info("shutting down — saving state");
     try {
+      // recordings in progress are kept as far as they were watched, not lost with the process
+      engine.endRecordings();
+    } catch (e) {
+      log.error("could not write the open recordings", { err: String(e) });
+    }
+    try {
       engine.persistNow();
       store.saveWallets(engine.wallets.snapshot());
     } catch (e) {
@@ -509,6 +563,41 @@ export async function main() {
   return { engine, server, store, shutdown };
 }
 
+/**
+ * `--boot-check`: an update test-starts the new version this way before switching to it
+ * (update.ts bootCheck). It loads what a start loads — the settings, open trades, the score, the
+ * learner's files, the dashboard — and runs the engine for a few steps, but connects to nothing,
+ * serves nothing and writes nothing: the running bot owns the data folder.
+ */
+export async function checkBoot(): Promise<void> {
+  loadDotEnv();
+  new SetupStore(resolve(process.env.DATA_DIR ?? "./data")).applyTo(process.env);
+  const config = loadConfig();
+  const log = new ServerLog("error");
+  const store = new DataStore(config.dataDir, log);
+  try {
+    const now = Date.now();
+    const engine = new Engine({
+      now,
+      model: store.loadModel() ?? priorModel(now),
+      log,
+      config: { paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10, maxSamplesInMemory: 10_000 },
+    });
+    const saved = store.loadState();
+    if (saved) engine.restore(saved);
+    for (let i = 1; i <= 20; i++) engine.advance(now + i * 500);
+    const learner = new Learner({ store, engine: () => engine, log, everyHours: 0, sampleDays: config.sampleDays });
+    learner.load();
+    learner.autopilotView();
+    learner.labView();
+    ruleSummary(engine.settings);
+    strategyList(learner.lastEdges);
+    if (!dashboardHtml().includes("<script")) throw new Error("the dashboard is missing");
+  } finally {
+    store.close();
+  }
+}
+
 const isEntry = (() => {
   try {
     return process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
@@ -516,8 +605,22 @@ const isEntry = (() => {
     return false;
   }
 })();
-if (isEntry || process.env.SIGNAL_FORCE_MAIN === "1") {
+if ((isEntry || process.env.SIGNAL_FORCE_MAIN === "1") && process.argv.includes("--boot-check")) {
+  checkBoot().then(
+    () => process.exit(0),
+    (e) => {
+      console.error("SIGNAL boot check failed:", e);
+      process.exit(1);
+    },
+  );
+} else if (isEntry || process.env.SIGNAL_FORCE_MAIN === "1") {
   main().catch((e) => {
+    if (e instanceof RolledBack) {
+      console.log(`\n  ${e.message}\n  Starting it again.\n`);
+      // 75: the starter scripts start the bot again at once
+      setTimeout(() => process.exit(75), 300);
+      return;
+    }
     if (e instanceof AlreadyRunning) {
       console.log(`\n  ${e.message}\n  Its window may be minimized on the taskbar. Dashboard: http://localhost:${e.port}\n`);
       if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${e.port}/`, e.dataDir);

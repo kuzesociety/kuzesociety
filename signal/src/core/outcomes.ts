@@ -50,6 +50,13 @@ export const ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95] as const;
  */
 export type SampleKind = "checkpoint" | "signal" | "entry" | "moment";
 
+/**
+ * Why a recording stopped being watched: "pool" — its PumpSwap pool was no longer followed;
+ * "feed" — the trade feed went quiet; "stop" — the bot stopped (a restart, an update), and the
+ * recording was written as far as it had been watched instead of being lost (OutcomeTracker.endAll).
+ */
+export type BlindBy = "pool" | "feed" | "stop";
+
 export interface Sample {
   id: string;
   kind: SampleKind;
@@ -82,12 +89,12 @@ export interface Sample {
   f?: EntryFacts;
   /**
    * seconds after entry at which the coin's price stopped reaching us (its PumpSwap pool was no
-   * longer followed, or the trade feed went quiet); exits after that were not observed and are
-   * unknown (comboObserved). Missing: observed to the end.
+   * longer followed, the trade feed went quiet, or the bot stopped); exits after that were not
+   * observed and are unknown (comboObserved). Missing: observed to the end.
    */
   blind?: number;
-  /** why `blind`: "pool" — its PumpSwap pool was no longer followed; "feed" — the trade feed went quiet */
-  blindBy?: "pool" | "feed";
+  /** why `blind` (see BlindBy) */
+  blindBy?: BlindBy;
   /**
    * 1: recorded while `blind` was tracked. Older graduated-coin samples froze at their last price
    * once their pool stopped being followed, without saying when, so none of their exits is trusted.
@@ -146,7 +153,7 @@ interface Hypo {
   f?: EntryFacts;
   /** when the price stopped being observed (ms), and why */
   blind?: number;
-  blindBy?: "pool" | "feed";
+  blindBy?: BlindBy;
   /** the latest net multiple seen */
   lastM: number;
 }
@@ -178,7 +185,7 @@ export function comboObserved(s: Pick<Sample, "blind" | "gridT" | "ov" | "stage"
 export function counts(s: Pick<Sample, "blind" | "blindBy" | "ov" | "stage">, exitSec: number, windowSec = Infinity): boolean {
   if (s.ov === undefined && s.stage === "amm") return false;
   if (s.blind === undefined) return true;
-  if (s.stage === "amm" || s.blindBy === "feed") return windowSec <= s.blind;
+  if (s.stage === "amm" || s.blindBy === "feed" || s.blindBy === "stop") return windowSec <= s.blind;
   return Math.min(exitSec, windowSec) <= s.blind;
 }
 
@@ -236,7 +243,7 @@ export class OutcomeTracker {
    * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
    * dropped — their entry could not be seen.
    */
-  blindMint(mint: string, at: number, by: "pool" | "feed" = "pool") {
+  blindMint(mint: string, at: number, by: BlindBy = "pool") {
     const list = this.byMint.get(mint);
     if (!list) return;
     for (const h of [...list]) {
@@ -256,6 +263,40 @@ export class OutcomeTracker {
   /** The trade feed went quiet at `at`: nothing open is observed from then on. */
   blindAll(at: number) {
     for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at, "feed");
+  }
+
+  /**
+   * The bot is stopping (a restart, an update): every open would-be trade is written now, as
+   * watched up to `at`, instead of being lost with the process. Like a trade-feed outage, each then
+   * counts only for rules whose whole window it was watched through (counts); exits it had not
+   * reached are written past any window (at the horizon), so they are never taken for results.
+   * Losing them instead would drop mostly the coins still alive at the stop — a bias.
+   */
+  endAll(at: number) {
+    const timeout = KINDS.indexOf("timeout");
+    for (const list of [...this.byMint.values()]) {
+      for (const h of [...list]) {
+        if (!h.entered) {
+          this.remove(h);
+          continue;
+        }
+        if (h.blind === undefined) {
+          h.blind = Math.max(at, h.ts);
+          h.blindBy = "stop";
+        }
+        for (let i = 0; i < COMBOS; i++) {
+          const o = i * SLOT;
+          if (h.c[o + STATE] === 2) continue;
+          // exits already triggered and landing: at the last price seen
+          if (h.c[o + STATE] !== 1) {
+            h.c[o + KIND] = timeout;
+            h.c[o + TIME] = this.opts.horizonMs / 1000;
+          }
+          this.resolveCombo(h, i, h.lastM);
+        }
+        this.emit(h, at);
+      }
+    }
   }
 
   add(

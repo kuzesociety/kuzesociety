@@ -97,6 +97,42 @@ describe("outcomes nobody observed", () => {
     }
   });
 
+  it("when the bot stops (a restart, an update), open recordings are written as far as they were watched, not lost", () => {
+    const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN });
+    const mint = key(91);
+    s.create(mint, key(92));
+    s.crowd(mint, 12, 0.3, 9300, 5000); // a minute of trading: the early checkpoints open
+    const pumpAt = s.now;
+    s.buy(mint, key(9400), 12, 1000); // a big buy: the quick +25% targets are hit while watched
+    s.advance(3 * MIN);
+    const open = s.engine.outcomes.open;
+    expect(open).toBeGreaterThan(0);
+    const written = s.engine.samples.length;
+    const stopAt = s.now;
+    s.engine.endRecordings();
+    expect(s.engine.outcomes.open).toBe(0);
+    const cut = s.engine.samples.toArray().slice(written);
+    expect(cut.length).toBe(open);
+    for (const x of cut) {
+      expect(x.blindBy).toBe("stop");
+      expect(x.blind).toBeCloseTo((stopAt - x.ts) / 1000, 0);
+      expect(x.resolvedAt).toBe(stopAt);
+      // exits reached while watched are kept (the +25% of those opened before the big buy); the rest never count as results
+      if (x.ts < pumpAt - 1500) {
+        expect(comboObserved(x, gi(25, 10))).toBe(true);
+        expect(x.grid[gi(25, 10)]!).toBeGreaterThan(0);
+      }
+      expect(comboObserved(x, gi(500, 10))).toBe(false);
+      expect(comboCounts(x, gi(500, 10))).toBe(false);
+      // like an outage: a rule counts it only if its whole window was watched
+      expect(counts(x, 30, 60)).toBe(x.blind! >= 60);
+      expect(counts(x, 30, 3600)).toBe(false);
+    }
+    expect(cut.filter((x) => x.ts < pumpAt - 1500).length).toBeGreaterThan(0);
+    // the score never learns from a cut recording
+    expect(cut.every((x) => labelOf(x, { tpPct: 25, slPct: 10 }) === null)).toBe(true);
+  });
+
   it("a reconnect of a few seconds is not an outage: nothing is cut, entries only wait meanwhile", () => {
     const s = new Scenario({ enabled: false }, { outcomeHorizonMs: 20 * MIN });
     const feed = { name: "rpc", status: "open" as "open" | "connecting", lastMsgAt: s.now, msgs: 1, reconnects: 0, errors: 0, critical: true };
@@ -170,6 +206,11 @@ describe("outcomes nobody observed", () => {
     const outage = { stage: "curve", ov: 1, blind: 1800, blindBy: "feed" } as Sample;
     expect(counts(outage, 300, 600)).toBe(true);
     expect(counts(outage, 300)).toBe(false);
+    // cut by the bot stopping: the same as an outage
+    const stopped = { ...outage, blindBy: "stop" } as Sample;
+    expect(counts(stopped, 300, 600)).toBe(true);
+    expect(counts(stopped, 300, 3600)).toBe(false);
+    expect(counts(stopped, 300)).toBe(false);
     // bought on the curve, its pool dropped after it graduated: graduating is a result, the exit only needs to be seen
     const graduated = { stage: "curve", ov: 1, blind: 1800, blindBy: "pool" } as Sample;
     expect(counts(graduated, 300)).toBe(true);

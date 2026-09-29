@@ -179,14 +179,16 @@ export function coverage(samples: Sample[], now: number, feedDown: boolean): Che
   if (feedDown) return { key: "coverage", status: "fail", title, detail: "No trade data for over a minute: no new entries, and nothing open is observed until it is back." };
   const day = samples.filter((s) => s.resolvedAt >= now - DAY && s.ov === 1);
   const amm = day.filter((s) => s.stage === "amm");
-  const ammBlind = amm.filter((s) => s.blind !== undefined && s.blindBy !== "feed");
+  const ammBlind = amm.filter((s) => s.blind !== undefined && s.blindBy !== "feed" && s.blindBy !== "stop");
   const outage = day.filter((s) => s.blind !== undefined && s.blindBy === "feed").length;
+  const stopped = day.filter((s) => s.blind !== undefined && s.blindBy === "stop").length;
   const parts: string[] = [];
   if (amm.length)
     parts.push(
       `${Math.round((ammBlind.length / amm.length) * 100)}% of graduated-coin recordings stopped being watched before they ended (the bot follows at most 40 pools). Those count only for rules whose time limit they were watched through, never by how they ended, so rules on graduated coins that hold long are judged by the bot's own trades`,
     );
   if (outage) parts.push(`${Math.round((outage / day.length) * 100)}% of all recordings were cut by trade-feed outages (a minute or more without data)`);
+  if (stopped) parts.push(`${Math.round((stopped / day.length) * 100)}% were cut by the bot restarting (updates, settings that need a restart), kept as far as they were watched`);
   if (!day.length) return { key: "coverage", status: "info", title, detail: "No recordings finished in the last 24 h yet." };
   const status: CheckStatus = outage / day.length > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
   return { key: "coverage", status, title, detail: parts.length ? `Last 24 h: ${parts.join("; ")}.` : `Last 24 h: all ${day.length} recordings were observed to the end.` };

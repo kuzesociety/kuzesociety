@@ -50,7 +50,7 @@ From then on you get a message for every buy and sell, and you can run the bot f
 | `/edges` | has the bot found an edge? The edge finder's latest answer (it checks every 2 hours once it has a day of data) |
 | `/pause` · `/resume` | auto-trading off / on |
 | `/score 75` `/tp 100` `/sl 50` `/hold 10` | change one part of the rule (saved at once) |
-| `/update` | installs the newest version; the bot says hello with the new version number when it is back |
+| `/update` | installs the newest version now (it also does so by itself); the bot says hello with the new version number when it is back |
 | `/link` | the dashboard link for your phone |
 | `/kill` | stop entries and sell everything |
 
@@ -70,14 +70,11 @@ From then on you get a message for every buy and sell, and you can run the bot f
 - **The dashboard on your phone, anywhere (free):** install [Tailscale](https://tailscale.com/download) on the PC (sign in with Google), then the Tailscale app on your phone with the same account. **More → Setup → 4** and Telegram's `/link` then give a link that opens the full dashboard from anywhere — add it to your home screen. Without Tailscale the link works on your home Wi-Fi only; Telegram works everywhere either way.
 - **Stop:** close the black window. **Start:** double-click `start-windows.bat` again. Everything is saved in `C:\SIGNAL\data`.
 
-## 8. Updates (one tap)
+## 8. Updates (by themselves)
 
-The bot checks for a new version every few hours. When one is ready:
+The bot checks for a new version every 30 minutes and installs it on its own: never in the middle of buying or selling, it test-starts the new version first, then restarts into it in a few seconds. Your keys, settings, history and **open trades** are kept — the new version picks the open trades up and manages their exits. Telegram tells you each time (**🔄 SIGNAL updated itself**). If a new version does not start, or keeps stopping, the bot goes back to the version before by itself and tells you.
 
-1. The dashboard shows a blue bar **"A new version of SIGNAL is ready"** (and Telegram tells you).
-2. Tap **Update** → **Update now**. The bot downloads it, restarts by itself in about a minute, and keeps your keys, settings, history and open trades.
-
-From your phone anywhere: send `/update` to your Telegram bot. You can see your version and check by hand in **More → Setup**.
+To install right away: **More → Setup → Update now**, or send `/update` from your phone. To update only when you say so, add the line `AUTO_UPDATE=0` to the `.env` file in `C:\SIGNAL` and restart the bot.
 
 **Installed before the Update button existed?** Update by hand once:
 

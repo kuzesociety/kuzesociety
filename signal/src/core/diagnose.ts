@@ -85,11 +85,13 @@ function* steps(i: DiagnosisInput): Generator<void, string> {
     const rows = recordedRows(all, i.horizonMs);
     out.push(`- finished and usable by the search (followed for ${Math.round(i.horizonMs / HOUR)} h): ${n0(rows.length)}`);
     const amm = all.filter((x) => x.stage === "amm");
-    const poolCut = amm.filter((x) => x.blind !== undefined && x.blindBy !== "feed").length;
+    const poolCut = amm.filter((x) => x.blind !== undefined && x.blindBy !== "feed" && x.blindBy !== "stop").length;
     const feedCut = all.filter((x) => x.blind !== undefined && x.blindBy === "feed").length;
+    const stopCut = all.filter((x) => x.blind !== undefined && x.blindBy === "stop").length;
     const untrusted = amm.filter((x) => x.ov !== 1).length;
     out.push(`- graduated coins: ${share(amm.length, all.length)} of recordings; ${share(poolCut, amm.length)} of those stopped being watched before they ended (the bot follows at most 40 pools)`);
     out.push(`- cut by trade-feed outages: ${share(feedCut, all.length)} of all recordings`);
+    if (stopCut) out.push(`- cut by the bot stopping (restarts, updates; kept as far as they were watched): ${share(stopCut, all.length)} of all recordings`);
     if (untrusted) out.push(`- graduated-coin recordings from before observation was tracked (not used): ${n0(untrusted)}`);
     const days = new Map<string, { n: number; amm: number; pool: number; feed: number }>();
     for (const x of all) {
@@ -99,7 +101,7 @@ function* steps(i: DiagnosisInput): Generator<void, string> {
       r.n++;
       if (x.stage === "amm") {
         r.amm++;
-        if (x.blind !== undefined && x.blindBy !== "feed") r.pool++;
+        if (x.blind !== undefined && x.blindBy !== "feed" && x.blindBy !== "stop") r.pool++;
       }
       if (x.blind !== undefined && x.blindBy === "feed") r.feed++;
     }

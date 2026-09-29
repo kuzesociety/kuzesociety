@@ -531,7 +531,7 @@ function comboObserved(s, gi) {
 function counts(s, exitSec, windowSec = Infinity) {
   if (s.ov === void 0 && s.stage === "amm") return false;
   if (s.blind === void 0) return true;
-  if (s.stage === "amm" || s.blindBy === "feed") return windowSec <= s.blind;
+  if (s.stage === "amm" || s.blindBy === "feed" || s.blindBy === "stop") return windowSec <= s.blind;
   return Math.min(exitSec, windowSec) <= s.blind;
 }
 function comboCounts(s, gi) {
@@ -587,6 +587,38 @@ var OutcomeTracker = class {
   /** The trade feed went quiet at `at`: nothing open is observed from then on. */
   blindAll(at2) {
     for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at2, "feed");
+  }
+  /**
+   * The bot is stopping (a restart, an update): every open would-be trade is written now, as
+   * watched up to `at`, instead of being lost with the process. Like a trade-feed outage, each then
+   * counts only for rules whose whole window it was watched through (counts); exits it had not
+   * reached are written past any window (at the horizon), so they are never taken for results.
+   * Losing them instead would drop mostly the coins still alive at the stop — a bias.
+   */
+  endAll(at2) {
+    const timeout = KINDS.indexOf("timeout");
+    for (const list of [...this.byMint.values()]) {
+      for (const h of [...list]) {
+        if (!h.entered) {
+          this.remove(h);
+          continue;
+        }
+        if (h.blind === void 0) {
+          h.blind = Math.max(at2, h.ts);
+          h.blindBy = "stop";
+        }
+        for (let i = 0; i < COMBOS; i++) {
+          const o = i * SLOT;
+          if (h.c[o + STATE] === 2) continue;
+          if (h.c[o + STATE] !== 1) {
+            h.c[o + KIND] = timeout;
+            h.c[o + TIME] = this.opts.horizonMs / 1e3;
+          }
+          this.resolveCombo(h, i, h.lastM);
+        }
+        this.emit(h, at2);
+      }
+    }
   }
   add(t, kind, tag, now, score, p, x, custom, facts) {
     if (this.openCount >= this.opts.maxOpen) {
@@ -4556,6 +4588,10 @@ var Engine = class {
     } catch {
     }
   }
+  /** The bot is stopping: open recordings are written as watched up to now instead of being lost (OutcomeTracker.endAll). */
+  endRecordings() {
+    this.outcomes.endAll(this.now);
+  }
   persistNow() {
     this.persistDirty = false;
     this.lastPersist = this.now;
@@ -5113,14 +5149,16 @@ function coverage(samples, now, feedDown) {
   if (feedDown) return { key: "coverage", status: "fail", title, detail: "No trade data for over a minute: no new entries, and nothing open is observed until it is back." };
   const day2 = samples.filter((s) => s.resolvedAt >= now - DAY2 && s.ov === 1);
   const amm = day2.filter((s) => s.stage === "amm");
-  const ammBlind = amm.filter((s) => s.blind !== void 0 && s.blindBy !== "feed");
+  const ammBlind = amm.filter((s) => s.blind !== void 0 && s.blindBy !== "feed" && s.blindBy !== "stop");
   const outage = day2.filter((s) => s.blind !== void 0 && s.blindBy === "feed").length;
+  const stopped = day2.filter((s) => s.blind !== void 0 && s.blindBy === "stop").length;
   const parts = [];
   if (amm.length)
     parts.push(
       `${Math.round(ammBlind.length / amm.length * 100)}% of graduated-coin recordings stopped being watched before they ended (the bot follows at most 40 pools). Those count only for rules whose time limit they were watched through, never by how they ended, so rules on graduated coins that hold long are judged by the bot's own trades`
     );
   if (outage) parts.push(`${Math.round(outage / day2.length * 100)}% of all recordings were cut by trade-feed outages (a minute or more without data)`);
+  if (stopped) parts.push(`${Math.round(stopped / day2.length * 100)}% were cut by the bot restarting (updates, settings that need a restart), kept as far as they were watched`);
   if (!day2.length) return { key: "coverage", status: "info", title, detail: "No recordings finished in the last 24 h yet." };
   const status = outage / day2.length > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
   return { key: "coverage", status, title, detail: parts.length ? `Last 24 h: ${parts.join("; ")}.` : `Last 24 h: all ${day2.length} recordings were observed to the end.` };
@@ -5179,11 +5217,13 @@ function* steps2(i) {
     const rows = recordedRows(all, i.horizonMs);
     out.push(`- finished and usable by the search (followed for ${Math.round(i.horizonMs / HOUR3)} h): ${n0(rows.length)}`);
     const amm = all.filter((x) => x.stage === "amm");
-    const poolCut = amm.filter((x) => x.blind !== void 0 && x.blindBy !== "feed").length;
+    const poolCut = amm.filter((x) => x.blind !== void 0 && x.blindBy !== "feed" && x.blindBy !== "stop").length;
     const feedCut = all.filter((x) => x.blind !== void 0 && x.blindBy === "feed").length;
+    const stopCut = all.filter((x) => x.blind !== void 0 && x.blindBy === "stop").length;
     const untrusted = amm.filter((x) => x.ov !== 1).length;
     out.push(`- graduated coins: ${share(amm.length, all.length)} of recordings; ${share(poolCut, amm.length)} of those stopped being watched before they ended (the bot follows at most 40 pools)`);
     out.push(`- cut by trade-feed outages: ${share(feedCut, all.length)} of all recordings`);
+    if (stopCut) out.push(`- cut by the bot stopping (restarts, updates; kept as far as they were watched): ${share(stopCut, all.length)} of all recordings`);
     if (untrusted) out.push(`- graduated-coin recordings from before observation was tracked (not used): ${n0(untrusted)}`);
     const days = /* @__PURE__ */ new Map();
     for (const x of all) {
@@ -5193,7 +5233,7 @@ function* steps2(i) {
       r2.n++;
       if (x.stage === "amm") {
         r2.amm++;
-        if (x.blind !== void 0 && x.blindBy !== "feed") r2.pool++;
+        if (x.blind !== void 0 && x.blindBy !== "feed" && x.blindBy !== "stop") r2.pool++;
       }
       if (x.blind !== void 0 && x.blindBy === "feed") r2.feed++;
     }

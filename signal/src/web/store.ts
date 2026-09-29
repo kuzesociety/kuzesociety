@@ -48,7 +48,7 @@ export type Health = Record<string, any> & {
   saved?: { at: number; failures: number; error: string };
   dataDir?: string;
   /** one-tap updates (real bot only) */
-  update?: { current: string | null; available: boolean; can: boolean } | null;
+  update?: { current: string | null; available: boolean; can: boolean; auto?: boolean } | null;
 };
 
 export interface AppState {

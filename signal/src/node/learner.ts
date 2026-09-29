@@ -102,7 +102,8 @@ export class Learner {
     },
   ) {}
 
-  start() {
+  /** Reads what the learner keeps in the data folder (the last search, the autopilot, the Lab…), without acting on it. */
+  load() {
     this.lastEdges = (this.o.store.loadEdges() as EdgeReport | null) ?? null;
     if (this.lastEdges?.own) this.ownMeasure = { ...this.lastEdges.own, at: this.lastEdges.generatedAt };
     this.history = this.o.store.loadLearnHistory() as LearnRun[];
@@ -111,6 +112,15 @@ export class Learner {
     this.seen = { autopilot: this.o.engine().settings.autopilot, mode: this.o.engine().settings.mode };
     this.startedAt = Date.now();
     this.lastDaily = ((this.o.store.loadSelfCheck() as { lastDaily?: number } | null)?.lastDaily ?? 0) || Date.now();
+  }
+
+  /** Something is being learned, searched or measured right now (a restart would throw that work away). */
+  get busy() {
+    return this.cycling || this.running || this.edgesRunning || this.labRunning || this.measuring;
+  }
+
+  start() {
+    this.load();
     // your own rule is weighed before a proven rule may replace it (an answer from before this
     // version has no measure of it, and the rule may have changed since the last search)
     const s = this.o.engine().settings;

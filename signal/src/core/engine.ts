@@ -1383,6 +1383,11 @@ export class Engine {
     }
   }
 
+  /** The bot is stopping: open recordings are written as watched up to now instead of being lost (OutcomeTracker.endAll). */
+  endRecordings() {
+    this.outcomes.endAll(this.now);
+  }
+
   persistNow() {
     this.persistDirty = false;
     this.lastPersist = this.now;

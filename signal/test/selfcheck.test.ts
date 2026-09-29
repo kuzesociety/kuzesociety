@@ -93,7 +93,7 @@ describe("self-check", () => {
   });
 
   it("says how much of what it records it could actually see", () => {
-    const s = (stage: "curve" | "amm", blind?: number, blindBy: "pool" | "feed" = "pool") => ({ stage, ov: 1, resolvedAt: NOW - HOUR, ...(blind !== undefined ? { blind, blindBy } : {}) }) as Sample;
+    const s = (stage: "curve" | "amm", blind?: number, blindBy: "pool" | "feed" | "stop" = "pool") => ({ stage, ov: 1, resolvedAt: NOW - HOUR, ...(blind !== undefined ? { blind, blindBy } : {}) }) as Sample;
     expect(coverage([s("curve")], NOW, true).status).toBe("fail");
     expect(coverage([s("curve"), s("amm")], NOW, false).status).toBe("ok");
     const amm = [...Array.from({ length: 30 }, () => s("amm", 600)), ...Array.from({ length: 10 }, () => s("amm"))];
@@ -106,6 +106,12 @@ describe("self-check", () => {
     // coins bought on the curve whose pool was dropped after they graduated are not an outage
     const graduated = [...Array.from({ length: 5 }, () => s("curve", 900)), ...Array.from({ length: 20 }, () => s("curve"))];
     expect(coverage(graduated, NOW, false).status).toBe("ok");
+    // cut by the bot restarting (an update): said, but no outage, and not a pool that was dropped
+    const restarted = [...Array.from({ length: 5 }, () => s("amm", 60, "stop")), ...Array.from({ length: 20 }, () => s("amm"))];
+    const r = coverage(restarted, NOW, false);
+    expect(r.status).toBe("ok");
+    expect(r.detail).toMatch(/0% of graduated-coin recordings stopped being watched/);
+    expect(r.detail).toMatch(/20% were cut by the bot restarting/);
   });
 
   it("flags promises a real market is unlikely to keep", () => {
