@@ -83,9 +83,11 @@ repository (below).
    bound corrected for N (see `holdoutStats` in `edges.ts`).
 4. Hand what survives to the Lab: one rule per line in `data/lab-inbox.txt`, in the Lab's format
    (`LAB_FORMAT` in `src/core/lab.ts`), e.g. `mig300 top10<=25% smart>=1 tp100 sl30 hold30`. The bot
-   takes the file at its next Lab run, tests each rule only on coins after it arrives, and logs
-   what it did in `data/lab-inbox.done.txt`. A proven rule reaches the autopilot, which trades it
-   in paper if it beats the rule in use.
+   takes the file at its next Lab run (every 2 hours), tests each rule only on coins after it
+   arrives — first judged after 60 finished coins, each finishing about 6 hours after entry — and
+   logs what it did in `data/lab-inbox.done.txt`. At most 5 of these are tested at once, so send
+   your best. A proven rule reaches the autopilot, which trades it in paper at once if it beats
+   the rule in use; the dashboard and Telegram show the switch.
 5. Change the bot itself when the data calls for it — record a new fact, add an exit, fix a bug:
    in a clone of `https://github.com/kuzesociety/kuzesociety`, branch
    `claude/signal-meme-trading-bot-o142hw`, folder `signal/`: change, `npx tsc --noEmit`,
