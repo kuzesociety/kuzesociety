@@ -83,6 +83,8 @@ export interface AutopilotState {
   keptOwnOver?: string;
   /** when you last picked the rule by hand */
   pickedAt?: number;
+  /** the pick was already reported as losing on its own trades (said once, not every 10 minutes) */
+  saidLosing?: boolean;
 }
 
 /** A rule a decision is about, with the settings that trade it: one click puts it back in use. */
@@ -125,7 +127,7 @@ export function worstPerDay(rule: EdgeFound, s: Settings): number {
  * (the last 3 days, same mode): the lower end of the 95% range per trade (counted per hour) ×
  * its trades a day. Null until it has AUTOPILOT.trackMin trades — too few to count on.
  */
-export function trackRecord(s: Settings, closed: Position[], now: number): { n: number; mean: number; lo: number; perDay: number; v: number } | null {
+export function trackRecord(s: Settings, closed: Position[], now: number): { n: number; mean: number; lo: number; hi: number; perDay: number; v: number } | null {
   const key = ruleKey(s);
   const from = now - 3 * 24 * HOUR;
   const mine = closed.filter((p) => p.status === "closed" && p.mode === s.mode && p.rule === key && p.openedAt >= from && Number.isFinite(p.pnlPct));
@@ -136,7 +138,7 @@ export function trackRecord(s: Settings, closed: Position[], now: number): { n: 
   );
   const first = Math.min(...mine.map((p) => p.openedAt));
   const perDay = mine.length / Math.max(1 / 24, (now - first) / (24 * HOUR));
-  return { n: mine.length, mean: m.mean, lo: m.lo, perDay, v: Math.max(0, m.lo) * perDay };
+  return { n: mine.length, mean: m.mean, lo: m.lo, hi: m.hi, perDay, v: Math.max(0, m.lo) * perDay };
 }
 
 const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
@@ -258,6 +260,19 @@ export function decideAutopilot(o: {
     benchedNow = true;
   }
 
+  // 1c. …and the rule in use judged against zero, whatever put it there.
+  // A rule the search proved is benched above when it falls short of the worst case it was
+  // switched in on. A rule you picked by hand carries no such promise, so nothing ever stopped
+  // one: on a real bot the pick had made −7.1% a trade over 200 paper trades and was still
+  // trading, because the autopilot only ever replaces your rule with a proven one and nothing
+  // was proven. The bar that matters is the same for both — did it make money. When a rule's own
+  // trades say no, and the top of their range is still below zero (per market hour, so a run of
+  // bad hours is not mistaken for a bad rule), real money stops going into new entries. Open
+  // positions are still managed, and paper keeps trading: there the evidence costs nothing and
+  // is worth having.
+  const ownDead = st.active === null ? (trackRecord(s, o.closed, now) ?? null) : null;
+  const losing = ownDead && ownDead.hi < 0 ? ownDead : null;
+
   // 2. what the latest search proved
   const { fresh, trusted } = evidenceOf(report, now);
   const passes = (r: EdgeFound) => r.holdout.lo > 0 && (!live || (r.holdout.n >= AUTOPILOT.liveMinTrades && r.holdout.lo > AUTOPILOT.liveMinLo));
@@ -328,12 +343,24 @@ export function decideAutopilot(o: {
     return done("switch", { rule: best.r, settings: best.r.settings });
   }
 
-  const why = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) + (o.extra?.length ?? 0) > 0);
+  const none = whyNone(report, fresh, trusted, live, (report?.survivors.length ?? 0) + (o.extra?.length ?? 0) > 0);
+  const why = losing
+    ? `the rule you picked has lost money on its own trades — ${pct(losing.mean)} each over its last ${losing.n}, and at best ${pct(losing.hi)} — and ${none}`
+    : none;
+  if (!live && losing && !st.saidLosing) {
+    st.saidLosing = true;
+    notes.push(
+      `The rule you picked is losing: its last ${losing.n} trades made ${pct(losing.mean)} each, and the top of their range is ${pct(losing.hi)}, so that is not a bad run. Paper keeps trading it — the evidence costs nothing — but with real money new entries would wait until a rule is proven, or you pick another.`,
+    );
+    named.push({ text: `your own rule (${ruleSummary(s)})`, settings: ruleOf(s) });
+  }
+  if (!losing && st.saidLosing) st.saidLosing = undefined;
   if (live) {
     if (st.holding && !st.active) {
       st.holdReason = why;
       return done("none");
     }
+    if (losing) notes.push(`The rule you picked has lost money on its own trades (${pct(losing.mean)} each over its last ${losing.n}, at best ${pct(losing.hi)}).`);
     Object.assign(st, { active: null, proof: null, rule: null, holding: true, holdReason: why });
     notes.push(`Holding new live entries: ${why}. Open positions are still managed.`);
     return done("hold");

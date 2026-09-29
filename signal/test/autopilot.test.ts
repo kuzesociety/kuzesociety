@@ -393,3 +393,58 @@ describe("autopilot in the engine", () => {
     expect(sanitizeSettings({ conds: [{ k: "moon", op: ">=", v: 1 }, { k: "top10", op: "<=", v: 0.3 }, { k: "top10", op: "==", v: 1 }] }).conds).toEqual([{ k: "top10", op: "<=", v: 0.3 }]);
   });
 });
+
+describe("a rule that loses money on its own trades", () => {
+  const s = sanitizeSettings({ autopilot: true, mode: "paper", positionSol: 0.1, maxOpen: 3 });
+  /** trades made under the rule in use, spread over the hours so the range is counted per hour */
+  const under = (n: number, pnlPct: (i: number) => number, mode: "paper" | "live" = "paper"): Position[] =>
+    Array.from({ length: n }, (_, i) =>
+      ({ id: `x${i}`, status: "closed", mode, rule: ruleKey({ ...s, mode } as Settings), openedAt: NOW - 30 * HOUR + i * 30 * 60_000, pnlPct: pnlPct(i), pnl: 0 }) as unknown as Position,
+    );
+
+  it("is reported once, and paper keeps trading it: the evidence costs nothing", () => {
+    // the shape of the rule this bot was actually running: about −7% a trade over 200
+    const losing = under(60, (i) => (i % 5 === 0 ? 20 : -14));
+    const d = decideAutopilot({ report: report([]), settings: { ...s, mode: "paper" } as Settings, state: emptyAutopilot(), closed: losing, now: NOW });
+    expect(d.action).toBe("none"); // paper goes on trading
+    expect(d.note).toMatch(/The rule you picked is losing/);
+    expect(d.state.saidLosing).toBe(true);
+    // said once, not again at the next search
+    const again = decideAutopilot({ report: report([]), settings: { ...s, mode: "paper" } as Settings, state: d.state, closed: losing, now: NOW + HOUR });
+    expect(again.note).toBe("");
+  });
+
+  it("holds new live entries, and says that is why", () => {
+    const live = { ...s, mode: "live" } as Settings;
+    const losing = under(60, (i) => (i % 5 === 0 ? 20 : -14), "live");
+    const d = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: losing, now: NOW });
+    expect(d.action).toBe("hold");
+    expect(d.state.holding).toBe(true);
+    expect(d.state.holdReason).toMatch(/lost money on its own trades/);
+  });
+
+  it("leaves a rule alone while its trades could still be a bad run, or are winning", () => {
+    const live = { ...s, mode: "live" } as Settings;
+    // clearly losing on average, but swinging enough that the top of the range is above zero
+    const noisy = under(40, (i) => (i % 3 === 0 ? 180 : -60), "live");
+    const d1 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: noisy, now: NOW });
+    expect(d1.state.holdReason).not.toMatch(/lost money on its own trades/);
+    // and a winning rule is never called losing
+    const winning = under(60, (i) => (i % 2 ? 40 : -10), "live");
+    const d2 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: winning, now: NOW });
+    expect(d2.state.holdReason).not.toMatch(/lost money on its own trades/);
+    // too few trades to judge: left alone
+    const few = under(AUTOPILOT.trackMin - 1, () => -14, "live");
+    const d3 = decideAutopilot({ report: report([]), settings: live, state: emptyAutopilot(), closed: few, now: NOW });
+    expect(d3.state.holdReason).not.toMatch(/lost money on its own trades/);
+  });
+
+  it("does not touch a proven rule the autopilot switched in: that one answers to its own promise", () => {
+    const proven = rule("a proven rule", { lo: 0.05, perDay: 40 });
+    const on = decideAutopilot({ report: report([proven]), settings: { ...s, mode: "paper" } as Settings, state: emptyAutopilot(), closed: [], now: NOW });
+    expect(on.action).toBe("switch");
+    const losing = under(60, () => -14);
+    const d = decideAutopilot({ report: report([proven]), settings: { ...s, mode: "paper" } as Settings, state: on.state, closed: losing, now: NOW + HOUR });
+    expect(d.note).not.toMatch(/The rule you picked is losing/);
+  });
+});
