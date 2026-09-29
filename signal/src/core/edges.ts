@@ -329,11 +329,13 @@ export function measureRule(rows: Sample[], s: Settings, o: { horizonMs: number;
   const mints = new Set<string>();
   let held = 0;
   let wins = 0;
+  let qualified = 0;
   for (const r of family) {
     if (r.ts < split) continue;
     if ((r.stage === "curve" && !s.tradeCurve) || (r.stage === "amm" && !s.tradeAmm)) continue;
     if (s.conds.length && !condsHold(s.conds, r.x)) continue;
     if (!s.scoreOnly && filterBlock(s.filters, r.f!)) continue;
+    qualified++;
     mints.add(r.mint);
     const v = exitReturnAt(r, combo, hold);
     if (Number.isNaN(v)) continue; // not observed for this exit
@@ -345,7 +347,12 @@ export function measureRule(rows: Sample[], s: Settings, o: { horizonMs: number;
   }
   const minN = o.minN ?? DEFAULTS.minHoldout;
   const minWins = o.minWins ?? DEFAULTS.minWins;
-  if (vals.length < minN) return none(`only ${vals.length} coins qualified for it on the newest recordings (${minN} needed)`);
+  if (vals.length < minN)
+    return none(
+      qualified >= minN
+        ? `only ${vals.length} of the ${qualified} coins that qualified on the newest recordings were watched through its whole time limit (${minN} needed) — graduated coins drop out of the 40 followed pools after a while`
+        : `only ${qualified} coins qualified for it on the newest recordings (${minN} needed)`,
+    );
   const m = clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, o.tests ?? DEFAULTS.candidates));
   const days = Math.max(1 / 24, (f1 - split) / 86_400_000);
   const out: RuleMeasure = { key, ok: true, n: vals.length, mean: m.mean, lo: m.lo, hi: m.hi, coinsPerDay: mints.size / days, avgHoldMin: held / vals.length / 60 };

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "preact/hooks";
 import type { Check } from "../../core/selfcheck";
 import { ago } from "../format";
-import { api } from "../store";
+import { api, toast } from "../store";
 import { Tag } from "../ui";
 
 type View = { checks: Check[]; at: number; summary: string };
@@ -12,6 +12,27 @@ const ICON = { ok: "✓", info: "i", warn: "!", fail: "✕" } as const;
 /** The bot watching itself: every check with its status, problems first (core/selfcheck). */
 export function SelfCheck() {
   const [v, setV] = useState<View | null | undefined>(undefined);
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  /** everything the bot sees, in one page to paste into a chat with Claude (core/diagnose) */
+  const copy = async () => {
+    setBusy(true);
+    try {
+      const r = await api<{ text: string }>("/api/diagnosis");
+      try {
+        await navigator.clipboard.writeText(r.text);
+        setText("");
+        toast("Copied. Paste it into your chat with Claude.");
+      } catch {
+        // the clipboard needs a secure page (localhost or https): show it to copy by hand
+        setText(r.text);
+      }
+    } catch (e) {
+      toast(String((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
   useEffect(() => {
     const load = () =>
       api<{ view: View | null }>("/api/checks")
@@ -50,6 +71,15 @@ export function SelfCheck() {
         </div>
       ))}
       {v.at > 0 && <p class="faint note">Checked {ago(v.at)} · every 10 minutes, and in full every 2 hours. Telegram: /checks</p>}
+      <div class="row wrap" style="gap:8px;margin-top:8px">
+        <button class="btn sm" disabled={busy} onClick={copy}>
+          {busy ? "Preparing…" : "Copy a diagnosis for Claude"}
+        </button>
+        <span class="faint" style="font-size:12.5px">
+          Everything the bot sees in one page — its data, the search's closest tries, how your rule does — to paste into a chat. No keys or wallet in it.
+        </span>
+      </div>
+      {text && <textarea class="inp wide" readOnly rows={10} value={text} onFocus={(e) => (e.target as HTMLTextAreaElement).select()} aria-label="diagnosis" />}
     </div>
   );
 }

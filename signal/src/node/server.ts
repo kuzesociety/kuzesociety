@@ -12,6 +12,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Engine } from "../core/engine.js";
 import { type ApiContext, accountSummary, handleApi } from "../core/api.js";
+import { diagnosisAsync } from "../core/diagnose.js";
 import { type LearningView, learningViewAsync } from "../core/insight.js";
 import type { Logger } from "../core/util.js";
 import { type Config, describeConfig, isPublicRpc } from "./config.js";
@@ -93,6 +94,20 @@ export class DashboardServer {
       checks: () => ctx.learner.checksView(),
       lab: () => ctx.learner.labView(),
       labSummary: () => ctx.learner.labSummary(),
+      diagnosis: async () => {
+        const e = ctx.engine();
+        const l = ctx.learner;
+        return diagnosisAsync({
+          samples: await this.cachedSamples(14),
+          settings: e.settings,
+          closed: e.closed.toArray(),
+          autopilot: l.autopilot,
+          report: l.lastEdges,
+          now: Date.now(),
+          horizonMs: e.cfg.outcomeHorizonMs,
+          version: ctx.updater?.current ?? undefined,
+        });
+      },
       labIdea: (text) => ctx.learner.addLabIdea(text),
       onSettingsChanged: () => {
         const s = ctx.engine().settings;

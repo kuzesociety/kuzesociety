@@ -27,6 +27,8 @@ export interface ApiContext {
   lab?: () => unknown;
   /** the Lab's summary to paste into a chat with Claude */
   labSummary?: () => string;
+  /** everything the bot sees in one page of text (core/diagnose), to paste into a chat with Claude */
+  diagnosis?: () => Promise<string>;
   /** adds your own idea to the Lab */
   labIdea?: (text: string) => { ok: true; note: string } | { ok: false; error: string };
   onSettingsChanged?: () => void;
@@ -101,6 +103,8 @@ export async function handleApi(ctx: ApiContext, method: string, path: string, q
         return ok({ view: ctx.lab?.() ?? null });
       case "/api/lab/summary":
         return ctx.labSummary ? ok({ text: ctx.labSummary() }) : err(404, "The Lab runs on the server bot only.");
+      case "/api/diagnosis":
+        return ctx.diagnosis ? ok({ text: await ctx.diagnosis() }) : err(404, "The diagnosis runs on the server bot only.");
       default:
         if (path.startsWith("/api/token/")) {
           const d = e.tokenDetail(decodeURIComponent(path.slice(11)));

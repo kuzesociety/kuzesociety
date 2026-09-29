@@ -26,6 +26,8 @@ import { ruleSummary } from "../core/presets.js";
 import { buildReport } from "../core/report.js";
 import { type Check, type CheckStatus, checkChanges, checksSummary, runChecks } from "../core/selfcheck.js";
 import { type Settings, ruleChanged, ruleKey } from "../core/settings.js";
+import { appendFileSync, existsSync, readFileSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import type { Logger } from "../core/util.js";
 import type { DataStore } from "./store.js";
 
@@ -287,6 +289,7 @@ export class Learner {
         if (r.ok) this.lab = r.state;
         else this.o.log.warn("lab idea not added", { text, error: r.error });
       }
+      this.takeLabInbox();
       this.saveLab();
       const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
       for (const i of res.proven)
@@ -304,6 +307,41 @@ export class Learner {
     } finally {
       this.labRunning = false;
     }
+  }
+
+  /**
+   * Ideas left in data/lab-inbox.txt — one rule per line in the Lab's format, lines starting with
+   * # skipped — join the Lab at its next run like ideas typed in the dashboard: a session working
+   * on this computer can hand the bot rules to prove on the coins that come after them. What
+   * became of each line is appended to data/lab-inbox.done.txt.
+   */
+  takeLabInbox(now = Date.now()): string[] {
+    const file = join(this.o.store.dir, "lab-inbox.txt");
+    if (!existsSync(file)) return [];
+    let lines: string[];
+    try {
+      lines = readFileSync(file, "utf8")
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith("#"));
+      rmSync(file);
+    } catch (e) {
+      this.o.log.warn("lab inbox unreadable", { err: String(e) });
+      return [];
+    }
+    const at = new Date(now).toISOString().slice(0, 16).replace("T", " ");
+    const done = lines.map((text) => {
+      const r = addLabIdea(this.lab, text, now);
+      if (!r.ok) return `${at} not added: ${text} — ${r.error}`;
+      this.lab = r.state;
+      return `${at} added: ${r.idea.code}`;
+    });
+    try {
+      if (done.length) appendFileSync(join(this.o.store.dir, "lab-inbox.done.txt"), `${done.join("\n")}\n`);
+    } catch (e) {
+      this.o.log.warn("lab inbox log failed", { err: String(e) });
+    }
+    return done;
   }
 
   private saveLab() {

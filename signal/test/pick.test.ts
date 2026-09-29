@@ -157,3 +157,23 @@ describe("a moment of your own", () => {
     expect(s.positions().filter((p) => p.mint === next)).toHaveLength(0);
   });
 });
+
+describe("the Lab inbox", () => {
+  it("takes rules left in data/lab-inbox.txt by a session on this computer, and says what became of each", async () => {
+    const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+    const { learner } = bot([], []);
+    const dir = (learner as unknown as { o: { store: DataStore } }).o.store.dir;
+    writeFileSync(join(dir, "lab-inbox.txt"), "# ideas from the research session\nmig300 top10<=25% tp100 sl30 hold30\r\nscore80 stage=curve tp200 sl50\nmig301 tp100 sl30\n\n");
+    const done = learner.takeLabInbox(Date.UTC(2026, 8, 29, 12));
+    expect(done).toEqual([
+      "2026-09-29 12:00 added: mig300 top10<=25% tp100 sl30 hold30",
+      "2026-09-29 12:00 added: score80 stage=curve tp200 sl50",
+      expect.stringMatching(/^2026-09-29 12:00 not added: mig301 tp100 sl30 — "mig301" is not an entry/),
+    ]);
+    expect(learner.lab.ideas.filter((i) => i.source === "you").map((i) => i.code)).toEqual(["mig300 top10<=25% tp100 sl30 hold30", "score80 stage=curve tp200 sl50"]);
+    // taken once: the file is gone, and the log keeps what happened
+    expect(existsSync(join(dir, "lab-inbox.txt"))).toBe(false);
+    expect(readFileSync(join(dir, "lab-inbox.done.txt"), "utf8").trim().split("\n")).toHaveLength(3);
+    expect(learner.takeLabInbox()).toEqual([]);
+  });
+});

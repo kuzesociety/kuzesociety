@@ -87,6 +87,8 @@ Every decision, with its numbers, is listed on the Autopilot card (**Decisions**
 
 A check that turns bad, or recovers, is sent to Telegram at once, and once a day a check-up summarises trades, the rule in use and every check.
 
+**Copy a diagnosis for Claude** (bottom of the Self-check card): everything the bot sees on one page, to paste into a chat — how much it has recorded and how much of it was watched to the end (by day), what every entry looks like on all finished data before any proof, the last search with its closest tries and luck check, the rule in use measured on the recordings and by its own trades, the autopilot's latest decisions, and the checks. No keys or wallet in it. The same page on the computer running the bot: `node dist/research.mjs diagnose --data ./data` (on Windows, in `C:\SIGNAL`: `node dist\research.mjs diagnose --data data`).
+
 **What is automatic, and what never is.** With the autopilot on, every finding on the dashboard is applied by itself as soon as it is proven: the score (a new model replaces the current one when it predicts coins neither has seen better) and the whole rule (entry, coins, exits, time limit) — from the edge finder or from the Lab (section 5), whichever proved more per day. There is one standard of proof for all of it: better on data the search never saw, counted per hour, with a clean luck check. The Learn tab's *Better settings found* is a narrower search inside the edge finder's, so it is shown (with its Apply button and auto-tune) only when the autopilot is off. Never set automatically, on purpose: your trade size, limits and mode (how much you risk is your call — sizing up on past results is how accounts blow up), and the realism settings such as the paper delay (a shorter simulated delay always looks better, which would be fooling itself).
 
 **Strategy** (under the Autopilot): one tap switches the whole rule — entry score, which coins, take profit, stop loss and time limit — to *Your plan*, the *Simulator finding* (unproven, for paper-testing), or any rule the edge finder proved on your data. In live mode it asks for a second tap.
@@ -130,6 +132,7 @@ The **Learn** tab answers this with your own data:
 
 Exact replays on recorded data are available through the research CLI:
 ```bash
+node dist/research.mjs diagnose --data ./data            # everything the bot sees, on one page
 node dist/research.mjs report   --data ./data --score 75 --tp 100 --sl 50
 node dist/research.mjs replay   --data ./data --score 75 --tp 100 --sl 50 --scoreonly
 node dist/research.mjs sweep    --data ./data --scores 65,75,85 --tps 50,100,200 --sls 30,50
@@ -159,7 +162,7 @@ Each order is built by PumpPortal's local API (0.5% fee, `pool=auto` covers the 
 ```bash
 cd signal
 npm ci
-npm test          # 159 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
+npm test          # 162 tests: exact curve math vs the official SDK, decoders, engine, learning, edge finder, autopilot, feeds, live signing, memory, end-to-end
 npm run build     # dist/engine.mjs (server with embedded dashboard), dist/research.mjs, dist/dashboard.html, dist/companion.html
 npm run typecheck
 ```

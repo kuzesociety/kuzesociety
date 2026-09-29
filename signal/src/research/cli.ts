@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { trainAndSelect, trainingRows } from "../core/learn.js";
 import { DEFAULT_CONFIG } from "../core/engine.js";
 import { priorModel, type ModelSpec, validateModel } from "../core/model.js";
+import type { AutopilotState } from "../core/autopilot.js";
+import { diagnosis } from "../core/diagnose.js";
+import type { EdgeReport } from "../core/edges.js";
 import { buildReport } from "../core/report.js";
 import { DEFAULT_SETTINGS, sanitizeSettings } from "../core/settings.js";
 import { silentLogger } from "../core/util.js";
@@ -15,6 +18,7 @@ import { pipelineSelfTest } from "./selftest.js";
 
 const USAGE = `SIGNAL research CLI
 
+  node dist/research.mjs diagnose [--data ./data] [--days 14]   (everything the bot sees, in one page to read or paste to Claude)
   node dist/research.mjs report   [--data ./data] [--days 14]
   node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
   node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
@@ -66,6 +70,23 @@ async function main() {
   const a = args(rest);
   const data = String(a.data ?? "./data");
   switch (cmd) {
+    case "diagnose": {
+      const store = new DataStore(data, silentLogger);
+      const samples = store.loadSamples(Number(a.days ?? 14));
+      const state = store.loadState();
+      const text = diagnosis({
+        samples,
+        settings: sanitizeSettings(state?.settings ?? {}),
+        closed: state?.closed ?? [],
+        autopilot: (store.loadAutopilot() as AutopilotState | null) ?? null,
+        report: (store.loadEdges() as EdgeReport | null) ?? null,
+        now: Date.now(),
+        horizonMs: DEFAULT_CONFIG.outcomeHorizonMs,
+      });
+      store.close();
+      console.log(text);
+      break;
+    }
     case "report": {
       const store = new DataStore(data, silentLogger);
       const samples = store.loadSamples(Number(a.days ?? 14));

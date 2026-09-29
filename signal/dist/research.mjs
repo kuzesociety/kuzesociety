@@ -524,6 +524,10 @@ var K_SL = 2;
 var COMBOS = 1 + GRID.length;
 var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
 var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
+function comboObserved(s, gi) {
+  const t = s.gridT?.[gi];
+  return seenAt(s, t ?? Infinity);
+}
 function counts(s, exitSec, windowSec = Infinity) {
   if (s.ov === void 0 && s.stage === "amm") return false;
   if (s.blind === void 0) return true;
@@ -532,6 +536,10 @@ function counts(s, exitSec, windowSec = Infinity) {
 }
 function comboCounts(s, gi) {
   return counts(s, s.gridT?.[gi] ?? Infinity);
+}
+function seenAt(s, sec) {
+  if (s.ov === void 0 && s.stage === "amm") return false;
+  return s.blind === void 0 || sec <= s.blind;
 }
 var r4 = (v) => Math.round(v * 1e4) / 1e4;
 var OutcomeTracker = class {
@@ -561,7 +569,7 @@ var OutcomeTracker = class {
    * trades keep their exits up to `at`; what happens after is unknown. Not yet entered ones are
    * dropped — their entry could not be seen.
    */
-  blindMint(mint, at, by = "pool") {
+  blindMint(mint, at2, by = "pool") {
     const list = this.byMint.get(mint);
     if (!list) return;
     for (const h of [...list]) {
@@ -570,15 +578,15 @@ var OutcomeTracker = class {
         continue;
       }
       if (h.blind !== void 0) continue;
-      h.blind = Math.max(at, h.ts);
+      h.blind = Math.max(at2, h.ts);
       h.blindBy = by;
       for (let i = 0; i < COMBOS; i++) if (h.c[i * SLOT + STATE] === 1) this.resolveCombo(h, i, h.lastM);
-      if (h.open === 0) this.emit(h, at);
+      if (h.open === 0) this.emit(h, at2);
     }
   }
   /** The trade feed went quiet at `at`: nothing open is observed from then on. */
-  blindAll(at) {
-    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at, "feed");
+  blindAll(at2) {
+    for (const mint of [...this.byMint.keys()]) this.blindMint(mint, at2, "feed");
   }
   add(t, kind, tag, now, score, p, x, custom, facts) {
     if (this.openCount >= this.opts.maxOpen) {
@@ -1319,11 +1327,13 @@ function measureRule(rows, s, o) {
   const mints = /* @__PURE__ */ new Set();
   let held = 0;
   let wins2 = 0;
+  let qualified = 0;
   for (const r of family) {
     if (r.ts < split) continue;
     if (r.stage === "curve" && !s.tradeCurve || r.stage === "amm" && !s.tradeAmm) continue;
     if (s.conds.length && !condsHold(s.conds, r.x)) continue;
     if (!s.scoreOnly && filterBlock(s.filters, r.f)) continue;
+    qualified++;
     mints.add(r.mint);
     const v = exitReturnAt(r, combo, hold);
     if (Number.isNaN(v)) continue;
@@ -1335,7 +1345,10 @@ function measureRule(rows, s, o) {
   }
   const minN = o.minN ?? DEFAULTS.minHoldout;
   const minWins = o.minWins ?? DEFAULTS.minWins;
-  if (vals.length < minN) return none(`only ${vals.length} coins qualified for it on the newest recordings (${minN} needed)`);
+  if (vals.length < minN)
+    return none(
+      qualified >= minN ? `only ${vals.length} of the ${qualified} coins that qualified on the newest recordings were watched through its whole time limit (${minN} needed) \u2014 graduated coins drop out of the 40 followed pools after a while` : `only ${qualified} coins qualified for it on the newest recordings (${minN} needed)`
+    );
   const m = clusteredMeanCI(vals, hours, 1 - 0.1 / Math.max(1, o.tests ?? DEFAULTS.candidates));
   const days = Math.max(1 / 24, (f1 - split) / 864e5);
   const out = { key, ok: true, n: vals.length, mean: m.mean, lo: m.lo, hi: m.hi, coinsPerDay: mints.size / days, avgHoldMin: held / vals.length / 60 };
@@ -1468,7 +1481,7 @@ function* steps(samples, opts) {
   const yours = [...new Set(rows.filter((s) => s.kind === "moment").map((s) => s.tag))].sort();
   const families = [
     ...ENTRY_LEVELS.map((level) => ({ tag: `x${level}`, level })),
-    ...[...Object.keys(ENTRY_POINTS), ...yours].map((at) => ({ tag: at, level: 0, at }))
+    ...[...Object.keys(ENTRY_POINTS), ...yours].map((at2) => ({ tag: at2, level: 0, at: at2 }))
   ];
   for (const fam of families) {
     const idx = byEntry.get(fam.tag) ?? [];
@@ -1642,9 +1655,9 @@ function ensembleContrib(ens, x, out, map = identityMap(ens.keys.length)) {
     let i = 0;
     bias += t.v[0];
     while (t.f[i] >= 0) {
-      const at = map[t.f[i]];
-      const next = Math.fround(x[at]) <= t.t[i] ? t.l[i] : t.r[i];
-      out[at] += t.v[next] - t.v[i];
+      const at2 = map[t.f[i]];
+      const next = Math.fround(x[at2]) <= t.t[i] ? t.l[i] : t.r[i];
+      out[at2] += t.v[next] - t.v[i];
       i = next;
     }
   }
@@ -1682,9 +1695,9 @@ function* boostSteps(train, valid, keys, params = {}) {
       const o = i * d;
       for (let k = 0; k < feats.length; k++) {
         const j = feats[k];
-        const at = (j * B + bins[o + j]) * 2;
-        hs[at] += gi;
-        hs[at + 1] += hi;
+        const at2 = (j * B + bins[o + j]) * 2;
+        hs[at2] += gi;
+        hs[at2 + 1] += hi;
       }
     }
     return hs;
@@ -1707,13 +1720,13 @@ function* boostSteps(train, valid, keys, params = {}) {
     const tree = { f: [], t: [], l: [], r: [], v: [] };
     const splitBin = [];
     const gain = new Array(keys.length).fill(0);
-    const leafOf = (G, H) => -G / (H + p.lambda) * p.lr;
-    const newNode = (G, H) => {
+    const leafOf = (G, H2) => -G / (H2 + p.lambda) * p.lr;
+    const newNode = (G, H2) => {
       tree.f.push(-1);
       tree.t.push(0);
       tree.l.push(-1);
       tree.r.push(-1);
-      tree.v.push(leafOf(G, H));
+      tree.v.push(leafOf(G, H2));
       splitBin.push(-1);
       return tree.f.length - 1;
     };
@@ -1737,9 +1750,9 @@ function* boostSteps(train, valid, keys, params = {}) {
         let GL2 = 0;
         let HL2 = 0;
         for (let b = 0; b < nb[j] - 1; b++) {
-          const at = (j * B + b) * 2;
-          GL2 += node.hs[at];
-          HL2 += node.hs[at + 1];
+          const at2 = (j * B + b) * 2;
+          GL2 += node.hs[at2];
+          HL2 += node.hs[at2 + 1];
           const HR = node.H - HL2;
           if (HL2 < minH) continue;
           if (HR < minH) break;
@@ -2075,10 +2088,10 @@ function scoreToken(model, f2, explain = true) {
   const score = scoreFromLogit(stage, pLogit);
   let contributions = [];
   if (explain) {
-    const pts = contributionPoints(stage, x, z);
+    const pts2 = contributionPoints(stage, x, z);
     for (let i = 0; i < FEATURE_DEFS.length; i++) {
       const d = FEATURE_DEFS[i];
-      const v = pts[i];
+      const v = pts2[i];
       if (Math.abs(v) < 0.5) continue;
       contributions.push({ key: d.key, label: d.label, value: d.show(f2), points: v, note: v > 0 ? d.good : d.bad });
     }
@@ -2264,10 +2277,10 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
   let fPrev = objective(beta);
   let converged = false;
   const g = new Float64Array(d);
-  const H = new Float64Array(d * d);
+  const H2 = new Float64Array(d * d);
   for (let iter = 0; iter < maxIter; iter++) {
     g.fill(0);
-    H.fill(0);
+    H2.fill(0);
     for (let i = 0; i < n; i++) {
       const o = i * k;
       let s = beta[0];
@@ -2276,26 +2289,26 @@ function* newtonSteps(Z, n, k, y, w, prior, lambda, maxIter = 30) {
       const r = w[i] * (p - y[i]);
       const v = w[i] * Math.max(p * (1 - p), 1e-9);
       g[0] += r;
-      H[0] += v;
+      H2[0] += v;
       for (let j = 0; j < k; j++) {
         const zj = Z[o + j];
         g[j + 1] += r * zj;
-        H[j + 1] += v * zj;
+        H2[j + 1] += v * zj;
         const vz = v * zj;
         const row = (j + 1) * d + 1;
-        for (let m = 0; m <= j; m++) H[row + m] += vz * Z[o + m];
+        for (let m = 0; m <= j; m++) H2[row + m] += vz * Z[o + m];
       }
       if ((i & 4095) === 4095) yield;
     }
     for (let j = 1; j < d; j++) {
       g[j] += lambda * (beta[j] - prior[j]);
-      H[j * d + j] += lambda;
-      H[j * d] = H[j];
-      for (let m = 1; m < j; m++) H[m * d + j] = H[j * d + m];
+      H2[j * d + j] += lambda;
+      H2[j * d] = H2[j];
+      for (let m = 1; m < j; m++) H2[m * d + j] = H2[j * d + m];
     }
     g[0] += 1e-4 * (beta[0] - prior[0]);
-    H[0] += 1e-4;
-    const step = choleskyFlat(H, g, d);
+    H2[0] += 1e-4;
+    const step = choleskyFlat(H2, g, d);
     if (!step) break;
     let t = 1;
     let next = beta;
@@ -2505,7 +2518,7 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
   const L = o.calibrate === false ? lin : yield* calibrateSteps(lin, partB);
   const sL = yield* scoreRowsSteps(L, val);
   const mL = sL.metrics;
-  let H = null;
+  let H2 = null;
   let mH = null;
   let treesZ = 0;
   let treeCount = 0;
@@ -2515,19 +2528,19 @@ function* stageSteps(stageKey, cur, seenTo, input, o) {
     const res = yield* boostSteps(dataA, dataB, FEATURE_KEYS, boost);
     if (res.ens.trees.length) {
       const withTrees = { ...lin, trees: res.ens };
-      H = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
-      const sH = yield* scoreRowsSteps(H, val);
+      H2 = o.calibrate === false ? withTrees : yield* calibrateSteps(withTrees, partB);
+      const sH = yield* scoreRowsSteps(H2, val);
       mH = sH.metrics;
       treesZ = lossGainZ(sL.losses, sH.losses, val).z;
       treeCount = res.ens.trees.length;
     }
   }
-  const treesWin = !!(H && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
-  const cand = treesWin ? H : L;
+  const treesWin = !!(H2 && mH && treesZ >= o.treesZ && !(mH.auc < mL.auc - 3e-3));
+  const cand = treesWin ? H2 : L;
   const recipe = treesWin ? "trees" : "linear";
   const fresh = val.filter((r) => r.ts > seenTo);
   const freshPos = fresh.reduce((s, r) => s + r.y, 0);
-  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H ? treesZ : void 0 };
+  const common = { ...base, freshRows: fresh.length, recipe, linear: mL, trees: mH ?? void 0, treeCount: treesWin ? treeCount : 0, treesZ: H2 ? treesZ : void 0 };
   if (fresh.length < o.minFreshRows || freshPos < o.minFreshPositives) {
     return {
       rows,
@@ -4870,6 +4883,397 @@ var Engine = class {
   }
 };
 
+// src/core/lab.ts
+var DAY = 864e5;
+var NF = FEATURE_KEYS.length;
+var H = HOLDS_MIN.length;
+var LAB = {
+  /** ideas from the search tested at once */
+  maxActive: 20,
+  /** your own ideas tested at once */
+  mineMax: 5,
+  /** new ideas from one search at most, one per entry */
+  newPerRun: 3,
+  /** finished coins at which an idea is looked at; it can be proven only at these */
+  looks: [60, 120, 240, 480],
+  /** one-sided error per look: an idea without an edge passes a look by luck at most this often */
+  alpha: 5e-4,
+  /** a proof resting on a handful of lucky wins is not trusted */
+  minWins: 10,
+  /** an idea not proven after this long leaves */
+  maxAgeMs: 7 * DAY,
+  /** a proven idea leaves after this long, and has to be found and proven again */
+  provenMs: 14 * DAY,
+  /** coins after its proof before a proven idea can be dropped for falling short */
+  postMin: 40,
+  /** the search: fewest trades a rule needs on the data it is invented from */
+  minSeen: 60,
+  /** the search needs this much finished data */
+  minHours: 24,
+  minRows: 1e3,
+  /** candidate thresholds: these shares of each fact's values at each entry */
+  quantiles: [0.1, 0.25, 0.5, 0.75, 0.9],
+  /** thresholds per entry that get every exit after the first look (on SCREEN exits) */
+  screenTop: 16,
+  /** single conditions per entry carried into pairs */
+  pairTop: 8,
+  /** a failed idea is not suggested again for this long */
+  retryAfterMs: 3 * DAY,
+  /** retired ideas kept to show */
+  keepRetired: 30,
+  /** results kept per idea (oldest dropped beyond) */
+  keepVals: 3e3
+};
+var sig2 = (v) => v === 0 || !Number.isFinite(v) ? 0 : Number(v.toPrecision(2));
+var signedPct = (x) => `${x >= 0 ? "+" : ""}${Math.round(x * 100)}%`;
+var pctFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => `${Math.round(r * 100)}%`, pct: true });
+var countFact = (key, label) => ({ key, label, raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r >= 10 ? sig2(r) : Math.round(r), show: (r) => `${Math.round(r)}` });
+var solFact = (key, label) => ({ key, label, raw: Math.sinh, x: Math.asinh, nice: sig2, show: (r) => `${r} SOL` });
+var moveFact = (key, label) => ({ key, label, raw: (x) => Math.exp(x) - 1, x: (r) => Math.max(-2, Math.min(2, Math.log(1 + Math.max(-0.99, r)))), nice: (r) => Math.round(r * 100) / 100, show: signedPct, pct: true });
+var yesNoFact = (key, label) => ({ key, label, raw: (x) => x, x: (r) => r, nice: (r) => r >= 0.5 ? 1 : 0, show: (r) => r >= 0.5 ? "yes" : "no", yesNo: true });
+var LAB_FACTS = [
+  { key: "age", label: "Age", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: (r) => r < 90 ? Math.round(r / 5) * 5 : r < 5400 ? Math.round(r / 60) * 60 : Math.round(r / 600) * 600, show: fmtAge },
+  { key: "mcap", label: "Market cap", raw: Math.exp, x: (r) => Math.log(Math.max(r, 1)), nice: sig2, show: (r) => `${r} SOL` },
+  pctFact("progress", "Curve progress"),
+  solFact("net60", "Net inflow 60s"),
+  solFact("net300", "Net inflow 5m"),
+  { key: "accel", label: "Acceleration", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 10) / 10, show: (r) => r.toFixed(1) },
+  pctFact("buyRatio", "Buy share 60s"),
+  countFact("uniq60", "New buyers 60s"),
+  countFact("uniqTotal", "Buyers total"),
+  countFact("trades60", "Trades 60s"),
+  { key: "avgBuy", label: "Avg buy 5m", raw: (x) => Math.exp(x) - 0.01, x: (r) => Math.log(0.01 + Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
+  pctFact("whale", "Largest buy share"),
+  pctFact("devShare", "Dev holds"),
+  pctFact("devSold", "Dev sold"),
+  pctFact("bundle", "Bundled supply"),
+  pctFact("early", "Sniper supply"),
+  pctFact("top10", "Top 10 holders"),
+  countFact("holders", "Holders"),
+  pctFact("drawdown", "Below peak"),
+  moveFact("chg30", "Move 30s"),
+  moveFact("chg120", "Move 2m"),
+  countFact("smart", "Smart wallets in"),
+  pctFact("fresh", "Fresh wallets"),
+  { key: "socials", label: "Socials", raw: (x) => x * 3, x: (r) => r / 3, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 3` },
+  yesNoFact("tweet", "Tweet-linked"),
+  { key: "cluster", label: "Narrative heat", raw: Math.exp, x: (r) => Math.log(Math.max(1, r)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} similar coins` },
+  yesNoFact("leader", "Narrative leader"),
+  yesNoFact("copycat", "Copycat"),
+  { key: "serial", label: "Dev launches in 24 h", raw: (x) => Math.expm1(x) + 1, x: (r) => Math.log1p(Math.max(0, r - 1)), nice: (r) => Math.round(r), show: (r) => `${Math.round(r)}` },
+  { key: "creatorBest", label: "Dev's best coin", raw: (x) => Math.expm1(x) * 100, x: (r) => Math.log1p(Math.max(0, r) / 100), nice: sig2, show: (r) => `${r} SOL` },
+  { key: "heat", label: "Market heat", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r * 100) / 100, show: (r) => r.toFixed(2) },
+  { key: "liquidity", label: "Liquidity", raw: Math.expm1, x: (r) => Math.log1p(Math.max(0, r)), nice: sig2, show: (r) => `${r} SOL` },
+  { key: "dex", label: "DEX listing paid", raw: (x) => x, x: (r) => r, nice: (r) => Math.round(r), show: (r) => `${Math.round(r)} of 2` }
+];
+var FACT = new Map(LAB_FACTS.map((f2) => [f2.key, f2]));
+var FACT_INDEX = LAB_FACTS.map((f2) => FEATURE_KEYS.indexOf(f2.key));
+function describeCond(c) {
+  const f2 = FACT.get(c.k);
+  if (!f2) return c.k;
+  const raw = f2.raw(c.v);
+  if (f2.yesNo) return c.op === ">=" ? f2.label.toLowerCase() : `not ${f2.label.toLowerCase()}`;
+  return `${f2.label.toLowerCase()} ${c.op === ">=" ? "\u2265" : "\u2264"} ${f2.show(raw)}`;
+}
+var GRID_TPS = [...new Set(GRID.map((g) => g.tp))];
+var GRID_SLS = [...new Set(GRID.map((g) => g.sl))];
+var LAB_FORMAT = `entry, then up to 3 conditions, then the exit \u2014 e.g. "mig300 top10<=25% smart>=1 tp100 sl30 hold30". Entry: score50\u2026score95 (the first time the score reaches it) or ${Object.keys(ENTRY_POINTS).join(", ")}. Optional: stage=curve or stage=amm. Conditions on: ${LAB_FACTS.map((f2) => f2.key).join(", ")} (with >= or <=; % for shares; =1 / =0 for yes/no). Take profit tp: ${GRID_TPS.join(", ")}; stop loss sl: ${GRID_SLS.join(", ")}; time limit hold (minutes): ${HOLDS_MIN.filter((h) => h > 0).join(", ")}, or none.`;
+var STRICT = 1 - 2 * LAB.alpha;
+var SCREEN = [
+  [25, 10, 0],
+  [50, 20, 0],
+  [50, 20, 10],
+  [100, 30, 0],
+  [100, 30, 30],
+  [100, 50, 0],
+  [200, 50, 0],
+  [150, 40, 60],
+  [300, 70, 0],
+  [500, 50, 0]
+].map(([tp, sl, hold]) => GRID.findIndex((g) => g.tp === tp && g.sl === sl) * H + HOLDS_MIN.indexOf(hold)).filter((e) => e >= 0);
+
+// src/core/presets.ts
+var BASE = { entryAt: "score", conds: [], trailPct: 0, takeInitials: false, reentry: false, tradeCurve: true, tradeAmm: true, scoreOnly: true };
+var PRESETS = [
+  {
+    key: "plan",
+    name: "Your plan",
+    note: "Buy when a coin reaches 75 \xB7 sell at 2\xD7 or \u221250% \xB7 time limit 4 hours. Score only.",
+    proof: "yours",
+    settings: { ...BASE, minScore: 75, tpPct: 100, slPct: 50, maxHoldMin: 240 }
+  },
+  {
+    key: "sim-momentum",
+    name: "Simulator finding: fast momentum",
+    note: "Buy when a coin reaches 95 \xB7 sell at +500% or \u221220%, or after 10 minutes. It won in the simulator, which has more momentum than pump.fun \u2014 paper-test it before trusting it.",
+    proof: "unproven",
+    settings: { ...BASE, minScore: 95, tpPct: 500, slPct: 20, maxHoldMin: 10 }
+  }
+];
+function ruleSummary(s) {
+  const time = s.maxHoldMin > 0 ? s.maxHoldMin >= 120 && s.maxHoldMin % 60 === 0 ? `${s.maxHoldMin / 60} h` : `${s.maxHoldMin} min` : "no time limit";
+  const entry = s.entryAt && s.entryAt !== "score" ? entryLabel(s.entryAt) : `score \u2265 ${s.minScore}`;
+  const when = s.conds?.length ? ` \xB7 ${s.conds.map(describeCond).join(", ")}` : "";
+  return `${entry}${when} \xB7 +${s.tpPct}% / \u2212${s.slPct}% \xB7 ${time}`;
+}
+
+// src/core/selfcheck.ts
+var HOUR2 = 36e5;
+var DAY2 = 24 * HOUR2;
+var SELFCHECK = {
+  /** trades compared, recorded vs real */
+  windowMs: 7 * DAY2,
+  /** pairs before the comparison is judged */
+  minPairs: 20,
+  /** recordings better than real trades by more than this (per trade, at the low end of the range) → warn */
+  gap: 0.05,
+  /** rule switches a day before the autopilot looks like it chases noise */
+  maxSwitches: 4,
+  /** a promise above this per trade is extraordinary for a real market */
+  extraordinary: 0.3
+};
+var pct2 = (x, d = 1) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(d)}%`;
+var pts = (x) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)} points`;
+function recordedReturn(s, p) {
+  const { tpPct, slPct, maxHoldMin } = p.plan;
+  const gi = GRID.findIndex((g) => g.tp === tpPct && g.sl === slPct);
+  if (gi < 0 || s.grid?.length !== GRID.length || !s.gridT) return void 0;
+  const t = s.gridT[gi];
+  if (maxHoldMin > 0 && t > maxHoldMin * 60) {
+    const k = PATH_MIN.indexOf(maxHoldMin);
+    const v = k >= 0 ? s.path?.[k] : void 0;
+    return v !== void 0 && v !== null && seenAt(s, maxHoldMin * 60) ? v : void 0;
+  }
+  return comboObserved(s, gi) ? s.grid[gi] : void 0;
+}
+function pairTrades(closed, samples, from) {
+  const signals = /* @__PURE__ */ new Map();
+  for (const s of samples) {
+    if (s.kind !== "signal") continue;
+    let l = signals.get(s.mint);
+    if (!l) signals.set(s.mint, l = []);
+    l.push(s);
+  }
+  const out = [];
+  for (const p of closed) {
+    if (p.status !== "closed" || (p.closedAt ?? 0) < from || !Number.isFinite(p.pnlPct)) continue;
+    if (!["tp", "sl", "time"].includes(p.exitReason ?? "") || p.plan.trailPct > 0 || p.plan.takeInitials) continue;
+    const s = signals.get(p.mint)?.find((x) => x.ts >= p.signalAt && x.ts - p.signalAt <= 12e4);
+    if (!s) continue;
+    const rec = recordedReturn(s, p);
+    if (rec === void 0) continue;
+    out.push({ rec, real: (p.pnlPct ?? 0) / 100, hour: hourOf(p.openedAt) });
+  }
+  return out;
+}
+function recordedVsReal(closed, samples, now) {
+  const title = "Recordings match real trades";
+  const from = now - SELFCHECK.windowMs;
+  const pairs = pairTrades(closed, samples, from);
+  if (pairs.length < SELFCHECK.minPairs) {
+    const done = closed.filter((p) => p.status === "closed" && (p.closedAt ?? 0) >= from).length;
+    return {
+      key: "recorded",
+      status: "info",
+      title,
+      detail: `Not enough trades to compare yet: ${pairs.length} of ${SELFCHECK.minPairs} needed (${done} trades closed in the last 7 days). A trade is compared once the recording of its own moment has finished (up to 6 h), under the same exits, as far as it was observed; recordings of graduated coins from before this version are not trusted.`
+    };
+  }
+  const d = clusteredMeanCI(
+    pairs.map((x) => x.rec - x.real),
+    pairs.map((x) => x.hour)
+  );
+  const rec = pairs.reduce((a, x) => a + x.rec, 0) / pairs.length;
+  const real = pairs.reduce((a, x) => a + x.real, 0) / pairs.length;
+  const range = `95% range ${pts(d.lo)} to ${pts(d.hi)}`;
+  if (d.lo > SELFCHECK.gap)
+    return {
+      key: "recorded",
+      status: "warn",
+      title,
+      detail: `On ${pairs.length} trades the recordings of the same coins at the same moments made ${pct2(rec)} per trade, the trades themselves ${pct2(real)} (${pts(d.mean)}, ${range}). What the bot learns and proves from recordings is too optimistic \u2014 its promises will not be kept.`
+    };
+  if (d.hi < -SELFCHECK.gap)
+    return { key: "recorded", status: "info", title, detail: `The bot's own ${pairs.length} trades did better than their recordings (${pts(-d.mean)} per trade): the recordings are on the cautious side.` };
+  return { key: "recorded", status: "ok", title, detail: `On ${pairs.length} trades recordings and real trades agree: ${pct2(rec)} vs ${pct2(real)} per trade (${pts(d.mean)}, ${range}).` };
+}
+function decisions(st, now) {
+  const title = "Autopilot decisions are steady";
+  const day2 = st.log.filter((x) => x.at >= now - DAY2);
+  const answer = (i) => day2.slice(0, i).some((y) => /^You picked/.test(y.what) && day2[i].at - y.at <= 15 * 6e4);
+  const switches = day2.filter((x, i) => /^(Now trading|Back to your own rule|Dropped)/.test(x.what) && !answer(i)).length;
+  const picks = day2.filter((x) => /^You picked/.test(x.what)).length;
+  const yours = picks ? ` You picked the rule ${picks} time${picks === 1 ? "" : "s"} (not counted).` : "";
+  if (switches > SELFCHECK.maxSwitches)
+    return { key: "decisions", status: "warn", title, detail: `${switches} rule changes by the autopilot in the last 24 h. A rule should stay until its results turn; this many changes looks like chasing noise.${yours}` };
+  return { key: "decisions", status: "ok", title, detail: `${switches} rule change${switches === 1 ? "" : "s"} by the autopilot in the last 24 h.${yours}` };
+}
+function coverage(samples, now, feedDown) {
+  const title = "The bot sees what it records";
+  if (feedDown) return { key: "coverage", status: "fail", title, detail: "No trade data for over a minute: no new entries, and nothing open is observed until it is back." };
+  const day2 = samples.filter((s) => s.resolvedAt >= now - DAY2 && s.ov === 1);
+  const amm = day2.filter((s) => s.stage === "amm");
+  const ammBlind = amm.filter((s) => s.blind !== void 0 && s.blindBy !== "feed");
+  const outage = day2.filter((s) => s.blind !== void 0 && s.blindBy === "feed").length;
+  const parts = [];
+  if (amm.length)
+    parts.push(
+      `${Math.round(ammBlind.length / amm.length * 100)}% of graduated-coin recordings stopped being watched before they ended (the bot follows at most 40 pools). Those count only for rules whose time limit they were watched through, never by how they ended, so rules on graduated coins that hold long are judged by the bot's own trades`
+    );
+  if (outage) parts.push(`${Math.round(outage / day2.length * 100)}% of all recordings were cut by trade-feed outages (a minute or more without data)`);
+  if (!day2.length) return { key: "coverage", status: "info", title, detail: "No recordings finished in the last 24 h yet." };
+  const status = outage / day2.length > 0.1 ? "warn" : amm.length > 20 && ammBlind.length / amm.length > 0.5 ? "info" : "ok";
+  return { key: "coverage", status, title, detail: parts.length ? `Last 24 h: ${parts.join("; ")}.` : `Last 24 h: all ${day2.length} recordings were observed to the end.` };
+}
+
+// src/core/diagnose.ts
+var HOUR3 = 36e5;
+var at = (t) => t ? `${new Date(t).toISOString().slice(0, 16).replace("T", " ")} UTC` : "\u2014";
+var p1 = (x) => {
+  if (!Number.isFinite(x)) return "\u2014";
+  const v = Math.round(x * 1e3) / 10;
+  return `${v > 0 ? "+" : v < 0 ? "-" : ""}${Math.abs(v).toFixed(1)}%`;
+};
+var n0 = (x) => Math.round(x).toLocaleString("en-US");
+var share = (a, b) => b ? `${Math.round(a / b * 100)}%` : "\u2014";
+var ago = (t, now) => {
+  const m = Math.max(0, Math.round((now - t) / 6e4));
+  return m < 120 ? `${m} min ago` : m < 2880 ? `${Math.round(m / 60)} h ago` : `${Math.round(m / 1440)} days ago`;
+};
+var entryName = (tag) => /^x\d+$/.test(tag) ? `first reaching score ${tag.slice(1)}` : entryLabel(tag);
+var exitName = (e) => {
+  const g = GRID[Math.floor(e / HOLDS_MIN.length)];
+  const hold = HOLDS_MIN[e % HOLDS_MIN.length];
+  return `+${g.tp}% / \u2212${g.sl}%${hold ? `, ${hold} min` : ""}`;
+};
+function trades(list) {
+  if (!list.length) return "none";
+  const wins2 = list.filter((p) => (p.pnl ?? 0) > 0).length;
+  const mean = list.reduce((a, p) => a + (p.pnlPct ?? 0), 0) / list.length / 100;
+  const sol = list.reduce((a, p) => a + (p.pnl ?? 0), 0) / 1e9;
+  const how = /* @__PURE__ */ new Map();
+  for (const p of list) how.set(p.exitReason ?? "?", (how.get(p.exitReason ?? "?") ?? 0) + 1);
+  const ends = [...how].sort((a, b) => b[1] - a[1]).map(([k, v]) => `${k} ${v}`).join(", ");
+  const from = Math.min(...list.map((p) => p.openedAt));
+  return `${list.length} (${wins2} won) \xB7 ${p1(mean)} per trade on average \xB7 ${sol >= 0 ? "+" : ""}${sol.toFixed(3)} SOL in all \xB7 ended by: ${ends} \xB7 since ${at(from)}`;
+}
+function* steps2(i) {
+  const s = i.settings;
+  const out = [];
+  out.push(`SIGNAL diagnosis \xB7 ${at(i.now)}${i.version ? ` \xB7 version ${i.version}` : ""}`);
+  out.push(`Mode ${s.mode} \xB7 auto-trading ${s.enabled ? "on" : "off"} \xB7 autopilot ${s.autopilot ? "on" : "off"} \xB7 rule in use: ${ruleSummary(s)}${s.scoreOnly ? " \xB7 no filters" : " \xB7 with filters"}`);
+  const all = i.samples;
+  out.push("", "DATA (recordings on disk)");
+  if (!all.length) out.push("- no recordings yet");
+  else {
+    let first = Infinity;
+    let last = 0;
+    const kinds = /* @__PURE__ */ new Map();
+    for (const x of all) {
+      if (x.ts < first) first = x.ts;
+      if (x.ts > last) last = x.ts;
+      kinds.set(x.kind, (kinds.get(x.kind) ?? 0) + 1);
+    }
+    const named = { checkpoint: "at fixed moments", entry: "at score levels", signal: "of the rule in use", moment: "at your moments" };
+    out.push(`- ${n0(all.length)} recordings over ${((last - first) / HOUR3).toFixed(0)} h (${at(first)} \u2192 ${at(last)}): ${[...kinds].map(([k, v]) => `${n0(v)} ${named[k] ?? k}`).join(", ")}`);
+    const rows = recordedRows(all, i.horizonMs);
+    out.push(`- finished and usable by the search (followed for ${Math.round(i.horizonMs / HOUR3)} h): ${n0(rows.length)}`);
+    const amm = all.filter((x) => x.stage === "amm");
+    const poolCut = amm.filter((x) => x.blind !== void 0 && x.blindBy !== "feed").length;
+    const feedCut = all.filter((x) => x.blind !== void 0 && x.blindBy === "feed").length;
+    const untrusted = amm.filter((x) => x.ov !== 1).length;
+    out.push(`- graduated coins: ${share(amm.length, all.length)} of recordings; ${share(poolCut, amm.length)} of those stopped being watched before they ended (the bot follows at most 40 pools)`);
+    out.push(`- cut by trade-feed outages: ${share(feedCut, all.length)} of all recordings`);
+    if (untrusted) out.push(`- graduated-coin recordings from before observation was tracked (not used): ${n0(untrusted)}`);
+    const days = /* @__PURE__ */ new Map();
+    for (const x of all) {
+      const d = new Date(x.ts).toISOString().slice(0, 10);
+      let r2 = days.get(d);
+      if (!r2) days.set(d, r2 = { n: 0, amm: 0, pool: 0, feed: 0 });
+      r2.n++;
+      if (x.stage === "amm") {
+        r2.amm++;
+        if (x.blind !== void 0 && x.blindBy !== "feed") r2.pool++;
+      }
+      if (x.blind !== void 0 && x.blindBy === "feed") r2.feed++;
+    }
+    out.push("- by day (UTC): recordings \xB7 graduated ones cut by pools \xB7 all cut by feed outages");
+    for (const [d, r2] of [...days].sort().slice(-8)) out.push(`  ${d} \xB7 ${n0(r2.n)} \xB7 ${share(r2.pool, r2.amm)} \xB7 ${share(r2.feed, r2.n)}`);
+    yield;
+    out.push("", "ENTRIES ON ALL FINISHED DATA (not proof: the best of 192 exits on everything recorded flatters every entry)");
+    const byTag = /* @__PURE__ */ new Map();
+    for (const x of rows) {
+      let l = byTag.get(x.tag);
+      if (!l) byTag.set(x.tag, l = []);
+      l.push(x);
+    }
+    const lines = [];
+    for (const [tag, list] of byTag) {
+      if (list.length < 30) continue;
+      const sum = new Float64Array(EXITS);
+      const cnt = new Float64Array(EXITS);
+      for (let k = 0; k < list.length; k++) {
+        for (let e = 0; e < EXITS; e++) {
+          const v = exitReturn(list[k], Math.floor(e / HOLDS_MIN.length), e % HOLDS_MIN.length);
+          if (Number.isNaN(v)) continue;
+          sum[e] += v;
+          cnt[e]++;
+        }
+        if (k % 1e3 === 999) yield;
+      }
+      let best = -1;
+      for (let e = 0; e < EXITS; e++) if (cnt[e] >= 30 && (best < 0 || sum[e] / cnt[e] > sum[best] / cnt[best])) best = e;
+      const span = Math.max(1 / 24, (list[list.length - 1].ts - list[0].ts) / (24 * HOUR3));
+      const coins = new Set(list.map((x) => x.mint)).size;
+      if (best < 0) lines.push({ v: -Infinity, text: `- ${entryName(tag)} \xB7 ${(coins / span).toFixed(0)}/day \xB7 too few watched to the end` });
+      else {
+        const mean = sum[best] / cnt[best];
+        lines.push({ v: mean, text: `- ${entryName(tag)} \xB7 ${(coins / span).toFixed(0)}/day \xB7 best: ${exitName(best)} \u2192 ${p1(mean)} per trade on ${n0(cnt[best])}` });
+      }
+    }
+    lines.sort((a, b) => b.v - a.v);
+    out.push(...lines.length ? lines.map((l) => l.text) : ["- none with 30 finished recordings yet"]);
+  }
+  const r = i.report;
+  out.push("", "LAST SEARCH (the edge finder)");
+  if (!r) out.push("- none yet");
+  else {
+    out.push(`- ${ago(r.generatedAt, i.now)} \xB7 method ${r.method ?? "old"} \xB7 ${r.status === "ok" ? "answered" : "not enough data"}: ${r.note}`);
+    if (r.status === "ok") {
+      out.push(`- ${r.hours.toFixed(0)} h of market \xB7 ${n0(r.samples)} recordings \xB7 ${n0(r.tested)} rules tried \xB7 ${r.candidates} candidates re-checked on data it never saw \xB7 ${r.survivors.length} held up`);
+      out.push(`- luck check: on shuffled data the same search "found" ${r.placebo.avgSurvivors.toFixed(1)} rules per run (at most ${r.placebo.maxSurvivors})`);
+      for (const x of r.survivors.slice(0, 5)) out.push(`  held up: ${x.text} \xB7 ${p1(x.holdout.mean)} per trade on ${x.holdout.n} unseen (worst case ${p1(x.holdout.lo)}) \xB7 ${x.tradesPerDay.toFixed(0)}/day`);
+      for (const x of r.failed) out.push(`  closest try: ${x.text} \xB7 ${p1(x.discovery.mean)} while searching (${x.discovery.n}) \u2192 ${p1(x.holdout.mean)} on ${x.holdout.n} unseen (worst case ${p1(x.holdout.lo)})`);
+    }
+  }
+  out.push("", `THE RULE IN USE: ${ruleSummary(s)}`);
+  if (all.length) {
+    const m = measureRule(recordedRows(all, i.horizonMs), s, { horizonMs: i.horizonMs, tests: r?.status === "ok" ? r.candidates : void 0 });
+    out.push(
+      m.ok ? `- on the newest recordings (as the search checks candidates): ${p1(m.mean)} per trade on ${n0(m.n)} coins (range ${p1(m.lo)} to ${p1(m.hi)}), ~${m.coinsPerDay.toFixed(0)} coins a day` : `- on the recordings: cannot be weighed \u2014 ${m.why}`
+    );
+  }
+  const mine = i.closed.filter((p) => p.status === "closed" && p.mode === s.mode);
+  out.push(`- all ${s.mode} trades: ${trades(mine)}`);
+  out.push(`- under this exact rule: ${trades(mine.filter((p) => p.rule === ruleKey(s)))}`);
+  const ap = i.autopilot;
+  if (ap) {
+    out.push("", `AUTOPILOT: ${!s.autopilot ? "off" : ap.holding ? `holding new live entries \u2014 ${ap.holdReason}` : ap.active ? `trading ${ap.active} (since ${at(ap.since)})` : "on your own rule"}`);
+    for (const x of ap.log.slice(-6).reverse()) out.push(`- ${at(x.at)}: ${x.what}`);
+  }
+  out.push("", "CHECKS");
+  const checks = [recordedVsReal(i.closed, all, i.now), coverage(all, i.now, false), ...ap ? [decisions(ap, i.now)] : []];
+  for (const c of checks) out.push(`- ${c.status === "ok" ? "ok" : c.status} \xB7 ${c.title}: ${c.detail}`);
+  return out.join("\n");
+}
+function diagnosis(i) {
+  const it = steps2(i);
+  for (; ; ) {
+    const r = it.next();
+    if (r.done) return r.value;
+  }
+}
+
 // src/core/report.ts
 function nearestGrid(tp, sl) {
   let best = 0;
@@ -6099,11 +6503,11 @@ function collectSamples(hours, predictability, seed) {
   for (let t = end; t <= end + 95 * 6e4; t += 5e3) e.advance(t);
   return samples;
 }
-function splitByCoin(samples, share) {
+function splitByCoin(samples, share2) {
   const first = /* @__PURE__ */ new Map();
   for (const s of samples) if (!first.has(s.mint) || s.ts < first.get(s.mint)) first.set(s.mint, s.ts);
   const coins = [...first.entries()].sort((a, b) => a[1] - b[1]).map((e) => e[0]);
-  const testCoins = new Set(coins.slice(Math.floor(coins.length * share)));
+  const testCoins = new Set(coins.slice(Math.floor(coins.length * share2)));
   return { learn: samples.filter((s) => !testCoins.has(s.mint)), test: samples.filter((s) => testCoins.has(s.mint)) };
 }
 async function pipelineSelfTest(opts = {}) {
@@ -6169,6 +6573,7 @@ async function pipelineSelfTest(opts = {}) {
 // src/research/cli.ts
 var USAGE = `SIGNAL research CLI
 
+  node dist/research.mjs diagnose [--data ./data] [--days 14]   (everything the bot sees, in one page to read or paste to Claude)
   node dist/research.mjs report   [--data ./data] [--days 14]
   node dist/research.mjs replay   [--data ./data] [--score 75] [--tp 100] [--sl 50] [--scoreonly] [--latency 1500]
   node dist/research.mjs sweep    [--data ./data] [--scores 65,75,85] [--tps 50,100,200] [--sls 30,50]
@@ -6192,7 +6597,7 @@ function args(argv) {
   }
   return out;
 }
-var pct2 = (x) => Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : "\u2014";
+var pct3 = (x) => Number.isFinite(x) ? `${(x * 100).toFixed(1)}%` : "\u2014";
 async function* recorded(dataDir, from, to) {
   const store = new DataStore(dataDir, silentLogger);
   const files = store.recordFiles().filter((f2) => {
@@ -6213,6 +6618,23 @@ async function main() {
   const a = args(rest);
   const data = String(a.data ?? "./data");
   switch (cmd) {
+    case "diagnose": {
+      const store = new DataStore(data, silentLogger);
+      const samples = store.loadSamples(Number(a.days ?? 14));
+      const state = store.loadState();
+      const text = diagnosis({
+        samples,
+        settings: sanitizeSettings(state?.settings ?? {}),
+        closed: state?.closed ?? [],
+        autopilot: store.loadAutopilot() ?? null,
+        report: store.loadEdges() ?? null,
+        now: Date.now(),
+        horizonMs: DEFAULT_CONFIG.outcomeHorizonMs
+      });
+      store.close();
+      console.log(text);
+      break;
+    }
     case "report": {
       const store = new DataStore(data, silentLogger);
       const samples = store.loadSamples(Number(a.days ?? 14));
@@ -6220,10 +6642,10 @@ async function main() {
       const settings = sanitizeSettings({ minScore: Number(a.score ?? 75), tpPct: Number(a.tp ?? 100), slPct: Number(a.sl ?? 50) });
       const r = buildReport(samples, settings, store.loadModel() ?? priorModel(), [], Date.now());
       console.log(`Samples ${r.samples} (${r.checkpoints} checkpoints, ${r.signals} signals) over ${r.spanHours.toFixed(1)} h`);
-      console.log(`TP ${r.settings.tpPct}% / SL ${r.settings.slPct}% \u2014 break-even win rate \u2248 ${pct2(r.breakEven)}
+      console.log(`TP ${r.settings.tpPct}% / SL ${r.settings.slPct}% \u2014 break-even win rate \u2248 ${pct3(r.breakEven)}
 `);
       console.log("score    n      win%    avg return (95% range)        median peak");
-      for (const b of r.buckets) console.log(`${String(b.lo).padStart(3)}-${String(b.hi).padEnd(3)} ${String(b.n).padStart(6)}  ${pct2(b.winRate).padStart(7)}   ${pct2(b.avgRet).padStart(7)} (${pct2(b.retLo)} \u2026 ${pct2(b.retHi)})   ${Number.isFinite(b.medMaxMult) ? b.medMaxMult.toFixed(2) + "\xD7" : "\u2014"}`);
+      for (const b of r.buckets) console.log(`${String(b.lo).padStart(3)}-${String(b.hi).padEnd(3)} ${String(b.n).padStart(6)}  ${pct3(b.winRate).padStart(7)}   ${pct3(b.avgRet).padStart(7)} (${pct3(b.retLo)} \u2026 ${pct3(b.retHi)})   ${Number.isFinite(b.medMaxMult) ? b.medMaxMult.toFixed(2) + "\xD7" : "\u2014"}`);
       console.log(`
 Go-live gate: ${r.gate.verdict} \u2014 ${r.gate.detail}`);
       break;
@@ -6245,7 +6667,7 @@ Go-live gate: ${r.gate.verdict} \u2014 ${r.gate.detail}`);
           for (const sl of sls) {
             const src = a.sim ? new MarketSim({ durationMs: Number(a.hours ?? 3) * 36e5, seed: Number(a.seed ?? 1) }).run() : recorded(data, a.from, a.to);
             const r = await replay(src, { settings: { minScore: s, tpPct: tp, slPct: sl, scoreOnly: !!a.scoreonly, maxOpen: Number(a.maxopen ?? 5) }, model: loadModel(a.model), latencyMs: Number(a.latency ?? 1500) });
-            console.log(`${String(s).padStart(5)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(r.paper.trades).padStart(7)} ${pct2(r.paper.winRate).padStart(7)} ${(r.paper.avgPct ?? 0).toFixed(1).padStart(7)} ${r.paper.pnlSol.toFixed(3).padStart(9)} ${r.paper.maxDrawdownSol.toFixed(3).padStart(7)}`);
+            console.log(`${String(s).padStart(5)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(r.paper.trades).padStart(7)} ${pct3(r.paper.winRate).padStart(7)} ${(r.paper.avgPct ?? 0).toFixed(1).padStart(7)} ${r.paper.pnlSol.toFixed(3).padStart(9)} ${r.paper.maxDrawdownSol.toFixed(3).padStart(7)}`);
           }
       break;
     }
@@ -6294,8 +6716,8 @@ ${r.samples.toLocaleString("en-US")} would-be trades over ${r.hours.toFixed(1)} 
 `);
         for (const s of r.survivors)
           console.log(`\u2714 ${s.text}
-   newest data ${pct2(s.holdout.mean)} per trade (worst case ${pct2(s.holdout.lo)}, ${s.holdout.n} trades, ${pct2(s.holdout.winRate)} winners) \xB7 search data ${pct2(s.discovery.mean)} \xB7 every coin at the same entry: ${pct2(s.baseline)} \xB7 ${s.tradesPerDay.toFixed(0)} coins/day`);
-        for (const s of r.failed) console.log(`\u2718 ${s.text}: ${pct2(s.discovery.mean)} in the search data, ${pct2(s.holdout.mean)} on the newest data`);
+   newest data ${pct3(s.holdout.mean)} per trade (worst case ${pct3(s.holdout.lo)}, ${s.holdout.n} trades, ${pct3(s.holdout.winRate)} winners) \xB7 search data ${pct3(s.discovery.mean)} \xB7 every coin at the same entry: ${pct3(s.baseline)} \xB7 ${s.tradesPerDay.toFixed(0)} coins/day`);
+        for (const s of r.failed) console.log(`\u2718 ${s.text}: ${pct3(s.discovery.mean)} in the search data, ${pct3(s.holdout.mean)} on the newest data`);
       }
       break;
     }
