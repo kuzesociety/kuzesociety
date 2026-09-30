@@ -1,0 +1,24 @@
+sleeve-free test: does return in slot i predict return in slot j later the same session day, and does that survive out of sample?
+(50% sign agreement and ~0 correlation of t-statistics = noise; chance level of |t|>=4 pairs ~ 0.006% of pairs)
+
+BTC       days dev/oos  2921/ 2465  pairs  4560  corr(t_dev,t_oos) +0.049  |t_dev|>=2.5: n= 837 sign-agree 0.55 | non-adjacent n= 756 agree 0.53 | strong(>=4) 200 replicate 19
+EURUSD    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.045  |t_dev|>=2.5: n= 224 sign-agree 0.55 | non-adjacent n= 198 agree 0.54 | strong(>=4)  23 replicate  7
+GBPUSD    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.069  |t_dev|>=2.5: n= 312 sign-agree 0.56 | non-adjacent n= 276 agree 0.54 | strong(>=4)  37 replicate  6
+USDJPY    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.043  |t_dev|>=2.5: n= 258 sign-agree 0.52 | non-adjacent n= 244 agree 0.51 | strong(>=4)  13 replicate  2
+AUDUSD    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.046  |t_dev|>=2.5: n= 154 sign-agree 0.56 | non-adjacent n= 127 agree 0.53 | strong(>=4)  13 replicate  8
+USDCAD    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.067  |t_dev|>=2.5: n= 198 sign-agree 0.56 | non-adjacent n= 172 agree 0.52 | strong(>=4)  10 replicate  5
+USDCHF    days dev/oos  1330/ 1083  pairs  4560  corr(t_dev,t_oos) +0.083  |t_dev|>=2.5: n= 282 sign-agree 0.54 | non-adjacent n= 252 agree 0.51 | strong(>=4)  28 replicate  9
+EURJPY    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.042  |t_dev|>=2.5: n= 240 sign-agree 0.49 | non-adjacent n= 224 agree 0.48 | strong(>=4)  17 replicate  3
+GBPJPY    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.073  |t_dev|>=2.5: n= 281 sign-agree 0.52 | non-adjacent n= 257 agree 0.50 | strong(>=4)  13 replicate  2
+EURGBP    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.128  |t_dev|>=2.5: n= 268 sign-agree 0.64 | non-adjacent n= 228 agree 0.59 | strong(>=4)  40 replicate 21
+EURCHF    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.090  |t_dev|>=2.5: n= 535 sign-agree 0.59 | non-adjacent n= 474 agree 0.56 | strong(>=4)  75 replicate 20
+AUDJPY    days dev/oos  1331/ 1083  pairs  4560  corr(t_dev,t_oos) +0.029  |t_dev|>=2.5: n= 277 sign-agree 0.53 | non-adjacent n= 255 agree 0.51 | strong(>=4)  17 replicate  4
+XAUUSD    days dev/oos  1453/ 1078  pairs  4095  corr(t_dev,t_oos) +0.074  |t_dev|>=2.5: n= 254 sign-agree 0.58 | non-adjacent n= 233 agree 0.58 | strong(>=4)  16 replicate  2
+XAU-M1    days dev/oos  1289/ 1292  pairs  4095  corr(t_dev,t_oos) +0.056  |t_dev|>=2.5: n= 340 sign-agree 0.52 | non-adjacent n= 316 agree 0.50 | strong(>=4)  29 replicate  3
+NAS100    days dev/oos   393/  373  pairs  3828  corr(t_dev,t_oos) +0.024  |t_dev|>=2.5: n= 339 sign-agree 0.52 | non-adjacent n= 322 agree 0.51 | strong(>=4)  27 replicate  2
+US500     days dev/oos   393/  373  pairs  3828  corr(t_dev,t_oos) +0.016  |t_dev|>=2.5: n= 348 sign-agree 0.51 | non-adjacent n= 331 agree 0.50 | strong(>=4)  30 replicate  2
+US30      days dev/oos   381/  373  pairs  3828  corr(t_dev,t_oos) +0.015  |t_dev|>=2.5: n= 303 sign-agree 0.54 | non-adjacent n= 288 agree 0.53 | strong(>=4)  19 replicate  1
+DAX       days dev/oos   379/  373  pairs  3828  corr(t_dev,t_oos) +0.043  |t_dev|>=2.5: n= 413 sign-agree 0.56 | non-adjacent n= 398 agree 0.56 | strong(>=4)  34 replicate  1
+FTSE      days dev/oos   398/  370  pairs  3828  corr(t_dev,t_oos) +0.035  |t_dev|>=2.5: n= 220 sign-agree 0.55 | non-adjacent n= 210 agree 0.54 | strong(>=4)  12 replicate  1
+
+corr(t_dev, t_oos) across 19 markets: mean +0.054, min +0.015, max +0.128

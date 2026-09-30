@@ -1,0 +1,44 @@
+; KuzeEdge preset - Forex, M5, SHADOW: measures only, places NO orders
+; Attach to: an EURUSD (or other FX pair) M5 chart. If MetaTrader refuses to load this file, type these values into the Inputs tab by hand.
+; Enum values: InpMode 0=Off 1=Shadow 2=Gated 3=Force | InpClass 0=Auto 1=US index 2=EU index 3=FX 4=Metal 5=Energy 6=Crypto 7=Custom
+;              InpServerMode 0=Auto (New York close, server = NY+7h) 1=NY close 2=EU DST 3=Fixed
+InpMode=1
+InpMagic=240929
+InpClass=3
+InpSignalMin=5
+InpServerMode=0
+InpServerFixedHours=0
+InpCustomAnchors=NY0930,NY1300
+InpExtraLiveMask=0
+InpRiskPct=0.5
+InpMaxLots=0.0
+InpDailyLossPct=2.0
+InpDailyProfitPct=0.0
+InpMaxTradesPerDay=3
+InpMaxConsecLosses=2
+InpMaxDDPct=10.0
+InpS1BoxMin=15
+InpS1WinMin=120
+InpS1SlMult=1.5
+InpS1TpMult=1.0
+InpS1VolMax=0.7
+InpS1MaxHoldMin=60
+InpMinLotTol=2.0
+InpMaxCostFrac=0.10
+InpMaxSpreadPts=0.0
+InpDeviationPts=20
+InpFlatHHMM=1650
+InpMinToFlatMin=10
+InpCtxFilter=0
+InpFlatOnStop=true
+InpGateN=60
+InpGateMinN=20
+InpGateTheta=0.03
+InpGateZ=1.0
+InpGateCell=0
+InpBootstrapDays=250
+InpShadowSlipPts=0.0
+InpLedger=true
+InpLedgerBoot=false
+InpPanel=true
+InpVerbose=false

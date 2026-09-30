@@ -1,0 +1,19 @@
+
+=== NET of costs : filter ON keeps 281,817 of 308,522 trades ===
+dev: kept n= 147660 avgR -0.1790 | removed n=  13616 avgR -0.1227 | kept - removed -0.0563 (Welch t -8.26)
+oos: kept n= 134157 avgR -0.1716 | removed n=  13089 avgR -0.1292 | kept - removed -0.0424 (Welch t -6.01)
+series where kept beats removed: dev 1 / 22, oos 3 / 22, both 0
+
+=== GROSS (no spread / slippage) : filter ON keeps 294,095 of 321,014 trades ===
+dev: kept n= 154573 avgR -0.0257 | removed n=  13754 avgR +0.0040 | kept - removed -0.0297 (Welch t -3.84)
+oos: kept n= 139522 avgR -0.0141 | removed n=  13165 avgR -0.0133 | kept - removed -0.0008 (Welch t -0.10)
+series where kept beats removed: dev 6 / 22, oos 13 / 22, both 3
+
+Kept-trades net result by setup (filter ON):
+                count    mean
+sleeve                       
+S1_BoxReclaim   65247 -0.1175
+S2_OpenExhaust  10737 -0.1758
+S3_IBBreak      83847 -0.1917
+S4_OpenRetest   79723 -0.2132
+S5_LevelSweep   42263 -0.1617

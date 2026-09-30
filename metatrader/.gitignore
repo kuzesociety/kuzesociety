@@ -1,0 +1,9 @@
+# generated / downloaded - never commit
+research/cpp/build/
+research/data_raw/
+research/data_cache/
+research/out/
+__pycache__/
+*.pyc
+*.npy
+*.bin
