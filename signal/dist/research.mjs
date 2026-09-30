@@ -3564,6 +3564,16 @@ var DEFAULT_CONFIG = {
   seed: 1
 };
 var dayKey = (ts) => new Date(ts).toISOString().slice(0, 10);
+var SAMPLED_POOLS = 12;
+var NEWEST_KEPT = 10;
+function mintHash(mint) {
+  let h = 2166136261;
+  for (let i = 0; i < mint.length; i++) {
+    h ^= mint.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
 var POOL_WAIT_MS = 6e4;
 var ENTRY_LEAD_SEC = 600;
 function entryFacts(t, f2) {
@@ -4670,6 +4680,12 @@ var Engine = class {
       followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0, soon });
     }
     followed.sort((a, b) => Number(b.soon) - Number(a.soon) || b.at - a.at);
+    const reserved = Math.min(SAMPLED_POOLS, Math.floor(max / 3));
+    if (reserved > 0) {
+      const older = followed.filter((f2) => f2.pool && !f2.soon).slice(NEWEST_KEPT);
+      older.sort((a, b) => mintHash(a.mint) - mintHash(b.mint));
+      for (const f2 of older.slice(0, reserved)) if (out.size < max) out.add(f2.pool);
+    }
     for (const f2 of followed) {
       if (f2.pool && out.size < max) out.add(f2.pool);
       else if (f2.pool && out.has(f2.pool)) continue;

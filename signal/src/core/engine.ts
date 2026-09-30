@@ -230,6 +230,24 @@ interface ScoreEntry {
 
 const dayKey = (ts: number) => new Date(ts).toISOString().slice(0, 10);
 /** How long a graduated coin may wait for its pool's address before it counts as unobserved. */
+/** Of the followed-pool budget, at most this many go to the steady sample of older graduated coins. */
+const SAMPLED_POOLS = 12;
+/** The newest graduates are followed by recency; the sample is drawn from the ones after these. */
+const NEWEST_KEPT = 10;
+
+/**
+ * A stable number from a mint address, for choosing which coins to keep watching. It depends only
+ * on the address, so the choice cannot follow a price and the recordings stay an unbiased sample.
+ */
+function mintHash(mint: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < mint.length; i++) {
+    h ^= mint.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h >>> 0;
+}
+
 const POOL_WAIT_MS = 60_000;
 /** A rule that buys at a time after graduating has its coins followed from this long before. */
 const ENTRY_LEAD_SEC = 600;
@@ -1442,8 +1460,25 @@ export class Engine {
       const soon = !!buyAt && since >= buyAt.sec - ENTRY_LEAD_SEC && since < buyAt.sec * 1.6 && !this.scores.get(mint)?.cps.includes(buyAt.tag);
       followed.push({ mint, pool: t.pool, at: t.migrateAt ?? 0, soon });
     }
-    // coins the rule is about to buy first (their price must be current then), then the newest graduates
+    // Coins the rule is about to buy first (their price must be current then), then the newest
+    // graduates. But "newest first" alone means the bot has never once watched an older, larger
+    // graduated coin: they drop out after about two hours and are never followed again, so every
+    // recording of one is blind past that point. That is the cheapest place on the venue to trade
+    // - PumpSwap charges 1.25% a side under 420 SOL and 0.30% above ~98,000 - and it is the only
+    // part of the market with no usable price data.
+    //
+    // So a slice of the budget is reserved for graduated coins picked by a stable hash of their
+    // mint. Which coins those are depends on nothing but their address: not their price, not their
+    // size, not how they are doing. That keeps the recordings an unbiased sample - following the
+    // ones that had grown would be following the ones that went up - and it holds them steady,
+    // since the same mints stay chosen for as long as their would-be trades are open.
     followed.sort((a, b) => Number(b.soon) - Number(a.soon) || b.at - a.at);
+    const reserved = Math.min(SAMPLED_POOLS, Math.floor(max / 3));
+    if (reserved > 0) {
+      const older = followed.filter((f) => f.pool && !f.soon).slice(NEWEST_KEPT);
+      older.sort((a, b) => mintHash(a.mint) - mintHash(b.mint));
+      for (const f of older.slice(0, reserved)) if (out.size < max) out.add(f.pool!);
+    }
     for (const f of followed) {
       if (f.pool && out.size < max) out.add(f.pool);
       else if (f.pool && out.has(f.pool)) continue;
