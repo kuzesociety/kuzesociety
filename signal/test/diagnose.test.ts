@@ -63,9 +63,14 @@ describe("one coin cannot be an entry's headline", () => {
     spiked[1] = { ...spiked[1]!, grid: spiked[1]!.grid.map(() => 79_415), maxMult: 79_416 } as Sample; // index 1: index 0 stopped being watched, so it counts for nothing
     const withSpike = call(spiked);
     const line = (t: string) => t.split(String.fromCharCode(10)).find((l) => l.includes("5 min after graduating") && l.includes("best:"))!;
-    const num = (t: string) => /→ ([+-]?[\d.,]+)%/.exec(line(t))![1];
-    // the printed number is unmoved by the spike: it is the average without the largest recording
-    expect(num(withSpike)).toBe(num(plain));
+    const num = (t: string) => Number(/→ ([+-]?[\d.,]+)%/.exec(line(t))![1]!.replace(/,/g, ""));
+    // The headline barely moves: it is the average without the largest recording, so the spike is
+    // simply the row that gets left out. (It is not identical — a different row is dropped in each
+    // run — but it is within a point, against the ~35,000 points the spike is worth untrimmed.)
+    expect(Math.abs(num(withSpike) - num(plain))).toBeLessThan(1);
+    // and the plain average really was wrecked, which is what the warning reports
+    const warned = /but ([+-]?[\d.,]+)% with its best single recording/.exec(line(withSpike))!;
+    expect(Number(warned[1]!.replace(/,/g, ""))).toBeGreaterThan(1000);
     // and the reader is told the plain average is carried by one coin
     expect(line(withSpike)).toMatch(/with its best single recording, which one coin carries/);
     expect(line(plain)).not.toMatch(/one coin carries/);

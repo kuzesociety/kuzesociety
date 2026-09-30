@@ -22,7 +22,7 @@
 import { type BoostData, type BoostParams, boostSteps } from "./boost.js";
 import { FEATURE_KEYS } from "./features.js";
 import { type ModelInsight, type ModelSpec, type Recipe, type StageKey, type StageModel, linear, rawLogit, standardize, stageLogit } from "./model.js";
-import { GRID, GRID_VERSION, type Sample, comboCounts } from "./outcomes.js";
+import { GRID, GRID_VERSION_MIN, LEGACY_GRID, type Sample, comboCounts } from "./outcomes.js";
 import { clamp, logit, runSteps, runStepsAsync, sigmoid } from "./util.js";
 
 export interface TrainRow {
@@ -59,7 +59,7 @@ export const SAME_MOMENT_MS = 3_000;
  */
 export function labelOf(s: Sample, target: { tpPct: number; slPct: number }): 0 | 1 | null {
   const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
-  if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
+  if (gi >= 0 && (s.gv ?? 0) >= GRID_VERSION_MIN && gi < (s.grid?.length ?? 0) && (s.grid?.length ?? 0) >= LEGACY_GRID) {
     if (!comboCounts(s, gi)) return null;
     const r = s.grid[gi]!;
     return Number.isFinite(r) ? (r > 0 ? 1 : 0) : null;

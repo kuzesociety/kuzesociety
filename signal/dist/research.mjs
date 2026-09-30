@@ -509,10 +509,18 @@ var silentLogger = { debug() {
 function sumBps(f2) {
   return (f2.creator + f2.protocol + f2.lp) / 1e4;
 }
-var GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500];
-var GRID_SL = [10, 20, 30, 40, 50, 70];
-var GRID = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
-var GRID_VERSION = 2;
+var GRID_TP = [10, 15, 25, 50, 75, 100, 150, 200, 300, 500];
+var GRID_SL = [5, 10, 20, 30, 40, 50, 70];
+var LEGACY_TP = [25, 50, 75, 100, 150, 200, 300, 500];
+var LEGACY_SL = [10, 20, 30, 40, 50, 70];
+var LEGACY = LEGACY_TP.flatMap((tp) => LEGACY_SL.map((sl) => ({ tp, sl })));
+var LEGACY_GRID = LEGACY.length;
+var GRID = [
+  ...LEGACY,
+  ...GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl }))).filter((g) => !LEGACY.some((l) => l.tp === g.tp && l.sl === g.sl))
+];
+var GRID_VERSION = 3;
+var GRID_VERSION_MIN = 2;
 var PATH_MIN = [5, 10, 30, 60, 120];
 var ENTRY_LEVELS = [50, 55, 60, 65, 70, 75, 80, 85, 90, 95];
 var SLOT = 5;
@@ -528,6 +536,7 @@ var COMBOS = 1 + GRID.length;
 var TP_UP = Float64Array.from(GRID, (g) => 1 + g.tp / 100);
 var SL_DOWN = Float64Array.from(GRID, (g) => 1 - g.sl / 100);
 function comboObserved(s, gi) {
+  if (s.gridT !== void 0 && gi >= s.gridT.length) return false;
   const t = s.gridT?.[gi];
   return seenAt(s, t ?? Infinity);
 }
@@ -538,6 +547,7 @@ function counts(s, exitSec, windowSec = Infinity) {
   return Math.min(exitSec, windowSec) <= s.blind;
 }
 function comboCounts(s, gi) {
+  if (s.gridT !== void 0 && gi >= s.gridT.length) return false;
   return counts(s, s.gridT?.[gi] ?? Infinity);
 }
 function seenAt(s, sec) {
@@ -1285,7 +1295,12 @@ var DEFAULTS = {
 function exitReturn(s, c, h) {
   return exitReturnAt(s, c, HOLDS_MIN[h]);
 }
+function hasExit(s, c) {
+  if (c >= s.grid.length) return false;
+  return s.gridT === void 0 || c < s.gridT.length;
+}
 function exitReturnAt(s, c, hold) {
+  if (!hasExit(s, c)) return NaN;
   const ret = s.grid[c];
   const window = hold ? hold * 60 : Infinity;
   const t = s.gridT?.[c];
@@ -1325,7 +1340,7 @@ function recordedRows(samples, horizonMs) {
   for (const s of samples) if (s.resolvedAt > lastResolved) lastResolved = s.resolvedAt;
   const cutoff = lastResolved - horizonMs;
   return samples.filter(
-    (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS || s.kind === "moment" && customMoment(s.tag) !== null) && s.gv === GRID_VERSION && s.f && s.gridT?.length === GRID.length && s.path?.length === PATH_MIN.length && s.ts <= cutoff
+    (s) => (s.kind === "entry" || s.kind === "checkpoint" && s.tag in ENTRY_POINTS || s.kind === "moment" && customMoment(s.tag) !== null) && (s.gv ?? 0) >= GRID_VERSION_MIN && s.f && (s.gridT?.length ?? 0) >= LEGACY_GRID && s.grid.length >= LEGACY_GRID && s.path?.length === PATH_MIN.length && s.ts <= cutoff
   ).sort((a, b) => a.ts - b.ts);
 }
 function whyUnmeasurable(s, horizonMs) {
@@ -2169,7 +2184,7 @@ function validateModel(m) {
 var SAME_MOMENT_MS = 3e3;
 function labelOf(s, target) {
   const gi = GRID.findIndex((g) => g.tp === target.tpPct && g.sl === target.slPct);
-  if (gi >= 0 && s.gv === GRID_VERSION && s.grid?.length === GRID.length) {
+  if (gi >= 0 && (s.gv ?? 0) >= GRID_VERSION_MIN && gi < (s.grid?.length ?? 0) && (s.grid?.length ?? 0) >= LEGACY_GRID) {
     if (!comboCounts(s, gi)) return null;
     const r = s.grid[gi];
     return Number.isFinite(r) ? r > 0 ? 1 : 0 : null;

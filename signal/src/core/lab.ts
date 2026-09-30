@@ -29,7 +29,7 @@
  */
 import { type EdgeFound, EXITS, HOLDS_MIN, exitReturn } from "./edges.js";
 import { FEATURE_KEYS, fmtAge } from "./features.js";
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION_MIN, LEGACY_GRID, PATH_MIN, type Sample } from "./outcomes.js";
 import { ENTRY_POINTS, type RuleCond, type Settings, condsHold, entryLabel } from "./settings.js";
 import { clusteredMeanCI, hourOf, newId } from "./util.js";
 
@@ -659,9 +659,9 @@ function* searchEntry(d: Data, at: string, idx: Int32Array): Generator<void, { f
 function usable(s: Sample, cutoff: number): boolean {
   return (
     (s.kind === "entry" || (s.kind === "checkpoint" && s.tag in ENTRY_POINTS)) &&
-    s.gv === GRID_VERSION &&
+    (s.gv ?? 0) >= GRID_VERSION_MIN &&
     s.x?.length === NF &&
-    s.gridT?.length === GRID.length &&
+    (s.gridT?.length ?? 0) >= LEGACY_GRID &&
     s.path?.length === PATH_MIN.length &&
     s.ts <= cutoff
   );

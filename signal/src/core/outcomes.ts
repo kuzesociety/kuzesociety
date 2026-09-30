@@ -20,11 +20,50 @@ function sumBps(f: { creator: number; protocol: number; lp: number }): number {
   return (f.creator + f.protocol + f.lp) / 10_000;
 }
 
-export const GRID_TP = [25, 50, 75, 100, 150, 200, 300, 500] as const;
-export const GRID_SL = [10, 20, 30, 40, 50, 70] as const;
-export const GRID: ReadonlyArray<{ tp: number; sl: number }> = GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl })));
-/** Layout of `grid`/`gridT` in stored samples (v1 was 5 × 4 and had no timing). */
-export const GRID_VERSION = 2;
+export const GRID_TP = [10, 15, 25, 50, 75, 100, 150, 200, 300, 500] as const;
+export const GRID_SL = [5, 10, 20, 30, 40, 50, 70] as const;
+
+/**
+ * Layout 2's 48 exits, in the order they were written. Every recording made before the tight
+ * exits existed stores exactly these, so keeping them at the front means combo `i` is the same
+ * exit it has always been and none of that history has to be thrown away.
+ */
+const LEGACY_TP = [25, 50, 75, 100, 150, 200, 300, 500] as const;
+const LEGACY_SL = [10, 20, 30, 40, 50, 70] as const;
+const LEGACY: ReadonlyArray<{ tp: number; sl: number }> = LEGACY_TP.flatMap((tp) => LEGACY_SL.map((sl) => ({ tp, sl })));
+
+/** How many exits a recording must hold to be usable at all: layout 2's, at their old indices. */
+export const LEGACY_GRID = LEGACY.length;
+
+/**
+ * Exit alternatives every would-be trade is followed for: layout 2's 48, then the tight ones
+ * added after them (+10% and +15% targets, and a −5% stop).
+ *
+ * Why the tight ones exist: a rule that sells most of what it buys for a small quick gain lives
+ * or dies on whether a +10% move arrives before a −10% one, and that order was never written
+ * down. The nearest target recorded was +25%, the tightest stop −10%. Bracketing it from what was
+ * recorded leaves it undecided — at score 80-85 the win rate for +10% / −10% is provably between
+ * 33.9% and 64.0%, against the 50.0% it needs — and no amount of further reading of the old
+ * recordings can narrow that. Only recording the exit itself can.
+ *
+ * A stop cannot usefully be tighter than the round trip, because a position starts at 1 − its
+ * cost: −5% is the floor on the curve at 0.1 SOL (4.94%) and is real only on the cheap graduated
+ * coins (1.70% at 98,240 SOL), which is itself worth knowing.
+ */
+export const GRID: ReadonlyArray<{ tp: number; sl: number }> = [
+  ...LEGACY,
+  ...GRID_TP.flatMap((tp) => GRID_SL.map((sl) => ({ tp, sl }))).filter((g) => !LEGACY.some((l) => l.tp === g.tp && l.sl === g.sl)),
+];
+
+/**
+ * Layout of `grid`/`gridT` in stored samples (v1 was 5 × 4 and had no timing; v2 was 8 × 6).
+ * v3 keeps every v2 exit at its own index and adds the tight ones after, so a v2 recording is
+ * still read for the exits it has — `LEGACY_GRID` of them — and simply has nothing to say about
+ * the rest.
+ */
+export const GRID_VERSION = 3;
+/** The oldest layout still readable: v2 recordings are a prefix of v3's. */
+export const GRID_VERSION_MIN = 2;
 /** Minutes after entry at which a would-be position's value is recorded, for time exits. */
 export const PATH_MIN = [5, 10, 30, 60, 120] as const;
 
@@ -168,6 +207,9 @@ interface Hypo {
  * still observed. A stop that was never seen because nobody was watching is not a win.
  */
 export function comboObserved(s: Pick<Sample, "blind" | "gridT" | "ov" | "stage">, gi: number): boolean {
+  // a gridT that is present but shorter means an older layout never followed this exit;
+  // one that is absent means the timing was never written down at all (older still)
+  if (s.gridT !== undefined && gi >= s.gridT.length) return false;
   const t = s.gridT?.[gi];
   return seenAt(s, t ?? Infinity);
 }
@@ -196,6 +238,7 @@ export function counts(s: Pick<Sample, "blind" | "blindBy" | "ov" | "stage">, ex
 
 /** Whether GRID combo `gi` (held until its target, stop or the end of the recording) counts as evidence (see counts). */
 export function comboCounts(s: Pick<Sample, "blind" | "blindBy" | "gridT" | "ov" | "stage">, gi: number): boolean {
+  if (s.gridT !== undefined && gi >= s.gridT.length) return false; // never followed by that layout
   return counts(s, s.gridT?.[gi] ?? Infinity);
 }
 

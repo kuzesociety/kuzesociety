@@ -10,7 +10,7 @@
  *   3. Placebo: the whole search is repeated on shuffled outcomes, where no edge exists;
  *      how often it "finds" one there shows how often it fools itself.
  */
-import { ENTRY_LEVELS, GRID, GRID_VERSION, PATH_MIN, type Sample, counts } from "./outcomes.js";
+import { ENTRY_LEVELS, GRID, GRID_VERSION_MIN, LEGACY_GRID, PATH_MIN, type Sample, counts } from "./outcomes.js";
 import { ENTRY_POINTS, type Settings, condsHold, customMoment, entryLabel, filterBlock, ruleKey, tagOfLabel } from "./settings.js";
 import { clusteredMeanCI, hourOf, rng } from "./util.js";
 
@@ -196,8 +196,15 @@ export function exitReturn(s: Sample, c: number, h: number): number {
   return exitReturnAt(s, c, HOLDS_MIN[h]!);
 }
 
+/** Whether a recording followed exit `c` at all: one made under an older layout followed fewer. */
+export function hasExit(s: Pick<Sample, "grid" | "gridT">, c: number): boolean {
+  if (c >= s.grid.length) return false;
+  return s.gridT === undefined || c < s.gridT.length;
+}
+
 /** exitReturn for a time limit in minutes: 0 (none: followed for the horizon) or one of PATH_MIN. */
 export function exitReturnAt(s: Sample, c: number, hold: number): number {
+  if (!hasExit(s, c)) return NaN; // an older layout never followed this exit
   const ret = s.grid[c]!;
   const window = hold ? hold * 60 : Infinity;
   const t = s.gridT?.[c];
@@ -273,9 +280,10 @@ export function recordedRows(samples: Sample[], horizonMs: number): Sample[] {
     .filter(
       (s) =>
         (s.kind === "entry" || (s.kind === "checkpoint" && s.tag in ENTRY_POINTS) || (s.kind === "moment" && customMoment(s.tag) !== null)) &&
-        s.gv === GRID_VERSION &&
+        (s.gv ?? 0) >= GRID_VERSION_MIN &&
         s.f &&
-        s.gridT?.length === GRID.length &&
+        (s.gridT?.length ?? 0) >= LEGACY_GRID &&
+        s.grid.length >= LEGACY_GRID &&
         s.path?.length === PATH_MIN.length &&
         s.ts <= cutoff,
     )
