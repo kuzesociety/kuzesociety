@@ -1256,7 +1256,13 @@ var CONDITIONS = [
   { key: "curve", label: "still on the bonding curve", test: (s) => s.stage === "curve", stage: "curve" },
   { key: "amm", label: "already graduated", test: (s) => s.stage === "amm", stage: "amm" },
   ...[40, 80, 150].map((v) => ({ key: `mcap<=${v}`, label: `market cap \u2264 ${v} SOL`, test: (s) => f(s).mcap <= v, filters: { maxMcapSol: v } })),
-  ...[80, 150, 300].map((v) => ({ key: `mcap>=${v}`, label: `market cap \u2265 ${v} SOL`, test: (s) => f(s).mcap >= v, filters: { minMcapSol: v } })),
+  // Up to 300 SOL these are bands of the bonding curve, which completes at about 411. The three
+  // above it are the graduated market, and they are there because that is where trading is cheap:
+  // PumpSwap charges by market cap, so a round trip falls from 4.94% on the curve at 0.1 SOL to
+  // 3.13% around 9,820 SOL and 1.70% above ~98,000. Every entry in the menu loses roughly the fee,
+  // so the size of the fee is the difference between a losing rule and a working one — and until
+  // now the search could not say "a big graduated coin" at all.
+  ...[80, 150, 300, 1500, 1e4, 5e4].map((v) => ({ key: `mcap>=${v}`, label: `market cap \u2265 ${v.toLocaleString("en-US")} SOL`, test: (s) => f(s).mcap >= v, filters: { minMcapSol: v } })),
   ...[1, 3, 10].map((m) => ({ key: `age<=${m}m`, label: `younger than ${m} min`, test: (s) => f(s).age <= m * 60, filters: { maxAgeMin: m } })),
   ...[3, 10].map((m) => ({ key: `age>=${m}m`, label: `older than ${m} min`, test: (s) => f(s).age >= m * 60, filters: { minAgeSec: m * 60 } })),
   { key: "bundle<=10", label: "\u2264 10% bundled at launch", test: (s) => f(s).bundle * 100 <= 10, filters: { maxBundlePct: 10 } },

@@ -72,3 +72,21 @@ describe("the tight exits", () => {
     expect(x.grid[gi(25, 10)]!).toBeLessThan(x.grid[near]! + 1);
   });
 });
+
+describe("the search can say what a big graduated coin is", () => {
+  it("has market-cap conditions above the bonding curve's ceiling", async () => {
+    const { CONDITIONS } = await import("../src/core/edges.js");
+    const keys = CONDITIONS.map((c) => c.key);
+    // the curve completes at about 411 SOL, so anything above it is the graduated market
+    expect(keys).toContain("mcap>=1500");
+    expect(keys).toContain("mcap>=10000");
+    expect(keys).toContain("mcap>=50000");
+    // and each one is tradeable: it maps to a filter the engine enforces
+    for (const k of ["mcap>=1500", "mcap>=10000", "mcap>=50000"]) {
+      const c = CONDITIONS.find((x) => x.key === k)!;
+      expect(c.filters?.minMcapSol).toBe(Number(k.slice(6)));
+      expect(c.test({ f: { mcap: Number(k.slice(6)) + 1 } } as never)).toBe(true);
+      expect(c.test({ f: { mcap: Number(k.slice(6)) - 1 } } as never)).toBe(false);
+    }
+  });
+});
