@@ -1,0 +1,18 @@
+# VPS / home server:  cd signal && cp .env.example .env && nano .env && docker compose up -d
+services:
+  signal:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: signal
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }

@@ -1,0 +1,174 @@
+/**
+ * Dashboard API routes, shared by the Node server and the in-browser demo so both behave
+ * identically. Platform-specific pieces (disk samples, learner, live wallet, logs) are
+ * injected through the context.
+ */
+import type { Engine } from "./engine.js";
+import type { Sample } from "./outcomes.js";
+import { buildReport } from "./report.js";
+
+export interface ApiContext {
+  engine: () => Engine;
+  samples: (days: number) => Sample[] | Promise<Sample[]>;
+  health: () => Record<string, unknown>;
+  learnRun: () => Promise<unknown[]>;
+  live?: { status(): unknown; resume(): void; allowed(): boolean };
+  logs: () => unknown[];
+  /** last edge-finder report (null before the first run) */
+  edges: () => unknown;
+  edgesRun: () => Promise<unknown>;
+  /** what the scoring model learned (core/insight: LearningView) */
+  learning?: () => unknown | Promise<unknown>;
+  /** the autopilot: rule in use, ranking, decisions (core/autopilot: AutopilotView) */
+  autopilot?: () => unknown;
+  /** the self-check (core/selfcheck): every check with its status, and one summary line */
+  checks?: () => unknown;
+  /** the Lab (core/lab): ideas being tested, proven and retired */
+  lab?: () => unknown;
+  /** the Lab's summary to paste into a chat with Claude */
+  labSummary?: () => string;
+  /** everything the bot sees in one page of text (core/diagnose), to paste into a chat with Claude */
+  diagnosis?: () => Promise<string>;
+  /** adds your own idea to the Lab */
+  labIdea?: (text: string) => { ok: true; note: string } | { ok: false; error: string };
+  onSettingsChanged?: () => void;
+}
+
+export interface ApiResult {
+  status: number;
+  json: unknown;
+}
+
+const ok = (json: unknown): ApiResult => ({ status: 200, json });
+const err = (status: number, error: string): ApiResult => ({ status, json: { error } });
+
+export function accountSummary(e: Engine) {
+  const a = e.account();
+  return { ...a, closed: a.closed.slice(0, 50), equityCurve: a.equityCurve.slice(-400) };
+}
+
+export async function handleApi(ctx: ApiContext, method: string, path: string, query: URLSearchParams, body: Record<string, unknown>): Promise<ApiResult> {
+  const e = ctx.engine();
+  if (method === "GET") {
+    switch (path) {
+      case "/api/state":
+        return ok({
+          settings: e.settings,
+          account: accountSummary(e),
+          health: ctx.health(),
+          funnel: { hour: e.funnel.summary(e.clock, 1), day: e.funnel.summary(e.clock, 24) },
+          signals: e.funnel.recent.toArray().slice(-150).reverse(),
+          serverTime: Date.now(),
+          solUsd: e.solUsd,
+        });
+      case "/api/radar":
+        return ok({
+          rows: e.radar({
+            limit: Number(query.get("limit") ?? 80),
+            minScore: Number(query.get("minScore") ?? 0),
+            stage: (query.get("stage") as "curve" | "amm" | "all") ?? "all",
+            sort: (query.get("sort") as "score" | "new" | "mcap") ?? "score",
+          }),
+        });
+      case "/api/signals":
+        return ok({ signals: e.funnel.recent.toArray().reverse(), hour: e.funnel.summary(e.clock, 1), day: e.funnel.summary(e.clock, 24) });
+      case "/api/learn": {
+        const days = Math.min(60, Math.max(1, Number(query.get("days") ?? 14)));
+        const stored = await ctx.samples(days);
+        const samples = stored.length ? stored : e.samples.toArray();
+        return ok(buildReport(samples, e.settings, e.model, e.closed.toArray(), Date.now()));
+      }
+      case "/api/wallets":
+        return ok({ wallets: e.wallets.leaderboard(60), smart: e.wallets.smartCount(), tracked: e.wallets.size });
+      case "/api/narratives":
+        return ok({
+          clusters: e.narratives.hot(40, (m) => e.tokens.get(m)?.mcapSol ?? 0).map((c) => ({
+            ...c,
+            leaderName: c.leader ? e.tokens.get(c.leader)?.name : undefined,
+            leaderSymbol: c.leader ? e.tokens.get(c.leader)?.symbol : undefined,
+            leaderScore: c.leader ? e.scoreOf(c.leader)?.res.score : undefined,
+          })),
+        });
+      case "/api/logs":
+        return ok({ lines: ctx.logs() });
+      case "/api/edges":
+        return ok({ report: ctx.edges() ?? null });
+      case "/api/learning":
+        return ok({ view: (await ctx.learning?.()) ?? null });
+      case "/api/autopilot":
+        return ok({ view: ctx.autopilot?.() ?? null });
+      case "/api/checks":
+        return ok({ view: ctx.checks?.() ?? null });
+      case "/api/lab":
+        return ok({ view: ctx.lab?.() ?? null });
+      case "/api/lab/summary":
+        return ctx.labSummary ? ok({ text: ctx.labSummary() }) : err(404, "The Lab runs on the server bot only.");
+      case "/api/diagnosis":
+        return ctx.diagnosis ? ok({ text: await ctx.diagnosis() }) : err(404, "The diagnosis runs on the server bot only.");
+      default:
+        if (path.startsWith("/api/token/")) {
+          const d = e.tokenDetail(decodeURIComponent(path.slice(11)));
+          return d ? ok(d) : err(404, "Coin not tracked right now.");
+        }
+        return err(404, "unknown endpoint");
+    }
+  }
+  if (method === "POST") {
+    switch (path) {
+      case "/api/settings": {
+        if (body.mode === "live" && !ctx.live?.allowed()) {
+          return err(400, "Live mode is locked: the server has no live trading enabled or the wallet is not ready. See Setup → Go live.");
+        }
+        const s = e.updateSettings(body);
+        e.persistNow();
+        ctx.onSettingsChanged?.();
+        return ok({ settings: s });
+      }
+      case "/api/kill":
+        e.setKill(!!body.on, !!body.sellAll);
+        e.persistNow();
+        return ok({ killed: e.killed });
+      case "/api/learn/run":
+        return ok({ reports: await ctx.learnRun() });
+      case "/api/edges/run":
+        return ok({ report: await ctx.edgesRun() });
+      case "/api/lab/idea": {
+        if (!ctx.labIdea) return err(404, "The Lab runs on the server bot only.");
+        const text = typeof body.text === "string" ? body.text.slice(0, 300) : "";
+        const r = ctx.labIdea(text);
+        return r.ok ? ok(r) : err(400, r.error);
+      }
+      case "/api/live/resume":
+        ctx.live?.resume();
+        return ok({ live: ctx.live?.status() ?? null });
+      case "/api/paper/add": {
+        const amount = Number(body.sol);
+        if (!(amount > 0 && amount <= 1_000_000)) return err(400, "Add between 0 and 1,000,000 paper SOL.");
+        e.addPaperMoney(amount);
+        e.persistNow();
+        return ok({ ok: true, paperBalance: e.paperBalance });
+      }
+      case "/api/paper/reset": {
+        if (e.positions.size > 0) return err(400, "Close open positions first.");
+        e.paperBalance = e.cfg.paperStartSol * 1e9;
+        e.stats.realized = 0;
+        e.stats.dayPnl = 0;
+        e.stats.wins = 0;
+        e.stats.losses = 0;
+        e.stats.equity = [{ t: Date.now(), v: e.paperBalance }];
+        e.stats.deposits = 0;
+        e.closed.clear();
+        e.persistNow();
+        return ok({ ok: true });
+      }
+      default:
+        if (path.startsWith("/api/positions/") && path.endsWith("/close")) {
+          const id = decodeURIComponent(path.slice(15, -6));
+          const done = e.closeManually(id, "manual");
+          return done ? ok({ ok: true }) : err(400, "Position is not closable right now (no price, or an order is in flight).");
+        }
+        return err(404, "unknown endpoint");
+    }
+  }
+  return err(405, "method not allowed");
+}
