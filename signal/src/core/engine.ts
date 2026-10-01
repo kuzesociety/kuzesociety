@@ -804,6 +804,18 @@ export class Engine {
     if (this.killed) return "kill_switch";
     if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
+    // Never seen launch, so nothing about it is verified: its true age is unknown, and PumpSwap
+    // carries pools that never came from the pump.fun curve at all - tokenised equities, major
+    // tokens, anything someone made a pool for. `checkpoints` already refuses to record a partial
+    // token "to keep samples clean", so trading one means trading a coin the bot cannot measure,
+    // and the recordings a rule was proven on never contained its kind.
+    //
+    // It is not hypothetical. With a market-cap floor of 5,000 SOL in force the bot bought USDF,
+    // UDR and NTDA - at market caps of 65,726 and 1,445,072 SOL, far above anything the pump.fun
+    // curve produces - and a stop set at -20% came back at -99.8% on each. Two such trades were
+    // the whole loss across eighteen; the other sixteen averaged -1.6%. A floor on market cap
+    // selects FOR this population, because real meme coins rarely reach it.
+    if (t.partial) return "not_launched_here";
     // priced only by off-chain quotes, and the pool behind the newest one is drained: nothing to buy into
     if (t.tradeCount === 0 && t.quoteUntradable) return "pool_drained";
     if ((t.stage === "curve" && !s.tradeCurve) || (t.stage === "amm" && !s.tradeAmm)) return "stage_off";

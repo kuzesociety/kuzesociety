@@ -31,6 +31,7 @@ export const REASON_TEXT: Record<string, string> = {
   stage_off: "This stage is turned off in settings",
   non_sol_quote: "Coin is not paired with SOL",
   pool_drained: "Its pool has been drained — the quoted price cannot be sold into",
+  not_launched_here: "The bot never saw this coin launch — it may not be a pump.fun coin at all",
   already_traded: "Already traded this coin (re-entry off)",
   max_open: "Max open positions reached",
   pending: "An order for this coin is already in flight",

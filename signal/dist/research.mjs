@@ -2745,6 +2745,7 @@ var REASON_TEXT = {
   stage_off: "This stage is turned off in settings",
   non_sol_quote: "Coin is not paired with SOL",
   pool_drained: "Its pool has been drained \u2014 the quoted price cannot be sold into",
+  not_launched_here: "The bot never saw this coin launch \u2014 it may not be a pump.fun coin at all",
   already_traded: "Already traded this coin (re-entry off)",
   max_open: "Max open positions reached",
   pending: "An order for this coin is already in flight",
@@ -4092,6 +4093,7 @@ var Engine = class {
     if (this.killed) return "kill_switch";
     if (this.autoHold) return "autopilot_hold";
     if (t.nonSol) return "non_sol_quote";
+    if (t.partial) return "not_launched_here";
     if (t.tradeCount === 0 && t.quoteUntradable) return "pool_drained";
     if (t.stage === "curve" && !s.tradeCurve || t.stage === "amm" && !s.tradeAmm) return "stage_off";
     if (t.stage === "migrating") return "migrating";
