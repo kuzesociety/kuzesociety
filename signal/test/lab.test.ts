@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { FEATURE_KEYS } from "../src/core/features.js";
 import { LAB, addLabIdea, describeLab, emptyLab, labCode, labForward, labProofs, labSettings, labSummary, parseLabRule, runLab } from "../src/core/lab.js";
 import { GRID, GRID_VERSION, PATH_MIN, type Sample } from "../src/core/outcomes.js";
@@ -65,6 +65,10 @@ function runOver(samples: Sample[], days: number, everyH: number, startDay = 1.5
 }
 
 describe("the Lab", () => {
+  // each test computes for many seconds without pausing: let the test runner's messages through
+  // between them, or it gives up on the worker after a minute of silence
+  afterEach(() => new Promise<void>((r) => setImmediate(r)));
+
   it("writes and reads rules in words and as text", () => {
     const p = parseLabRule("mig300 top10<=25% smart>=1 tweet=1 tp100 sl30 hold30");
     expect("rule" in p).toBe(true);
