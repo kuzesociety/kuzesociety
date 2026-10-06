@@ -11,7 +11,7 @@ The bot runs on a **server** (a VPS, a cloud container, or your PC). The dashboa
 ## 1. Run it
 
 ### Option A: cloud, from your phone (Railway, about $5–10/month, usage-based)
-1. Open [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub repo** → pick `kuzesociety/kuzesociety`, branch `claude/signal-meme-trading-bot-o142hw`. Railway finds the `Dockerfile` automatically.
+1. Open [railway.com](https://railway.com) → **New Project** → **Deploy from GitHub repo** → pick `kuzesociety/signal`. Railway finds the `Dockerfile` automatically.
 2. **Variables**: add `DASHBOARD_TOKEN` (a long random password), plus `RPC_URL` / `RPC_WS_URL` (see step 2). Add the Telegram variables if you want alerts.
 3. **Volumes**: add a volume mounted at `/data`. Without it, trade history resets on every redeploy.
 4. **Settings → Networking → Generate domain**, then open `https://<your-domain>/?token=<DASHBOARD_TOKEN>`.
@@ -20,14 +20,14 @@ Render works too (`render.yaml` is included). It needs the paid Starter instance
 
 ### Option B: VPS (Ubuntu, about $4–6/month at Hetzner, DigitalOcean, etc.)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kuzesociety/kuzesociety/claude/signal-meme-trading-bot-o142hw/signal/deploy/install-ubuntu.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/kuzesociety/signal/main/deploy/install-ubuntu.sh | sudo bash
 ```
-This installs Node, builds, creates a systemd service that restarts on failure, and prints your dashboard link and token. Configuration lives in `/opt/signal/signal/.env`; run `systemctl restart signal` after editing it.
+This installs Node, builds, creates a systemd service that restarts on failure, and prints your dashboard link and token. Configuration lives in `/opt/signal/.env`; run `systemctl restart signal` after editing it.
 
-With Docker instead: `cd signal && cp .env.example .env && docker compose up -d`.
+With Docker instead: `cp .env.example .env && docker compose up -d`.
 
 ### Option C: your Windows PC (free) — step-by-step guide: [`docs/SETUP-WINDOWS.md`](docs/SETUP-WINDOWS.md)
-Install [Node.js LTS](https://nodejs.org), [download the bot](https://github.com/kuzesociety/kuzesociety/archive/refs/heads/claude/signal-meme-trading-bot-o142hw.zip), then double-click **`signal/start-windows.bat`**. The dashboard opens in your browser (on the PC itself no token is needed) and the bot restarts automatically if it stops. Everything else — the data-feed key, Telegram, and later the wallet — is done with buttons in **More → Setup**. `autostart-windows.bat` makes it start with Windows. On a Mac, use `start-mac.command` (it also keeps the Mac awake).
+Install [Node.js LTS](https://nodejs.org), [download the bot](https://github.com/kuzesociety/signal/archive/refs/heads/main.zip), then double-click **`start-windows.bat`** in the extracted folder. The dashboard opens in your browser (on the PC itself no token is needed) and the bot restarts automatically if it stops. Everything else — the data-feed key, Telegram, and later the wallet — is done with buttons in **More → Setup**. `autostart-windows.bat` makes it start with Windows. On a Mac, use `start-mac.command` (it also keeps the Mac awake).
 
 **Updates install themselves:** a copy started this way checks for a new version every 30 minutes and installs it on its own — never in the middle of placing or selling an order, and after a learning run in progress has finished. It downloads the new version, checks it, keeps a copy of every file it replaces (`data/update-backup/`), installs it over the folder — never touching `data/` (keys, settings, trade history, open trades), `.env` or `work/` — and test-starts it before restarting into it. Open trades stay open: the new version picks them up and manages their exits. A version that does not start is put back at once; one that keeps stopping after the restart (more than 3 starts in its first half hour) is put back at its next start; either way Telegram says so and that version is not installed by itself again. Recordings in progress at a restart are kept as far as they were watched. To update only when you say so, set `AUTO_UPDATE=0` in `.env`: the dashboard then shows a blue bar when a version is ready (**More → Setup → Update now**, or send `/update`). Servers update by redeploying (Railway/Render) or `git pull && npm run build` (VPS).
 

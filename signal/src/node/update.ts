@@ -1,8 +1,8 @@
 /**
  * Updates for a bot installed from the ZIP download (the Windows and Mac starters). It checks
  * GitHub for a newer build and — on request, or by itself when `auto` is on — downloads the same
- * ZIP a person would, verifies it, keeps a copy of every file it replaces, writes its signal/
- * folder over this install, test-starts the new bot (`--boot-check`), and restarts. A version
+ * ZIP a person would, verifies it, keeps a copy of every file it replaces, writes the bot's files
+ * over this install, test-starts the new bot (`--boot-check`), and restarts. A version
  * that does not start is put back at once; one that keeps stopping after the restart is put back
  * by the next start (guardStartup). data/ (keys, settings, trade history, open trades), .env and
  * node_modules are never touched: open trades stay open and the new version manages them.
@@ -16,10 +16,10 @@ import { dirname, join } from "node:path";
 import { inflateRawSync } from "node:zlib";
 import type { Logger } from "../core/util.js";
 
-const REPO = "kuzesociety/kuzesociety";
-const BRANCH = "claude/signal-meme-trading-bot-o142hw";
+const REPO = "kuzesociety/signal";
+const BRANCH = "main";
 export const UPDATE_ZIP_URL = `https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip`;
-export const UPDATE_VERSION_URL = `https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/signal/dist/version.json`;
+export const UPDATE_VERSION_URL = `https://raw.githubusercontent.com/${REPO}/refs/heads/${BRANCH}/dist/version.json`;
 
 /** Never written by an update: the user's own files. */
 const KEEP = ["data", "node_modules", ".env", "work"];
@@ -97,9 +97,13 @@ function safeRelative(rel: string) {
   return rel.length > 0 && !rel.includes("\\") && !rel.includes(":") && rel.split("/").every((s) => s !== "" && s !== "." && s !== "..");
 }
 
-/** The bot's own files in a GitHub branch download (<top folder>/signal/…), by path inside the install. */
+/**
+ * The bot's own files in a GitHub branch download, by path inside the install: at the top of the
+ * download (<top folder>/…, its own repository), or in a signal/ folder (where it lived before).
+ */
 export function botFiles(entries: ZipEntry[]): Map<string, ZipEntry> {
-  const main = entries.find((e) => /^[^/]+\/signal\/dist\/engine\.mjs$/.test(e.name));
+  const main =
+    entries.find((e) => /^[^/]+\/dist\/engine\.mjs$/.test(e.name)) ?? entries.find((e) => /^[^/]+\/signal\/dist\/engine\.mjs$/.test(e.name));
   if (!main) throw new Error("the download does not contain the bot");
   const prefix = main.name.slice(0, -"dist/engine.mjs".length);
   const files = new Map<string, ZipEntry>();

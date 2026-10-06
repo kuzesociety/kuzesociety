@@ -113,13 +113,16 @@ the hour.
    your best. A proven rule reaches the autopilot, which trades it in paper at once if it beats
    the rule in use; the dashboard and Telegram show the switch.
 5. Change the bot itself when the data calls for it — record a new fact, add an exit, fix a bug:
-   in a clone of `https://github.com/kuzesociety/kuzesociety` (in `work/`), branch
-   `claude/signal-meme-trading-bot-o142hw`, folder `signal/`: change, `npx tsc --noEmit`,
+   in a clone of `https://github.com/kuzesociety/signal` (in `work/signal`), branch
+   `main` — the bot is at the top of that repository: change, `npx tsc --noEmit`,
    `npx vitest run`, `npm run build`, commit (with `dist/`), push. **What you push goes live by
    itself:** the bot checks GitHub every 30 minutes, installs a new version when no order is in
    flight (open trades stay open; the new version manages them), test-starts it first, and puts
    the version before back if it does not start or keeps stopping. So push only what passed the
    full suite, one change you can explain per push, and tell the owner what each push changes.
    Ask the owner before the first push (the computer needs their permission to push to GitHub).
+   Until 2026-10-06 the bot lived in `kuzesociety/kuzesociety` (branch
+   `claude/signal-meme-trading-bot-o142hw`, folder `signal/`): a clone of that is stale and the
+   running bot no longer follows it — delete it and clone `signal`.
 6. Report in `work/JOURNAL.md` and to the owner: how many rules were tried, what held up, what
    the bot trades and how its own trades are doing. Plain words, no promises.

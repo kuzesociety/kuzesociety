@@ -10,10 +10,10 @@ About 15 minutes. You need: a Windows 10/11 PC that stays on, an internet connec
 ## 2. Download SIGNAL
 
 1. Click this link — the download starts by itself:
-   **https://github.com/kuzesociety/kuzesociety/archive/refs/heads/claude/signal-meme-trading-bot-o142hw.zip**
+   **https://github.com/kuzesociety/signal/archive/refs/heads/main.zip**
 2. Right-click the downloaded ZIP → **Properties** → tick **Unblock** (if you see it) → **OK**.
 3. Right-click the ZIP → **Extract All…** → **Extract**.
-4. Open the extracted folder. Move the folder called **signal** to `C:\` and rename it **SIGNAL**, so you end up with `C:\SIGNAL`. (Avoid Desktop/Documents if OneDrive syncs them.)
+4. Move the extracted folder (**signal-main**) to `C:\` and rename it **SIGNAL**, so you end up with `C:\SIGNAL`. (Avoid Desktop/Documents if OneDrive syncs them.)
 
 ## 3. Start it
 
@@ -80,7 +80,7 @@ To install right away: **More → Setup → Update now**, or send `/update` from
 
 1. Close the black SIGNAL window.
 2. Download the ZIP again (same link as step 2) → right-click → **Extract All…** → **Extract**.
-3. Open the extracted folder, then the **signal** folder inside it. Press **Ctrl+A** (select all), then **Ctrl+C** (copy).
+3. Open the extracted folder (**signal-main**). Press **Ctrl+A** (select all), then **Ctrl+C** (copy).
 4. Open `C:\SIGNAL`, press **Ctrl+V** (paste) → **Replace the files in the destination**. Your `data` folder (keys, settings, history) is not in the download, so it stays as it is.
 5. Double-click **start-windows.bat**.
 

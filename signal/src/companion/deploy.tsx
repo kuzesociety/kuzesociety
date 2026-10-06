@@ -1,8 +1,8 @@
 /** Set up the real bot: a server config generated in the page, and the steps for each host. */
 import { useMemo, useRef, useState } from "preact/hooks";
 
-const REPO = "kuzesociety/kuzesociety";
-const BRANCH = "claude/signal-meme-trading-bot-o142hw";
+const REPO = "kuzesociety/signal";
+const BRANCH = "main";
 
 type Host = "railway" | "render" | "vps" | "windows";
 
@@ -184,10 +184,10 @@ export function Deploy() {
             <li>Rent an Ubuntu server (1 GB RAM is enough) and log in with SSH.</li>
             <li>
               Run the installer — it installs Node, builds, and sets up a service that restarts itself:
-              <CopyBlock text={`curl -fsSL https://raw.githubusercontent.com/${REPO}/${BRANCH}/signal/deploy/install-ubuntu.sh | sudo bash`} />
+              <CopyBlock text={`curl -fsSL https://raw.githubusercontent.com/${REPO}/${BRANCH}/deploy/install-ubuntu.sh | sudo bash`} />
             </li>
             <li>
-              Put the settings above in <code>/opt/signal/signal/.env</code>, then <code>sudo systemctl restart signal</code>.
+              Put the settings above in <code>/opt/signal/.env</code>, then <code>sudo systemctl restart signal</code>.
             </li>
             <li>
               Open <code>http://SERVER-IP:8787/?token=…</code> (or put it behind a domain with HTTPS).
@@ -207,7 +207,7 @@ export function Deploy() {
               <a href={ZIP} target="_blank" rel="noopener">
                 Download the bot
               </a>{" "}
-              → right-click the ZIP → <b>Extract All</b>. Move the <code>signal</code> folder to <code>C:\</code> and rename it <code>SIGNAL</code>.
+              → right-click the ZIP → <b>Extract All</b>. Move the extracted <code>signal-main</code> folder to <code>C:\</code> and rename it <code>SIGNAL</code>.
             </li>
             <li>
               Double-click <code>start-windows.bat</code> (if Windows warns: More info → Run anyway). A black window opens — that is the bot, leave it open. The dashboard

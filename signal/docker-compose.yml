@@ -1,8 +1,8 @@
-# VPS / home server:  cd signal && cp .env.example .env && nano .env && docker compose up -d
+# VPS / home server:  cp .env.example .env && nano .env && docker compose up -d
 services:
   signal:
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile
     container_name: signal
     restart: unless-stopped

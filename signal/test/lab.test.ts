@@ -49,8 +49,12 @@ function market(o: { days: number; perDay: number; seed: number; edge?: (x: numb
   return out.sort((a, b) => a.ts - b.ts);
 }
 
-/** Runs the Lab the way the bot does — every `everyH` hours on what had finished by then. */
-function runOver(samples: Sample[], days: number, everyH: number, startDay = 1.5) {
+/**
+ * Runs the Lab the way the bot does — every `everyH` hours on what had finished by then. Pauses
+ * after each run, as the bot does between its runs: the test runner gives up on a worker that
+ * computes for a minute without letting its messages through.
+ */
+async function runOver(samples: Sample[], days: number, everyH: number, startDay = 1.5) {
   let st = emptyLab();
   const proven: string[] = [];
   let added = 0;
@@ -60,6 +64,7 @@ function runOver(samples: Sample[], days: number, everyH: number, startDay = 1.5
     st = res.state;
     proven.push(...res.proven.map((i) => i.code));
     added += res.added.length;
+    await new Promise<void>((r) => setImmediate(r));
   }
   return { st, proven, added };
 }
@@ -93,11 +98,11 @@ describe("the Lab", () => {
     expect(parseLabRule("mig300 top10<=25%")).toMatchObject({ error: expect.stringMatching(/Give the exit/) });
   });
 
-  it("invents a rule beyond the edge finder's menu and proves it on coins that came after it", () => {
+  it("invents a rule beyond the edge finder's menu and proves it on coins that came after it", async () => {
     // the edge lives in a combination the edge finder cannot express: few top holders AND smart wallets in
     const edge = (x: number[]) => x[K("top10")]! <= 0.25 && x[K("smart")]! >= Math.log1p(1) - 1e-9;
     const samples = market({ days: 10, perDay: 500, seed: 3, edge });
-    const { st, proven } = runOver(samples, 10, 12);
+    const { st, proven } = await runOver(samples, 10, 12);
     expect(proven.length).toBeGreaterThan(0);
     // what it proved uses both facts of the planted edge
     const ideas = st.ideas.filter((i) => i.provenAt);
@@ -112,9 +117,9 @@ describe("the Lab", () => {
     expect(labProofs(st, st.ranAt + 7 * HOUR)).toHaveLength(0);
   });
 
-  it("proves nothing where nothing works, however much it searches", () => {
+  it("proves nothing where nothing works, however much it searches", async () => {
     const samples = market({ days: 10, perDay: 500, seed: 4 });
-    const { st, proven, added } = runOver(samples, 10, 12);
+    const { st, proven, added } = await runOver(samples, 10, 12);
     // the search did find rules that looked good on past data, and tested them
     expect(added).toBeGreaterThan(5);
     expect(proven).toHaveLength(0);
@@ -145,12 +150,12 @@ describe("the Lab", () => {
     expect(addLabIdea(s, "mig300 tp100 sl30", now)).toMatchObject({ ok: false, error: expect.stringMatching(/At most/) });
   });
 
-  it("drops a proven idea when the coins after its proof clearly fall short, for the autopilot to see", () => {
+  it("drops a proven idea when the coins after its proof clearly fall short, for the autopilot to see", async () => {
     // an edge that is real for four days, then gone
     const early = market({ days: 4, perDay: 500, seed: 6, edge: (x) => x[K("tweet")]! >= 1, lift: 0.35 });
     const late = market({ days: 10, perDay: 500, seed: 7 }).filter((s) => s.ts >= T0 + 4 * DAY);
     const samples = [...early, ...late].sort((a, b) => a.ts - b.ts);
-    const { st, proven } = runOver(samples, 10, 12);
+    const { st, proven } = await runOver(samples, 10, 12);
     expect(proven.length).toBeGreaterThan(0);
     const gone = st.ideas.find((i) => i.provenAt && i.status === "retired" && /stopped working/.test(i.why ?? ""));
     expect(gone).toBeDefined();
@@ -161,9 +166,9 @@ describe("the Lab", () => {
     expect(labSummary(st, { rule: "your rule" })).toMatch(/stopped working/);
   });
 
-  it("keeps the Lab's limits", () => {
+  it("keeps the Lab's limits", async () => {
     const samples = market({ days: 6, perDay: 500, seed: 8 });
-    const { st } = runOver(samples, 6, 6);
+    const { st } = await runOver(samples, 6, 6);
     expect(st.ideas.filter((i) => i.source === "search" && i.status === "testing").length).toBeLessThanOrEqual(LAB.maxActive);
     for (const i of st.ideas) expect(i.conds.length).toBeLessThanOrEqual(2);
   });

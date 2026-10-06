@@ -77,19 +77,17 @@ function makeZip(files: ZipFile[]): Buffer {
   return Buffer.concat([...parts, dirBuf, end]);
 }
 
-const TOP = "kuzesociety-claude-signal-meme-trading-bot-o142hw/";
+const TOP = "signal-main/";
 
 function release(version: string, extra: ZipFile[] = []): Buffer {
   return makeZip([
     { name: TOP },
-    { name: `${TOP}Dockerfile`, data: "FROM node" },
-    { name: `${TOP}signal/` },
-    { name: `${TOP}signal/dist/engine.mjs`, data: `// bot ${version}` },
-    { name: `${TOP}signal/dist/version.json`, data: JSON.stringify({ version }) },
-    { name: `${TOP}signal/package.json`, data: "{}" },
-    { name: `${TOP}signal/start-windows.bat`, data: "@echo off\r\n" },
-    { name: `${TOP}signal/start-mac.command`, data: "#!/bin/bash\n", mode: 0o100755 },
-    { name: `${TOP}signal/docs/SETUP-WINDOWS.md`, data: `guide ${version}` },
+    { name: `${TOP}dist/engine.mjs`, data: `// bot ${version}` },
+    { name: `${TOP}dist/version.json`, data: JSON.stringify({ version }) },
+    { name: `${TOP}package.json`, data: "{}" },
+    { name: `${TOP}start-windows.bat`, data: "@echo off\r\n" },
+    { name: `${TOP}start-mac.command`, data: "#!/bin/bash\n", mode: 0o100755 },
+    { name: `${TOP}docs/SETUP-WINDOWS.md`, data: `guide ${version}` },
     ...extra,
   ]);
 }
@@ -138,10 +136,10 @@ describe("updates from the ZIP download", () => {
     const files = botFiles(
       unzip(
         release("bbbbbbbbbbbb", [
-          { name: `${TOP}signal/data/config.json`, data: "{}" },
-          { name: `${TOP}signal/.env`, data: "X=1" },
-          { name: `${TOP}signal/node_modules/ws/index.js`, data: "" },
-          { name: `${TOP}signal/../evil.txt`, data: "no" },
+          { name: `${TOP}data/config.json`, data: "{}" },
+          { name: `${TOP}.env`, data: "X=1" },
+          { name: `${TOP}node_modules/ws/index.js`, data: "" },
+          { name: `${TOP}../evil.txt`, data: "no" },
         ]),
       ),
     );
@@ -150,12 +148,30 @@ describe("updates from the ZIP download", () => {
     expect(files.get("dist/engine.mjs")!.data.toString()).toBe("// bot bbbbbbbbbbbb");
   });
 
+  it("still reads a download from where the bot lived before, in a signal/ folder next to other projects", () => {
+    const OLD = "kuzesociety-claude-signal-meme-trading-bot-o142hw/";
+    const files = botFiles(
+      unzip(
+        makeZip([
+          { name: OLD },
+          { name: `${OLD}Dockerfile`, data: "FROM node" },
+          { name: `${OLD}metatrader/README.md`, data: "another project" },
+          { name: `${OLD}signal/dist/engine.mjs`, data: "// bot" },
+          { name: `${OLD}signal/dist/version.json`, data: JSON.stringify({ version: "bbbbbbbbbbbb" }) },
+          { name: `${OLD}signal/package.json`, data: "{}" },
+          { name: `${OLD}signal/start-windows.bat`, data: "@echo off\r\n" },
+        ]),
+      ),
+    );
+    expect([...files.keys()].sort()).toEqual(["dist/engine.mjs", "dist/version.json", "package.json", "start-windows.bat"]);
+  });
+
   it("refuses damaged or incomplete downloads", () => {
     expect(() => unzip(Buffer.from("<html>rate limited</html>"))).toThrow(/not a zip/);
     const good = release("bbbbbbbbbbbb");
     expect(() => unzip(good.subarray(0, good.length - 40))).toThrow();
-    expect(() => unzip(makeZip([{ name: `${TOP}signal/dist/engine.mjs`, data: "x", badCrc: true }]))).toThrow(/damaged/);
-    expect(() => botFiles(unzip(makeZip([{ name: `${TOP}signal/dist/engine.mjs`, data: "x" }])))).toThrow(/missing/);
+    expect(() => unzip(makeZip([{ name: `${TOP}dist/engine.mjs`, data: "x", badCrc: true }]))).toThrow(/damaged/);
+    expect(() => botFiles(unzip(makeZip([{ name: `${TOP}dist/engine.mjs`, data: "x" }])))).toThrow(/missing/);
     expect(() => botFiles(unzip(makeZip([{ name: `${TOP}README.md`, data: "x" }])))).toThrow(/does not contain the bot/);
   });
 
@@ -258,12 +274,12 @@ describe("the built bot updates itself", () => {
     writeFileSync(join(dir, "data/config.json"), '{"TELEGRAM_CHAT_ID":"none"}');
     const engine = readFileSync(join(ROOT, "dist/engine.mjs"), "utf8");
     const zip = makeZip([
-      { name: `${TOP}signal/dist/engine.mjs`, data: engine },
-      { name: `${TOP}signal/dist/version.json`, data: JSON.stringify({ version: "cccccccccccc" }) },
-      { name: `${TOP}signal/package.json`, data: readFileSync(join(ROOT, "package.json"), "utf8") },
-      { name: `${TOP}signal/start-windows.bat`, data: readFileSync(join(ROOT, "start-windows.bat"), "utf8") },
-      { name: `${TOP}signal/docs/NEW.md`, data: "new" },
-      { name: `${TOP}signal/data/config.json`, data: "{}" },
+      { name: `${TOP}dist/engine.mjs`, data: engine },
+      { name: `${TOP}dist/version.json`, data: JSON.stringify({ version: "cccccccccccc" }) },
+      { name: `${TOP}package.json`, data: readFileSync(join(ROOT, "package.json"), "utf8") },
+      { name: `${TOP}start-windows.bat`, data: readFileSync(join(ROOT, "start-windows.bat"), "utf8") },
+      { name: `${TOP}docs/NEW.md`, data: "new" },
+      { name: `${TOP}data/config.json`, data: "{}" },
     ]);
     const { base } = await serve({
       "/v": () => ({ status: 200, body: JSON.stringify({ version: "cccccccccccc" }) }),
@@ -319,11 +335,11 @@ describe("the built bot updates itself", () => {
     writeFileSync(join(dir, "data/config.json"), '{"TELEGRAM_CHAT_ID":"none"}');
     const before = readVersion(dir);
     const zip = makeZip([
-      { name: `${TOP}signal/dist/engine.mjs`, data: readFileSync(join(ROOT, "dist/engine.mjs"), "utf8") },
-      { name: `${TOP}signal/dist/version.json`, data: JSON.stringify({ version: "dddddddddddd" }) },
-      { name: `${TOP}signal/package.json`, data: readFileSync(join(ROOT, "package.json"), "utf8") },
-      { name: `${TOP}signal/start-windows.bat`, data: readFileSync(join(ROOT, "start-windows.bat"), "utf8") },
-      { name: `${TOP}signal/docs/NEW.md`, data: "new" },
+      { name: `${TOP}dist/engine.mjs`, data: readFileSync(join(ROOT, "dist/engine.mjs"), "utf8") },
+      { name: `${TOP}dist/version.json`, data: JSON.stringify({ version: "dddddddddddd" }) },
+      { name: `${TOP}package.json`, data: readFileSync(join(ROOT, "package.json"), "utf8") },
+      { name: `${TOP}start-windows.bat`, data: readFileSync(join(ROOT, "start-windows.bat"), "utf8") },
+      { name: `${TOP}docs/NEW.md`, data: "new" },
     ]);
     const { base } = await serve({
       "/v": () => ({ status: 200, body: JSON.stringify({ version: "dddddddddddd" }) }),
