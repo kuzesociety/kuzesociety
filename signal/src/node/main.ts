@@ -1,0 +1,634 @@
+/**
+ * SIGNAL server entry point — runs 24/7 on a VPS, a PC or a container. The dashboard is
+ * only a window into it: closing the browser (or the phone) never stops the bot.
+ */
+import { randomBytes } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { getHeapStatistics } from "node:v8";
+import { Engine } from "../core/engine.js";
+import { priorModel } from "../core/model.js";
+import { ruleSummary } from "../core/presets.js";
+import type { DecodedEvent } from "../core/decode.js";
+import type { MarketEvent } from "../core/types.js";
+import { PUBLIC_RPC_WS, loadConfig, loadDotEnv } from "./config.js";
+import { DexScreenerFeed } from "./feeds/dexscreener.js";
+import { MetadataFetcher } from "./feeds/metadata.js";
+import { PoolResolver } from "./feeds/pools.js";
+import { PumpPortalFeed } from "./feeds/pumpportal.js";
+import { RpcLogsFeed } from "./feeds/rpc.js";
+import { SimFeed } from "./feeds/sim.js";
+import { SolPrice } from "./feeds/solprice.js";
+import { Learner } from "./learner.js";
+import { LiveExecutor } from "./live/executor.js";
+import { ServerLog } from "./log.js";
+import { EventRouter } from "./router.js";
+import { DashboardServer } from "./server.js";
+import { type SetupKey, SetupStore, lanAddress, openBrowser, tailscaleAddress } from "./setup.js";
+import { DataStore, autoDataMaxMb, sampleLimits, sampleScale } from "./store.js";
+import { Telegram } from "./telegram.js";
+import { Updater, findInstallDir, guardStartup, readVersion, takeRollbackNote } from "./update.js";
+import { strategyList } from "../core/presets.js";
+
+declare const __DASHBOARD_HTML__: string | undefined;
+
+function dashboardHtml(): string {
+  if (typeof __DASHBOARD_HTML__ === "string" && __DASHBOARD_HTML__) return __DASHBOARD_HTML__;
+  const here = dirname(fileURLToPath(import.meta.url));
+  for (const p of [join(here, "dashboard.html"), join(here, "../dist/dashboard.html"), join(process.cwd(), "dist/dashboard.html")]) {
+    if (existsSync(p)) return readFileSync(p, "utf8");
+  }
+  return "<!doctype html><title>SIGNAL</title><p>Dashboard not built. Run <code>npm run build</code>.</p>";
+}
+
+/** An update kept stopping after it was installed and the version before was put back: start again, into it. */
+export class RolledBack extends Error {
+  constructor(
+    readonly from: string,
+    readonly to: string | null,
+  ) {
+    super(`Version ${from} kept stopping after it was installed, so the version before${to ? ` (${to})` : ""} was put back.`);
+  }
+}
+
+/** Another SIGNAL already answers on this computer's port. */
+export class AlreadyRunning extends Error {
+  constructor(
+    readonly port: number,
+    readonly dataDir: string,
+  ) {
+    super(`SIGNAL is already running on this computer (port ${port}).`);
+  }
+}
+
+async function answersAsSignal(port: number): Promise<boolean> {
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1_500) });
+    const j = (await r.json()) as { ok?: unknown; app?: unknown; uptime?: unknown };
+    return r.ok && j.ok === true && (j.app === "signal" || typeof j.uptime === "number");
+  } catch {
+    return false;
+  }
+}
+
+const ago = (t: number) => {
+  const m = Math.round((Date.now() - t) / 60_000);
+  return m < 1 ? "just now" : m < 120 ? `${m} min ago` : `${Math.round(m / 60)} h ago`;
+};
+
+export async function main() {
+  loadDotEnv();
+  // values saved from the dashboard (data feed, Telegram, wallet) win over .env and host variables
+  const baseEnv: NodeJS.ProcessEnv = { ...process.env };
+  const setup = new SetupStore(resolve(process.env.DATA_DIR ?? "./data"));
+  setup.applyTo(process.env);
+  const effective = (k: SetupKey) => setup.read()[k] ?? baseEnv[k] ?? "";
+  const config = loadConfig();
+  // one bot per computer: a second copy (say, one started with Windows and minimized, and one
+  // started by hand) would stream everything twice and fight over the same files
+  if (await answersAsSignal(config.port)) throw new AlreadyRunning(config.port, config.dataDir);
+  // after an update: a new version that keeps stopping is put back (update.ts guardStartup)
+  const installDir = findInstallDir(dirname(fileURLToPath(import.meta.url)));
+  const selfUpdate = process.env.SIGNAL_SELF_UPDATE === "1" && process.env.SIGNAL_SUPERVISED === "1";
+  const trial = installDir && selfUpdate ? guardStartup(installDir, config.dataDir) : null;
+  if (trial?.state === "rolledBack") throw new RolledBack(trial.from ?? "?", trial.to ?? null);
+  const log = new ServerLog(config.logLevel);
+  const store = new DataStore(config.dataDir, log);
+
+  let token = config.dashboardToken || store.readSecret() || "";
+  if (!token) {
+    token = randomBytes(18).toString("base64url");
+    store.writeSecret(token);
+  }
+
+  const model = store.loadModel() ?? priorModel(Date.now());
+  let server: DashboardServer | null = null;
+  let learner: Learner | null = null;
+  let telegram: Telegram | null = null;
+  let live: LiveExecutor | null = null;
+  let pumpportal: PumpPortalFeed | null = null;
+  let metadata: MetadataFetcher | null = null;
+  let pools: PoolResolver | null = null;
+  let updater: Updater | null = null;
+
+  const engine = new Engine({
+    now: Date.now(),
+    model,
+    log,
+    config: {
+      paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10,
+      maxWallets: Math.max(5_000, Number(process.env.MAX_WALLETS ?? 80_000) || 80_000),
+      // every resolved sample is on disk; memory only keeps a recent window
+      maxSamplesInMemory: 10_000,
+    },
+    hooks: {
+      persist: (s) => store.saveState(s),
+      journal: (j) => store.journal(j),
+      onSample: (s) => store.sample(s),
+      onSignal: (rec) => server?.broadcast("signal", rec),
+      onSettings: (s, why) => {
+        server?.broadcast("settings", s);
+        learner?.onSettings(s, why);
+      },
+      onModel: (m) => {
+        try {
+          store.saveModel(m);
+        } catch (e) {
+          log.warn("model save failed", { err: String(e) });
+        }
+      },
+      onPosition: (p, what) => {
+        server?.broadcast("position", { position: p, what });
+        telegram?.onPosition(p, what);
+        if (what === "close" && p.mode === "live") live?.notePnl(p.pnl ?? 0, p.closedAt ?? Date.now());
+      },
+      needMeta: (mint, uri) => metadata?.request(mint, uri),
+      needPool: (pool) => pools?.request(pool),
+      watchMint: (mint, on) => pumpportal?.watch(mint, on),
+    },
+  });
+
+  const saved = store.loadState();
+  if (saved) {
+    engine.restore(saved);
+    const s = engine.settings;
+    log.info(
+      `Settings restored from ${config.dataDir} (saved ${ago(saved.savedAt)}): ${ruleSummary(s)} · auto-trading ${s.enabled ? "ON" : "off"} · ${engine.closed.length} closed trades`,
+    );
+  } else {
+    log.warn(`No saved settings in ${config.dataDir} — starting with the defaults. If you set the bot up before, it was in another folder.`);
+  }
+  const wallets = store.loadWallets();
+  if (wallets) engine.wallets.restore(wallets as never);
+
+  if (config.liveTrading && config.walletSecret) {
+    live = new LiveExecutor({
+      walletSecret: config.walletSecret,
+      rpcHttp: config.rpcHttp,
+      maxPositionSol: config.liveMaxPositionSol,
+      maxDailyLossSol: config.liveMaxDailyLossSol,
+      log,
+      engine: () => engine,
+      onAlert: (m) => telegram?.send(m),
+    });
+    engine.executor = live;
+    live.start();
+    // align restored live positions with what the wallet really holds
+    for (const p of [...engine.positions.values()].filter((x) => x.mode === "live")) {
+      live.rpc
+        .tokenBalance(live.wallet?.address ?? "", p.mint)
+        .then((bal) => engine.reconcile(p.id, bal))
+        .catch((e) => log.warn("live reconcile failed", { mint: p.mint, err: String(e) }));
+    }
+  } else if (engine.settings.mode === "live") {
+    log.warn("settings asked for LIVE mode but the server has live trading disabled — switching to paper");
+    engine.updateSettings({ mode: "paper" });
+  }
+
+  // ---- feeds ------------------------------------------------------------------------
+  let rpc: RpcLogsFeed | null = null;
+  const version = readVersion(findInstallDir(dirname(fileURLToPath(import.meta.url))) ?? ".");
+  /** Where market data comes from right now, in plain words. */
+  const dataSource = () => {
+    if (config.feeds.has("sim")) return "simulated market";
+    if (!config.feeds.has("rpc")) return [...config.feeds].join(", ");
+    if (config.streamSource !== "rpc") return "free public Solana feed";
+    return rpc?.health.budget?.onFree
+      ? `free public feed (your key's ${config.streamBudgetMb} MB for today are used)`
+      : `your RPC key (up to ${config.streamBudgetMb} MB a day)`;
+  };
+  const rpcHealthy = () => !!rpc && rpc.health.status === "open" && Date.now() - rpc.health.lastMsgAt < 20_000;
+  const router = new EventRouter((ev) => {
+    engine.ingest(ev as MarketEvent);
+    if (config.record) {
+      try {
+        store.record(ev, ev.ts);
+      } catch (e) {
+        log.error("record failed", { err: String(e) });
+      }
+    }
+  }, rpcHealthy);
+  const onHealth = (h: Parameters<typeof engine.setFeedHealth>[0]) => engine.setFeedHealth(h);
+  const feeds: { stop(): void }[] = [];
+
+  if (config.feeds.has("sim")) {
+    const sim = new SimFeed({ log, speed: config.simSpeed, predictability: config.simPredictability, onEvent: (ev) => router.push(ev as DecodedEvent), onHealth });
+    sim.start();
+    feeds.push(sim);
+  }
+  if (config.feeds.has("rpc")) {
+    const metered = config.streamSource === "rpc";
+    rpc = new RpcLogsFeed({
+      url: config.streamWs,
+      // through a key billed per MB: a daily cap, then the free public feed until 00:00 UTC
+      fallbackUrl: metered ? PUBLIC_RPC_WS : undefined,
+      budgetMb: metered ? config.streamBudgetMb : 0,
+      budgetFile: join(config.dataDir, "stream-usage.json"),
+      onBudgetSpent: (mb) =>
+        telegram?.send(`📉 Today's ${mb} MB of streaming through your RPC key is used. SIGNAL switched to the free public feed until 00:00 UTC, so your key's credits stop here.`),
+      ammFirehose: config.ammFirehose,
+      followPools: () => engine.poolsToFollow(),
+      log,
+      onEvent: (ev) => router.push(ev),
+      onHealth,
+    });
+    rpc.start();
+    feeds.push(rpc);
+    pools = new PoolResolver({ rpcHttp: config.rpcHttp, log, onResolved: (pool, mint) => engine.mapPool(pool, mint) });
+  }
+  if (config.feeds.has("pumpportal")) {
+    pumpportal = new PumpPortalFeed({ apiKey: config.pumpPortalApiKey, critical: !config.feeds.has("rpc"), log, onEvent: (ev) => router.push(ev), onHealth });
+    pumpportal.start();
+    feeds.push(pumpportal);
+  }
+  if (config.feeds.has("dexscreener")) {
+    const dex = new DexScreenerFeed({
+      log,
+      onEvent: (ev) => router.push(ev),
+      onHealth,
+      watchlist: () => {
+        const held = [...engine.positions.values()].map((p) => p.mint);
+        const top = engine.radar({ limit: 40, stage: "amm" }).map((r) => r.mint);
+        return [...held, ...top];
+      },
+    });
+    dex.start();
+    feeds.push(dex);
+  }
+  if (config.metadata && !config.feeds.has("sim")) metadata = new MetadataFetcher({ log, onEvent: (ev) => router.push(ev) });
+  const solPrice = new SolPrice(log, (usd) => (engine.solUsd = usd));
+  if (!config.feeds.has("sim")) solPrice.start();
+  else engine.solUsd = 200;
+
+  // ---- engine clock & housekeeping ------------------------------------------------
+  let lagMs = 0;
+  let lastTick = Date.now();
+  let lastSleepWarn = 0;
+  const clock = setInterval(() => {
+    const now = Date.now();
+    const gap = now - lastTick;
+    lagMs = Math.max(0, gap - 100);
+    if (gap > 60_000 && now - lastSleepWarn > 3_600_000) {
+      // the computer slept (or froze): the market went on without us
+      lastSleepWarn = now;
+      const min = Math.round(gap / 60_000);
+      log.warn(`the computer was asleep for ${min} min — the bot missed that time`);
+      telegram?.send(`😴 The computer running SIGNAL was asleep for ${min} min, so the bot missed that time. Turn sleep off: Windows Settings → System → Power → Sleep → Never.`);
+    }
+    lastTick = now;
+    engine.advance(now);
+  }, 100);
+  let diskMb = store.diskUsageMb();
+  // Storage never fills the disk (DATA_MAX_GB, MIN_FREE_GB; store.enforceBudget)
+  // the limit is a fifth of the disk unless DATA_MAX_GB sets it; learning loads more history where memory allows
+  const limitOf = (r: { usedMb: number; freeMb: number | null }) => (config.dataMaxGb !== null ? config.dataMaxGb * 1000 : autoDataMaxMb(r.usedMb, r.freeMb));
+  const first = store.storageReport();
+  const budget = { maxMb: limitOf(first), minFreeMb: config.minFreeGb * 1000, keepSampleDays: 3 };
+  const learnScale = sampleScale();
+  const describeStorage = () => ({ ...store.storageReport(), maxMb: budget.maxMb, minFreeMb: budget.minFreeMb, auto: config.dataMaxGb === null, learnScale, learnSamples: Object.values(sampleLimits(learnScale)).reduce((a, b) => a + b, 0) });
+  let storage = describeStorage();
+  let prunedNoted = 0;
+  const keepRoom = () => {
+    try {
+      budget.maxMb = limitOf(store.storageReport());
+      const r = store.enforceBudget(budget);
+      storage = describeStorage();
+      diskMb = storage.usedMb;
+      const gb = (mb: number | null) => `${((mb ?? 0) / 1000).toFixed(1)} GB`;
+      if (r.deleted) log.info("storage: deleted old data to stay within budget", { files: r.deleted, freedMb: r.freedMb, samples: r.samplesPruned });
+      if (r.paused) {
+        log.warn("storage: disk nearly full — raw recording paused", { freeMb: storage.freeMb });
+        telegram?.send(`⚠️ The disk is nearly full (${gb(storage.freeMb)} free). Raw market recording is paused — trading and learning go on. Free some space on the disk, or lower DATA_MAX_GB.`);
+      }
+      if (r.resumed) telegram?.send(`✅ The disk has room again (${gb(storage.freeMb)} free): raw market recording resumed.`);
+      if (r.samplesPruned && Date.now() - prunedNoted > 24 * 3_600_000) {
+        prunedNoted = Date.now();
+        telegram?.send(`🧹 Storage: old recorded outcomes were deleted to stay within ${gb(budget.maxMb)} with ${gb(budget.minFreeMb)} of the disk free (the newest 3 days are always kept; learning uses the newest). Raise DATA_MAX_GB to keep more.`);
+      }
+    } catch (e) {
+      log.warn("storage check failed", { err: String(e) });
+    }
+  };
+  const hk = setInterval(() => {
+    try {
+      store.saveWallets(engine.wallets.snapshot());
+    } catch (e) {
+      log.warn("wallet snapshot failed", { err: String(e) });
+    }
+    keepRoom();
+  }, 10 * 60_000);
+  // Memory guard: small cloud instances have 512 MB–1 GB. The wallet book is the one structure
+  // that keeps growing with market activity, so when memory runs short forget the least
+  // recently active wallets (keeping ones with a track record) instead of crashing. Two
+  // limits count: V8's heap limit, and the container's own limit, which V8 may not know about.
+  const heapLimit = getHeapStatistics().heap_size_limit;
+  const boxed = (process as { constrainedMemory?: () => number | undefined }).constrainedMemory?.() ?? 0;
+  const boxLimit = boxed > 0 && boxed < 64e9 ? boxed : 0;
+  const memGuard = setInterval(() => {
+    const { heapUsed, rss } = process.memoryUsage();
+    if (heapUsed < heapLimit * 0.7 && !(boxLimit && rss > boxLimit * 0.8)) return;
+    const before = engine.wallets.size;
+    const dropped = engine.wallets.trim(0.5);
+    log.warn("memory high: trimmed wallet book", { heapMb: Math.round(heapUsed / 1e6), rssMb: Math.round(rss / 1e6), limitMb: Math.round((boxLimit || heapLimit) / 1e6), before, dropped });
+  }, 30_000);
+  const daily = setInterval(() => {
+    store.cleanup(config.recordDays, config.sampleDays);
+    keepRoom();
+    store.backupState();
+  }, 3_600_000);
+  store.cleanup(config.recordDays, config.sampleDays);
+  keepRoom();
+  store.backupState();
+
+  learner = new Learner({
+    store,
+    engine: () => engine,
+    log,
+    everyHours: config.learnEveryHours,
+    sampleDays: config.sampleDays,
+    onAdopt: (m) => telegram?.send(m),
+    onTune: (m) => telegram?.send(m),
+    onEdges: (m) => telegram?.send(m),
+    onDrift: (m) => telegram?.send(m),
+    onAutopilot: (m) => telegram?.send(m),
+    onCheck: (m) => telegram?.send(m),
+    onLab: (m) => telegram?.send(m),
+    storage: () => storage,
+  });
+  learner.start();
+
+  /** (Re)starts Telegram from the current setup; linking a chat needs no restart. */
+  const startTelegram = () => {
+    telegram?.stop();
+    const chat = effective("TELEGRAM_CHAT_ID");
+    telegram = new Telegram({
+      token: effective("TELEGRAM_BOT_TOKEN"),
+      chatId: chat === "none" ? "" : chat,
+      linkCode: setup.read().TELEGRAM_LINK_CODE,
+      onLinked: (id) => {
+        setup.write({ TELEGRAM_CHAT_ID: id, TELEGRAM_LINK_CODE: "" });
+        log.info("telegram chat linked");
+      },
+      about: () => ({ version, update: !!updater?.available, data: dataSource() }),
+      strategies: () => strategyList(learner.lastEdges),
+      edges: () => ({ report: learner.lastEdges, running: learner.edgesRunning }),
+      learning: () => server?.learning() ?? null,
+      autopilot: () => learner?.autopilotView() ?? null,
+      checks: () => learner?.checksView() ?? null,
+      lab: () => learner?.labView() ?? null,
+      labIdea: (text) => learner.addLabIdea(text),
+      links: () => {
+        const out: { label: string; url: string }[] = [];
+        const lanIp = lanAddress();
+        const tail = tailscaleAddress();
+        if (tail) out.push({ label: "Anywhere (Tailscale on)", url: `http://${tail}:${config.port}/?token=${token}` });
+        if (lanIp) out.push({ label: "At home (same Wi-Fi)", url: `http://${lanIp}:${config.port}/?token=${token}` });
+        return out;
+      },
+      update: () => {
+        const st = updater?.status();
+        if (!updater || !st?.can) return st?.why ?? "This bot cannot update itself.";
+        void updater.apply().then((r) => {
+          if (!r.ok) telegram?.send(`⚠️ ${r.error}`);
+          else if (r.upToDate) telegram?.send("✅ SIGNAL is already up to date.");
+          else if (!r.restarting) telegram?.send("✅ Update installed. Close the bot window and start it again to use it.");
+        });
+        return "⬇️ Downloading the update. The bot restarts by itself in about a minute and says hello when it is back.";
+      },
+      log,
+      engine: () => engine,
+    });
+    telegram.start();
+  };
+  startTelegram();
+
+  // what the last update did, said once by the version that runs now
+  const open = () => engine.positions.size;
+  const tell = (html: string) => telegram?.send(html);
+  const back = takeRollbackNote(config.dataDir);
+  if (back) {
+    log.warn(`update put back: version ${back.from} kept stopping, running ${back.to ?? "the version before"} again`);
+    tell(
+      `↩️ <b>Update put back.</b> Version ${back.from.slice(0, 7)} kept stopping after it was installed, so SIGNAL went back to ${back.to ? `version ${back.to.slice(0, 7)}` : "the version before"}. Open trades: ${open()}, still managed. That version is not installed by itself again; the next one is.`,
+    );
+  }
+  if (trial?.state === "trying") {
+    // kept once it has run for 10 minutes; until then, stopping again and again puts the version before back
+    setTimeout(() => trial.confirm(), 10 * 60_000).unref();
+    if (trial.starts === 1) {
+      log.info(`running the update just installed (${trial.to}); the version before is kept until this one has run for 10 minutes`);
+      tell(
+        `${trial.auto ? "🔄 <b>SIGNAL updated itself</b>" : "✅ <b>Update installed</b>"} · v ${String(trial.to).slice(0, 7)}${trial.from ? ` (was ${trial.from.slice(0, 7)})` : ""}. Open trades kept: ${open()}, managed by the new version. If it keeps stopping, the version before is put back by itself.`,
+      );
+    }
+  }
+
+  // Changing the data feed or the wallet restarts the bot (state is saved first). Only done
+  // under a supervisor that starts it again: the Windows/Mac starters, Docker, systemd.
+  let shutdownRef: (code: number) => void = () => {};
+  const restart = () => {
+    if (process.env.SIGNAL_SUPERVISED !== "1") return false;
+    setTimeout(() => shutdownRef(75), 500);
+    return true;
+  };
+
+  // updates for copies installed from the ZIP download (the Windows and Mac starters): by
+  // themselves unless AUTO_UPDATE=0, or with one tap. Open trades stay open across the restart.
+  const autoUpdate = process.env.AUTO_UPDATE !== "0";
+  updater = new Updater({
+    installDir,
+    selfUpdate,
+    log,
+    restart,
+    notedFile: join(config.dataDir, "update-noted"),
+    // the official download unless overridden (tests)
+    zipUrl: process.env.SIGNAL_UPDATE_ZIP_URL || undefined,
+    versionUrl: process.env.SIGNAL_UPDATE_VERSION_URL || undefined,
+    auto: autoUpdate,
+    dataDir: config.dataDir,
+    // never in the middle of placing or selling an order; a learning run gets up to 2 hours to finish
+    ready: (waitedMs) => ![...engine.positions.values()].some((p) => p.status === "opening" || p.status === "closing") && (!learner?.busy || waitedMs > 2 * 3_600_000),
+    onAutoUpdated: (from, to) => log.info("installed an update by itself — restarting into it", { from, to, open: engine.positions.size }),
+    onFailed: (v, why, again) =>
+      telegram?.send(
+        `⚠️ SIGNAL could not install update ${v.slice(0, 7)} by itself: ${why}. It keeps running the version it has${again ? " and tries again at the next check (every 30 min)" : "; that version is not tried again, the next one is"}.`,
+      ),
+    onAvailable: autoUpdate
+      ? undefined
+      : () => telegram?.send("⬆️ <b>A SIGNAL update is ready.</b>\nSend /update to install it, or tap Update in the dashboard (More → Setup). The bot restarts by itself in about a minute."),
+  });
+  updater.start();
+
+  server = new DashboardServer({
+    engine: () => engine,
+    store,
+    config,
+    log,
+    learner,
+    live: () => live,
+    token,
+    setup,
+    effective,
+    restart,
+    updater,
+    reloadTelegram: startTelegram,
+    port: config.port,
+    dashboardHtml,
+    extraHealth: () => ({
+      loopLagMs: lagMs,
+      diskMb,
+      router: { duplicates: router.duplicates, dropped: router.dropped },
+      rpcFeed: rpc ? { decoded: rpc.decoded, truncated: rpc.truncated, failedTx: rpc.failedTx } : null,
+      metadata: metadata ? { fetched: metadata.fetched, failed: metadata.failed } : null,
+      pools: pools ? { resolved: pools.resolved } : null,
+      simulated: config.feeds.has("sim"),
+      dataDir: config.dataDir,
+      update: updater ? { current: updater.current, available: updater.available, can: updater.can, auto: updater.status().auto } : null,
+      storage,
+    }),
+  });
+  await server.listen(config.port, config.host);
+
+  const shown = config.dashboardToken ? "(from DASHBOARD_TOKEN)" : token;
+  const lan = lanAddress();
+  log.info("================================================================");
+  log.info(`SIGNAL running — dashboard on port ${config.port}`);
+  log.info(`On this computer: http://localhost:${config.port}  (no token needed)`);
+  if (lan) log.info(`On your phone at home (same Wi-Fi): http://${lan}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
+  const tailnet = tailscaleAddress();
+  if (tailnet) log.info(`On your phone anywhere (Tailscale): http://${tailnet}:${config.port}/?token=${config.dashboardToken ? "<your DASHBOARD_TOKEN>" : token}`);
+  log.info(`Access token ${shown}`);
+  log.info(`Feeds: ${[...config.feeds].join(", ")} · mode ${engine.settings.mode} · auto-trading ${engine.settings.enabled ? "ON" : "off"}`);
+  if (config.feeds.has("rpc")) {
+    const host = (() => {
+      try {
+        return new URL(config.streamWs).host;
+      } catch {
+        return "invalid address";
+      }
+    })();
+    log.info(
+      `Market data: ${config.streamSource === "rpc" ? `through your RPC key (${host}), up to ${config.streamBudgetMb} MB a day` : `free public Solana feed (${host})`}${config.ammFirehose ? " · every PumpSwap swap" : ""}`,
+    );
+  }
+  if (config.feeds.has("sim")) log.warn("SIMULATION MODE: all coins and prices are synthetic");
+  log.info("================================================================");
+
+  let stopping = false;
+  const shutdown = (code: number) => {
+    if (stopping) return;
+    stopping = true;
+    // set now: once everything is closed Node may exit on its own before the timer below
+    process.exitCode = code;
+    log.info("shutting down — saving state");
+    try {
+      // recordings in progress are kept as far as they were watched, not lost with the process
+      engine.endRecordings();
+    } catch (e) {
+      log.error("could not write the open recordings", { err: String(e) });
+    }
+    try {
+      engine.persistNow();
+      store.saveWallets(engine.wallets.snapshot());
+    } catch (e) {
+      log.error("final save failed", { err: String(e) });
+    }
+    clearInterval(clock);
+    clearInterval(hk);
+    clearInterval(daily);
+    clearInterval(memGuard);
+    for (const f of feeds) f.stop();
+    solPrice.stop();
+    learner.stop();
+    updater?.stop();
+    telegram?.stop();
+    live?.stop();
+    server?.close();
+    store.close();
+    setTimeout(() => process.exit(code), 300).unref();
+  };
+  shutdownRef = shutdown;
+  if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${config.port}/`, config.dataDir);
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
+  // Windows: closing the bot's window sends SIGHUP (a few seconds to save), Ctrl+Break SIGBREAK
+  process.on("SIGHUP", () => shutdown(0));
+  process.on("SIGBREAK", () => shutdown(0));
+  process.on("unhandledRejection", (e) => log.error("unhandled rejection", { err: String(e) }));
+  process.on("uncaughtException", (e) => {
+    log.error("uncaught exception — saving state and restarting", { err: String(e), stack: e.stack });
+    shutdown(1);
+  });
+  return { engine, server, store, shutdown };
+}
+
+/**
+ * `--boot-check`: an update test-starts the new version this way before switching to it
+ * (update.ts bootCheck). It loads what a start loads — the settings, open trades, the score, the
+ * learner's files, the dashboard — and runs the engine for a few steps, but connects to nothing,
+ * serves nothing and writes nothing: the running bot owns the data folder.
+ */
+export async function checkBoot(): Promise<void> {
+  loadDotEnv();
+  new SetupStore(resolve(process.env.DATA_DIR ?? "./data")).applyTo(process.env);
+  const config = loadConfig();
+  const log = new ServerLog("error");
+  const store = new DataStore(config.dataDir, log);
+  try {
+    const now = Date.now();
+    const engine = new Engine({
+      now,
+      model: store.loadModel() ?? priorModel(now),
+      log,
+      config: { paperStartSol: Number(process.env.PAPER_START_SOL ?? 10) || 10, maxSamplesInMemory: 10_000 },
+    });
+    const saved = store.loadState();
+    if (saved) engine.restore(saved);
+    for (let i = 1; i <= 20; i++) engine.advance(now + i * 500);
+    const learner = new Learner({ store, engine: () => engine, log, everyHours: 0, sampleDays: config.sampleDays });
+    learner.load();
+    learner.autopilotView();
+    learner.labView();
+    ruleSummary(engine.settings);
+    strategyList(learner.lastEdges);
+    if (!dashboardHtml().includes("<script")) throw new Error("the dashboard is missing");
+  } finally {
+    store.close();
+  }
+}
+
+const isEntry = (() => {
+  try {
+    return process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+  } catch {
+    return false;
+  }
+})();
+if ((isEntry || process.env.SIGNAL_FORCE_MAIN === "1") && process.argv.includes("--boot-check")) {
+  checkBoot().then(
+    () => process.exit(0),
+    (e) => {
+      console.error("SIGNAL boot check failed:", e);
+      process.exit(1);
+    },
+  );
+} else if (isEntry || process.env.SIGNAL_FORCE_MAIN === "1") {
+  main().catch((e) => {
+    if (e instanceof RolledBack) {
+      console.log(`\n  ${e.message}\n  Starting it again.\n`);
+      // 75: the starter scripts start the bot again at once
+      setTimeout(() => process.exit(75), 300);
+      return;
+    }
+    if (e instanceof AlreadyRunning) {
+      console.log(`\n  ${e.message}\n  Its window may be minimized on the taskbar. Dashboard: http://localhost:${e.port}\n`);
+      if (process.env.SIGNAL_OPEN_BROWSER === "1") openBrowser(`http://localhost:${e.port}/`, e.dataDir);
+      // 74: the starter scripts stop here instead of starting it again
+      setTimeout(() => process.exit(74), 500);
+      return;
+    }
+    console.error("SIGNAL failed to start:", e);
+    process.exit(1);
+  });
+}

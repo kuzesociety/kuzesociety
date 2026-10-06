@@ -1,0 +1,24 @@
+# Render blueprint. Needs a paid instance (Starter) — free web services sleep and would stop the bot.
+services:
+  - type: web
+    name: signal
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    healthCheckPath: /healthz
+    autoDeploy: false
+    disk:
+      name: signal-data
+      mountPath: /data
+      sizeGB: 5
+    envVars:
+      - key: DASHBOARD_TOKEN
+        generateValue: true
+      - key: RPC_URL
+        sync: false
+      - key: RPC_WS_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

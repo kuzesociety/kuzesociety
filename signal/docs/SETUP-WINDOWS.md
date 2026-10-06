@@ -1,0 +1,106 @@
+# Set up SIGNAL on your Windows PC (paper trading, free)
+
+About 15 minutes. You need: a Windows 10/11 PC that stays on, an internet connection, and (optional) Telegram on your phone. Nothing here costs money. Paper trading uses fake money on the real market.
+
+## 1. Install Node.js (once)
+
+1. Open **https://nodejs.org** and click the big **LTS** download button.
+2. Open the downloaded file and click **Next** until **Finish**. Leave every option as it is.
+
+## 2. Download SIGNAL
+
+1. Click this link — the download starts by itself:
+   **https://github.com/kuzesociety/signal/archive/refs/heads/main.zip**
+2. Right-click the downloaded ZIP → **Properties** → tick **Unblock** (if you see it) → **OK**.
+3. Right-click the ZIP → **Extract All…** → **Extract**.
+4. Move the extracted folder (**signal-main**) to `C:\` and rename it **SIGNAL**, so you end up with `C:\SIGNAL`. (Avoid Desktop/Documents if OneDrive syncs them.)
+
+## 3. Start it
+
+1. Open `C:\SIGNAL` and double-click **start-windows.bat**.
+   - If a blue **"Windows protected your PC"** box appears: **More info → Run anyway**.
+   - If Windows asks whether Node.js may use the network: tick **Private networks** → **Allow** (needed for your phone).
+2. A black window opens and stays open — **that is the bot. Leave it open.** Your browser opens the dashboard by itself (or go to **http://localhost:8787**).
+
+## 4. Market data (nothing to do)
+
+Every pump.fun trade comes from the **free public Solana feed** — no key, no account, no cost. **More → Health** shows *solana-rpc* green with the message count going up, and **More → Setup → 1** shows how much internet it uses per day.
+
+**Helius key: optional.** You only need one to send orders when you go live (step 9). A free key is enough:
+
+1. Go to **https://dashboard.helius.dev** and sign up (Google login works). The free plan is chosen by default.
+2. Open **API Keys** and copy your key (it looks like `1a2b3c4d-5e6f-…`).
+3. Dashboard: **More → Setup → 1. Market data → Your RPC key** → paste → **Save key**. The bot tests it and restarts by itself.
+
+The trade stream stays on the free feed even with a key saved. Streaming every trade through a key is billed per MB and used up a free Helius plan in about five hours. If the free feed ever keeps dropping, Setup lets you stream through your key with a daily cap (after the cap, it switches back to the free feed until 00:00 UTC).
+
+## 5. Telegram alerts (optional, recommended)
+
+1. In Telegram, open **@BotFather** → send `/newbot` → pick any name → pick a username ending in `bot`.
+2. Copy the token BotFather sends (looks like `123456789:AAH…`).
+3. Dashboard: **More → Setup → 2. Telegram** → paste → **Connect**. A 6-digit code appears.
+4. Open your new bot in Telegram and send it that code. The Setup step turns green and the bot says **Linked**.
+
+From then on you get a message for every buy and sell, and you can run the bot from your phone, anywhere:
+
+| Send | What it does |
+|---|---|
+| `/status` | trading or paused, your rule, today's result, market data, version |
+| `/strategy` | lists the strategies; `/strategy 2` switches the whole rule at once |
+| `/edges` | has the bot found an edge? The edge finder's latest answer (it checks every 2 hours once it has a day of data) |
+| `/pause` · `/resume` | auto-trading off / on |
+| `/score 75` `/tp 100` `/sl 50` `/hold 10` | change one part of the rule (saved at once) |
+| `/update` | installs the newest version now (it also does so by itself); the bot says hello with the new version number when it is back |
+| `/link` | the dashboard link for your phone |
+| `/kill` | stop entries and sell everything |
+
+## 6. Start paper trading
+
+1. Dashboard → **Bot** tab → **Strategy** → **Use this** on the rule you want:
+   - **Your plan** — buy at score 75, sell at 2× or −50%.
+   - **Simulator finding: fast momentum** — buy at 95, sell at +500% or −20%, or after 10 minutes. Unproven on the real market; paper-testing it is exactly how you find out.
+   - **Found in your data** — appears after a day or more, when the edge finder proves a rule on data it never saw.
+2. Switch **Auto-trading** on at the top of the Bot tab. It trades with fake money (10 SOL to start).
+3. Leave it running for days. Check **Learn** (go-live check, edge finder) and **Trades**.
+
+## 7. Keep it running 24/7
+
+- **No sleep:** Windows **Settings → System → Power** (Windows 10: *Power & sleep*) → *When plugged in, put my device to sleep after* → **Never**. The screen may turn off; the PC must not sleep. If it does, Telegram tells you how long the bot was asleep.
+- **Start with Windows:** double-click **autostart-windows.bat** once. After a restart (for example Windows Update), sign in and the bot starts by itself. Run it again to undo.
+- **The dashboard on your phone, anywhere (free):** install [Tailscale](https://tailscale.com/download) on the PC (sign in with Google), then the Tailscale app on your phone with the same account. **More → Setup → 4** and Telegram's `/link` then give a link that opens the full dashboard from anywhere — add it to your home screen. Without Tailscale the link works on your home Wi-Fi only; Telegram works everywhere either way.
+- **Stop:** close the black window. **Start:** double-click `start-windows.bat` again. Everything is saved in `C:\SIGNAL\data`.
+
+## 8. Updates (by themselves)
+
+The bot checks for a new version every 30 minutes and installs it on its own: never in the middle of buying or selling, it test-starts the new version first, then restarts into it in a few seconds. Your keys, settings, history and **open trades** are kept — the new version picks the open trades up and manages their exits. Telegram tells you each time (**🔄 SIGNAL updated itself**). If a new version does not start, or keeps stopping, the bot goes back to the version before by itself and tells you.
+
+To install right away: **More → Setup → Update now**, or send `/update` from your phone. To update only when you say so, add the line `AUTO_UPDATE=0` to the `.env` file in `C:\SIGNAL` and restart the bot.
+
+**Installed before the Update button existed?** Update by hand once:
+
+1. Close the black SIGNAL window.
+2. Download the ZIP again (same link as step 2) → right-click → **Extract All…** → **Extract**.
+3. Open the extracted folder (**signal-main**). Press **Ctrl+A** (select all), then **Ctrl+C** (copy).
+4. Open `C:\SIGNAL`, press **Ctrl+V** (paste) → **Replace the files in the destination**. Your `data` folder (keys, settings, history) is not in the download, so it stays as it is.
+5. Double-click **start-windows.bat**.
+
+## 9. Going live later (a few clicks, when the evidence says so)
+
+Only when **Learn → go-live check** is green for your strategy:
+
+1. Save your free Helius key if you have not yet (step 4): orders are sent through it.
+2. In **Phantom**: add a **new account** used only by the bot, and send it only what you can afford to lose.
+3. Phantom → **Settings → Manage accounts →** that account → **Show private key** → copy.
+4. On the PC running the bot (for safety this does not work from your phone): **More → Setup → 5. Go live** → paste the key → set **Max SOL per trade** (e.g. 0.05) and **Stop for the day after losing** (e.g. 0.25) → type `I understand the risk` → **Allow live trading**. The bot restarts.
+5. **Bot → Mode → Live.** Done. To go back: **Mode → Paper**, or **Setup → Turn live off**.
+
+The key is saved only in `C:\SIGNAL\data\config.json` on your PC and is never shown again. The two limits cannot be raised from the Bot tab.
+
+## If something is wrong
+
+- **The black window closes immediately:** Node.js is not installed — do step 1, then start again.
+- **Settings you changed are back to the old values:** on the **Bot** tab, changes apply only after **Save** — the bar at the bottom says so until you press it. Strategies (**Use this**) and Telegram commands apply at once.
+- **"SIGNAL is already running in another window":** the bot started with Windows is already on (maybe minimized on the taskbar). Only one runs at a time; close the extra window.
+- **Red bar "Live data feed is down":** the bar says why. *Refused the key* (only when streaming through your key) → paste your Helius key again in **More → Setup**. *Limiting requests* on the free feed → it retries by itself; if it keeps happening, Setup lets you stream through your own key with a daily cap. Anything else is usually the internet connection: the bot reconnects by itself. Right after starting, "Connecting to the live market data…" for a few seconds is normal.
+- **No trades after hours:** Bot tab → *Why no trades?* lists exactly what blocked each signal.
+- **Dashboard won't open:** make sure the black window is open, then go to http://localhost:8787.
